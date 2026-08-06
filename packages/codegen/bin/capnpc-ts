@@ -1,0 +1,12 @@
+#!/usr/bin/env bun
+/**
+ * Cap'n Proto schema compiler plugin (TypeScript).
+ *
+ *   capnp compile -o./packages/codegen/bin/capnpc-ts schema.capnp
+ *
+ * Reads a framed CodeGeneratorRequest from stdin (or a file argument) and
+ * writes stub .ts modules into the process working directory.
+ */
+import { main } from "../src/plugin.ts";
+
+await main(process.argv.slice(2));
