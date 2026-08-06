@@ -13,6 +13,9 @@ import {
   ElemSize,
   Message,
   PtrKind,
+  listGetStruct,
+  listGetText,
+  listGetU32,
   storeU32,
   storeU64,
   storeU8,
@@ -56,14 +59,14 @@ describe("list upgrade views (prim/pointer -> struct field @0)", () => {
     expect(list.esize).toBe(ElemSize.FourBytes);
     expect(list.listLen()).toBe(2);
 
-    const el1 = list.listGetStruct(1);
+    const el1 = listGetStruct(list, 1);
     expect(el1.kind).toBe(PtrKind.Struct);
     expect(el1.dataBits).toBe(32);
     expect(el1.getU32(0)).toBe(200);
     // Wider than element width -> default, never neighbour (100)
     expect(el1.getU64(0, 5n)).toBe(5n);
 
-    const el0 = list.listGetStruct(0);
+    const el0 = listGetStruct(list, 0);
     expect(el0.getU32(0)).toBe(100);
     expect(el0.getU16(0)).toBe(100); // LE low half
   });
@@ -179,10 +182,10 @@ describe("list downgrade views (composite -> prim/Text field @0)", () => {
     expect(list.dwords).toBe(1);
     expect(list.pwords).toBe(1);
 
-    expect(list.listGetU32(1)).toBe(1001);
-    expect(list.listGetU32(0)).toBe(1000);
+    expect(listGetU32(list, 1)).toBe(1001);
+    expect(listGetU32(list, 0)).toBe(1000);
 
-    const el0 = list.listGetStruct(0);
+    const el0 = listGetStruct(list, 0);
     expect(el0.kind).toBe(PtrKind.Struct);
     expect(el0.getU32(0)).toBe(1000);
 
@@ -190,7 +193,7 @@ describe("list downgrade views (composite -> prim/Text field @0)", () => {
     expect(q.kind).toBe(PtrKind.List);
     expect(q.esize).toBe(ElemSize.Byte);
 
-    expect(list.listGetText(0)).toBe("hello");
-    expect(list.listGetText(1)).toBe("hello");
+    expect(listGetText(list, 0)).toBe("hello");
+    expect(listGetText(list, 1)).toBe("hello");
   });
 });

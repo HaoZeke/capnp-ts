@@ -9,6 +9,7 @@ export * from "./kinds.ts";
 export * from "./endian.ts";
 export * from "./pointer.ts";
 export * from "./message.ts";
+export * from "./list-evolution.ts";
 export * from "./serialize.ts";
 export * from "./packed.ts";
 export * from "./canonical.ts";
