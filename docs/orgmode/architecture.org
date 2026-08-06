@@ -1,0 +1,55 @@
+#+title: capnp-ts architecture
+#+options: toc:2 num:t
+
+* Layers
+
+#+begin_example
+  kinds -> endian -> pointer -> arena/message
+                                      |
+                +---------------------+---------------------+
+                |                     |                     |
+             serialize             packed              canonical
+          (stream frame)        (pack/unpack)      (preorder single-seg)
+                                      |
+                                 capnpc-ts (codegen)
+#+end_example
+
+=kinds= holds constants, traversal/depth defaults, and errors. =endian= is LE
+scalar load/store (=bigint= for 64-bit). =pointer= is pure bit ops on 64-bit
+words (encoding.html). =message= owns segments and far resolution.
+=packed= / =canonical= sit on framed bytes, not on schema types.
+=capnpc-ts= is a =capnp compile -o= plugin that reads =CodeGeneratorRequest=
+with hand schema readers over this runtime (no generated TS bootstrap).
+
+* Bootstrap
+
+1. Runtime decodes CGR (stdin frame or offline fixture).
+2. Two-pass emit (collect types/defaults, then write modules).
+3. Generated ESM: const-map enums (no TS =enum=), typed get/set, unions.
+4. =schema/u64probe.capnp= CI smoke: Int64/UInt64 must use full u64 paths.
+
+* Packed 0xff
+
+Pack output targets byte-identity with Cap'n C++ 1.4.0
+=PackedOutputStream= / =capnp convert binary:packed=. After tag =0xff=,
+following words with fewer than two zero bytes stay in the verbatim run
+(zero or one zero). Zero-free-only heuristics unpack correctly but diverge
+on AddressBook (="ple.com\\0"= after ="bob@exam"=).
+
+* Security
+
+Defensive defaults: 8 Mi word traversal limit, depth 64, segment caps,
+=CapnpError= on bounds/framing/pack failures. Not a trust-the-peer model.
+
+* Non-goals (v1)
+
+- RPC (separate package later; L3/4 unimplemented)
+- libcapnp / node-capnp FFI
+- Cap'n Web
+- Undocumented builder alloc order as a byte-identity claim
+
+* Family
+
+Wire-first peer of HaoZeke =capnp-fortran=, =capnp-janet=, and
+=c-capnproto=. CLI goldens under =packages/runtime/test/golden/= are the
+primary oracle until live twin interop lands.
