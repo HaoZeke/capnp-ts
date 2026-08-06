@@ -5,36 +5,43 @@ export const DEFAULT_TRAVERSAL_WORDS = 8 * 1024 * 1024; // 8 Mi words
 export const DEFAULT_DEPTH_LIMIT = 64;
 export const MAX_SEGMENTS = 512;
 
-/** Wire pointer kinds (bits 0-1). */
-export const enum WireKind {
-  Struct = 0,
-  List = 1,
-  Far = 2,
-  Cap = 3,
-}
+/**
+ * Wire pointer kinds (bits 0-1).
+ * Const objects (not `const enum`) so Bun strip / isolatedModules preserve values.
+ */
+export const WireKind = {
+  Struct: 0,
+  List: 1,
+  Far: 2,
+  Cap: 3,
+} as const;
+export type WireKind = (typeof WireKind)[keyof typeof WireKind];
 
 /** Resolved pointer kinds (after far resolution). */
-export const enum PtrKind {
-  Null = 0,
-  Struct = 1,
-  List = 2,
-  Cap = 3,
-}
+export const PtrKind = {
+  Null: 0,
+  Struct: 1,
+  List: 2,
+  Cap: 3,
+} as const;
+export type PtrKind = (typeof PtrKind)[keyof typeof PtrKind];
 
 /** List element size codes (bits 32-34 of a list pointer). */
-export const enum ElemSize {
-  Void = 0,
-  Bit = 1,
-  Byte = 2,
-  TwoBytes = 3,
-  FourBytes = 4,
-  EightBytes = 5,
-  Pointer = 6,
-  Composite = 7,
-}
+export const ElemSize = {
+  Void: 0,
+  Bit: 1,
+  Byte: 2,
+  TwoBytes: 3,
+  FourBytes: 4,
+  EightBytes: 5,
+  Pointer: 6,
+  Composite: 7,
+} as const;
+export type ElemSize = (typeof ElemSize)[keyof typeof ElemSize];
 
 /** Alias used by some call sites. */
 export const ElementSize = ElemSize;
+export type ElementSize = ElemSize;
 
 /** Bits per list element for primitive esize codes; -1 if composite/unknown. */
 export function listStepBits(esize: number): number {

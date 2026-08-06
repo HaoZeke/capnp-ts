@@ -7,20 +7,20 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
       "bun": "./src/index.ts",
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
     "./packed": {
-      "types": "./dist/packed.d.ts",
       "bun": "./src/packed.ts",
+      "types": "./dist/packed.d.ts",
       "import": "./dist/packed.js",
       "default": "./dist/packed.js"
     },
     "./canonical": {
-      "types": "./dist/canonical.d.ts",
       "bun": "./src/canonical.ts",
+      "types": "./dist/canonical.d.ts",
       "import": "./dist/canonical.js",
       "default": "./dist/canonical.js"
     },
