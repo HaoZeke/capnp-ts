@@ -1,0 +1,14 @@
+[workspace]
+name = "capnp-ts"
+version = "0.1.0-dev"
+description = "Pure TypeScript Cap'n Proto (HaoZeke family)"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+capnproto = "1.4.*"
+nodejs = ">=20"
+
+[tasks]
+fixtures = "bash scripts/gen-sample-fixtures.sh"
+test = "bun test packages/runtime"

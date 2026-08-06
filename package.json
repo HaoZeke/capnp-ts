@@ -1,0 +1,14 @@
+{
+  "name": "capnp-ts-workspace",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "test": "bun test packages/runtime",
+    "build": "bun run --filter @haozeke/capnp build && bun run --filter @haozeke/capnpc-ts build",
+    "fixtures": "bash scripts/gen-sample-fixtures.sh"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2",
+    "@types/bun": "latest"
+  }
+}
