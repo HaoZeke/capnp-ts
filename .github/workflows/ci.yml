@@ -26,17 +26,19 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # Install before tests: live capnp compile paths use test.skipIf(!hasCapnp).
+      # Critical codegen suites use offline CGR fixtures and must not soft-pass.
+      - name: Install capnproto (tests + fixture regen + codegen smoke)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y capnproto
+          capnp --version
+
       - name: Test
         run: bun test
 
       - name: Typecheck packages
         run: bun run build
-
-      - name: Install capnproto (fixture regen + codegen smoke)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y capnproto
-          capnp --version
 
       - name: Fixture regen smoke
         run: |
