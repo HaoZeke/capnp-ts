@@ -1,31 +1,21 @@
 /**
- * Cap'n Proto packing codec (byte-identical to Cap'n C++ PackedOutputStream).
- *
- * After a full tag 0xff, following words with fewer than two zero bytes
- * (zero or one zero) are emitted verbatim with a run-length count.
- * Zero-tag words are followed by a count of additional zero words.
- *
- * Input to pack must be a multiple of 8 bytes (whole words).
+ * Cap'n Proto packed encoding (encoding.html).
+ * Encoder matches Cap'n C++ PackedOutputStream: after tag 0xff, following
+ * words with fewer than two zero bytes stay in the verbatim run.
  */
 
-function wordAllZero(src: Uint8Array, off: number): boolean {
-  return (
-    src[off] === 0 &&
-    src[off + 1] === 0 &&
-    src[off + 2] === 0 &&
-    src[off + 3] === 0 &&
-    src[off + 4] === 0 &&
-    src[off + 5] === 0 &&
-    src[off + 6] === 0 &&
-    src[off + 7] === 0
-  );
+import { CapnpError, WORD_BYTES } from "./kinds.ts";
+
+function wordAllZero(w: Uint8Array, off: number): boolean {
+  for (let i = 0; i < 8; i++) if (w[off + i] !== 0) return false;
+  return true;
 }
 
-/** True when the word has 0 or 1 zero bytes (C++ uncompressed-run heuristic). */
-function wordFewerThanTwoZeros(src: Uint8Array, off: number): boolean {
+/** C++ heuristic: zero or one zero byte (not two or more). */
+function wordFewerThanTwoZeros(w: Uint8Array, off: number): boolean {
   let z = 0;
-  for (let k = 0; k < 8; k++) {
-    if (src[off + k] === 0) {
+  for (let i = 0; i < 8; i++) {
+    if (w[off + i] === 0) {
       z++;
       if (z >= 2) return false;
     }
@@ -33,134 +23,81 @@ function wordFewerThanTwoZeros(src: Uint8Array, off: number): boolean {
   return true;
 }
 
-/**
- * Pack Cap'n Proto message words into the packed wire format.
- * @param input Unpacked bytes; length must be a multiple of 8.
- */
 export function pack(input: Uint8Array): Uint8Array {
-  if (input.length % 8 !== 0) {
-    throw new Error(
-      `capnp pack: input length ${input.length} is not a multiple of 8`,
-    );
+  if (input.length % WORD_BYTES !== 0) {
+    throw new CapnpError("ARG", "pack input length must be multiple of 8");
   }
-
-  const nwords = input.length / 8;
-  // Worst case ~10 bytes/word (tag + 8 payload + optional run count).
-  const out = new Uint8Array(nwords === 0 ? 0 : nwords * 10 + 8 * 256);
-  let opos = 0;
+  const nwords = input.length / WORD_BYTES;
+  const out: number[] = [];
   let w = 0;
-
   while (w < nwords) {
-    const base = w * 8;
+    const base = w * WORD_BYTES;
     let tag = 0;
     let nz = 0;
     for (let k = 0; k < 8; k++) {
-      const b = input[base + k]!;
-      if (b !== 0) {
+      if (input[base + k] !== 0) {
         tag |= 1 << k;
         nz++;
       }
     }
-    out[opos++] = tag;
+    out.push(tag);
     for (let k = 0; k < 8; k++) {
-      if (tag & (1 << k)) {
-        out[opos++] = input[base + k]!;
-      }
+      if (tag & (1 << k)) out.push(input[base + k]!);
     }
     w++;
-
     if (tag === 0) {
       let run = 0;
-      while (w + run < nwords && run < 255 && wordAllZero(input, (w + run) * 8)) {
+      while (w + run < nwords && run < 255 && wordAllZero(input, (w + run) * WORD_BYTES)) {
         run++;
       }
-      out[opos++] = run;
+      out.push(run);
       w += run;
     } else if (nz === 8) {
-      // C++ heuristic: words with 0 or 1 zero byte, up to 255.
       let run = 0;
       while (
         w + run < nwords &&
         run < 255 &&
-        wordFewerThanTwoZeros(input, (w + run) * 8)
+        wordFewerThanTwoZeros(input, (w + run) * WORD_BYTES)
       ) {
         run++;
       }
-      out[opos++] = run;
-      if (run > 0) {
-        out.set(input.subarray(w * 8, (w + run) * 8), opos);
-        opos += run * 8;
-        w += run;
+      out.push(run);
+      for (let r = 0; r < run; r++) {
+        const o = (w + r) * WORD_BYTES;
+        for (let k = 0; k < 8; k++) out.push(input[o + k]!);
       }
+      w += run;
     }
   }
-
-  return out.subarray(0, opos);
+  return Uint8Array.from(out);
 }
 
-/**
- * Unpack Cap'n Proto packed wire data into message words.
- */
 export function unpack(input: Uint8Array): Uint8Array {
-  // Packed is usually smaller; grow as needed.
-  let cap = Math.max(input.length * 4 + 64, 64);
-  let buf = new Uint8Array(cap);
+  const out: number[] = [];
   let ipos = 0;
-  let opos = 0;
-
-  const ensure = (need: number): void => {
-    if (opos + need <= cap) return;
-    let ncap = cap * 2 + 8 * 256;
-    while (ncap < opos + need) ncap *= 2;
-    const nb = new Uint8Array(ncap);
-    nb.set(buf.subarray(0, opos));
-    buf = nb;
-    cap = ncap;
-  };
-
   while (ipos < input.length) {
-    ensure(8 + 255 * 8);
     const tag = input[ipos++]!;
     for (let k = 0; k < 8; k++) {
       if (tag & (1 << k)) {
-        if (ipos >= input.length) {
-          throw new Error("capnp unpack: truncated packed data (payload byte)");
-        }
-        buf[opos + k] = input[ipos++]!;
+        if (ipos >= input.length) throw new CapnpError("PACKED", "truncated tag payload");
+        out.push(input[ipos++]!);
       } else {
-        buf[opos + k] = 0;
+        out.push(0);
       }
     }
-    opos += 8;
-
     if (tag === 0) {
-      if (ipos >= input.length) {
-        throw new Error("capnp unpack: truncated packed data (zero run count)");
-      }
+      if (ipos >= input.length) throw new CapnpError("PACKED", "truncated zero run");
       const cnt = input[ipos++]!;
-      ensure(cnt * 8);
-      // Already zero-filled by new Uint8Array / growth path.
-      opos += cnt * 8;
+      for (let i = 0; i < cnt; i++) {
+        for (let k = 0; k < 8; k++) out.push(0);
+      }
     } else if (tag === 0xff) {
-      if (ipos >= input.length) {
-        throw new Error("capnp unpack: truncated packed data (ff run count)");
-      }
+      if (ipos >= input.length) throw new CapnpError("PACKED", "truncated verbatim count");
       const cnt = input[ipos++]!;
-      if (ipos + cnt * 8 > input.length) {
-        throw new Error("capnp unpack: truncated packed data (ff run body)");
-      }
-      ensure(cnt * 8);
-      if (cnt > 0) {
-        buf.set(input.subarray(ipos, ipos + cnt * 8), opos);
-        ipos += cnt * 8;
-        opos += cnt * 8;
-      }
+      const need = cnt * 8;
+      if (ipos + need > input.length) throw new CapnpError("PACKED", "truncated verbatim run");
+      for (let i = 0; i < need; i++) out.push(input[ipos++]!);
     }
   }
-
-  if (opos % 8 !== 0) {
-    throw new Error("capnp unpack: output length is not a multiple of 8");
-  }
-
-  return buf.subarray(0, opos);
+  return Uint8Array.from(out);
 }

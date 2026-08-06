@@ -1,142 +1,116 @@
 /**
- * Little-endian scalar load/store via DataView.
- *
- * All multi-byte wire access goes through these helpers so the library never
- * depends on host endianness or TypedArray multi-byte views over wire bytes.
- * Offsets are byte offsets into the given buffer.
+ * Little-endian scalar load/store for Cap'n wire words.
+ * All multi-byte access goes through these so host endianness never leaks.
  */
 
-function viewOf(buf: ArrayBuffer | ArrayBufferView): DataView {
-  if (buf instanceof ArrayBuffer) {
-    return new DataView(buf);
-  }
-  return new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+export function loadU8(buf: Uint8Array, off: number): number {
+  return buf[off]!;
 }
 
-// --- unsigned ---
-
-export function loadU8(buf: ArrayBuffer | ArrayBufferView, offset: number): number {
-  return viewOf(buf).getUint8(offset);
+export function storeU8(buf: Uint8Array, off: number, v: number): void {
+  buf[off] = v & 0xff;
 }
 
-export function storeU8(
-  buf: ArrayBuffer | ArrayBufferView,
-  offset: number,
-  value: number,
-): void {
-  viewOf(buf).setUint8(offset, value);
+export function loadU16(buf: Uint8Array, off: number): number {
+  return buf[off]! | (buf[off + 1]! << 8);
 }
 
-export function loadU16(buf: ArrayBuffer | ArrayBufferView, offset: number): number {
-  return viewOf(buf).getUint16(offset, true);
+export function storeU16(buf: Uint8Array, off: number, v: number): void {
+  buf[off] = v & 0xff;
+  buf[off + 1] = (v >>> 8) & 0xff;
 }
 
-export function storeU16(
-  buf: ArrayBuffer | ArrayBufferView,
-  offset: number,
-  value: number,
-): void {
-  viewOf(buf).setUint16(offset, value, true);
+export function loadU32(buf: Uint8Array, off: number): number {
+  return (
+    (buf[off]! |
+      (buf[off + 1]! << 8) |
+      (buf[off + 2]! << 16) |
+      (buf[off + 3]! << 24)) >>>
+    0
+  );
 }
 
-export function loadU32(buf: ArrayBuffer | ArrayBufferView, offset: number): number {
-  return viewOf(buf).getUint32(offset, true);
+export function storeU32(buf: Uint8Array, off: number, v: number): void {
+  buf[off] = v & 0xff;
+  buf[off + 1] = (v >>> 8) & 0xff;
+  buf[off + 2] = (v >>> 16) & 0xff;
+  buf[off + 3] = (v >>> 24) & 0xff;
 }
 
-export function storeU32(
-  buf: ArrayBuffer | ArrayBufferView,
-  offset: number,
-  value: number,
-): void {
-  viewOf(buf).setUint32(offset, value, true);
+/** Unsigned 64-bit; returns bigint in 0n .. 2^64-1. */
+export function loadU64(buf: Uint8Array, off: number): bigint {
+  const lo = loadU32(buf, off);
+  const hi = loadU32(buf, off + 4);
+  return BigInt(lo) | (BigInt(hi) << 32n);
 }
 
-/** Unsigned 64-bit; returns bigint in the range 0n .. 2^64-1. */
-export function loadU64(buf: ArrayBuffer | ArrayBufferView, offset: number): bigint {
-  return viewOf(buf).getBigUint64(offset, true);
+export function storeU64(buf: Uint8Array, off: number, v: bigint): void {
+  storeU32(buf, off, Number(v & 0xffff_ffffn));
+  storeU32(buf, off + 4, Number((v >> 32n) & 0xffff_ffffn));
 }
 
-export function storeU64(
-  buf: ArrayBuffer | ArrayBufferView,
-  offset: number,
-  value: bigint,
-): void {
-  viewOf(buf).setBigUint64(offset, value, true);
+export function loadI8(buf: Uint8Array, off: number): number {
+  const u = loadU8(buf, off);
+  return u > 0x7f ? u - 0x100 : u;
 }
 
-// --- signed ---
-
-export function loadI8(buf: ArrayBuffer | ArrayBufferView, offset: number): number {
-  return viewOf(buf).getInt8(offset);
+export function storeI8(buf: Uint8Array, off: number, v: number): void {
+  storeU8(buf, off, v);
 }
 
-export function storeI8(
-  buf: ArrayBuffer | ArrayBufferView,
-  offset: number,
-  value: number,
-): void {
-  viewOf(buf).setInt8(offset, value);
+export function loadI16(buf: Uint8Array, off: number): number {
+  const u = loadU16(buf, off);
+  return u > 0x7fff ? u - 0x1_0000 : u;
 }
 
-export function loadI16(buf: ArrayBuffer | ArrayBufferView, offset: number): number {
-  return viewOf(buf).getInt16(offset, true);
+export function storeI16(buf: Uint8Array, off: number, v: number): void {
+  storeU16(buf, off, v);
 }
 
-export function storeI16(
-  buf: ArrayBuffer | ArrayBufferView,
-  offset: number,
-  value: number,
-): void {
-  viewOf(buf).setInt16(offset, value, true);
+export function loadI32(buf: Uint8Array, off: number): number {
+  return (
+    buf[off]! |
+    (buf[off + 1]! << 8) |
+    (buf[off + 2]! << 16) |
+    (buf[off + 3]! << 24)
+  );
 }
 
-export function loadI32(buf: ArrayBuffer | ArrayBufferView, offset: number): number {
-  return viewOf(buf).getInt32(offset, true);
+export function storeI32(buf: Uint8Array, off: number, v: number): void {
+  storeU32(buf, off, v);
 }
 
-export function storeI32(
-  buf: ArrayBuffer | ArrayBufferView,
-  offset: number,
-  value: number,
-): void {
-  viewOf(buf).setInt32(offset, value, true);
+export function loadI64(buf: Uint8Array, off: number): bigint {
+  const u = loadU64(buf, off);
+  // Sign-extend via BigInt64 view of the same bits.
+  const tmp = new BigUint64Array([u]);
+  return new BigInt64Array(tmp.buffer)[0]!;
 }
 
-/** Signed 64-bit as bigint. */
-export function loadI64(buf: ArrayBuffer | ArrayBufferView, offset: number): bigint {
-  return viewOf(buf).getBigInt64(offset, true);
+export function storeI64(buf: Uint8Array, off: number, v: bigint): void {
+  storeU64(buf, off, BigInt.asUintN(64, v));
 }
 
-export function storeI64(
-  buf: ArrayBuffer | ArrayBufferView,
-  offset: number,
-  value: bigint,
-): void {
-  viewOf(buf).setBigInt64(offset, value, true);
+export function loadF32(buf: Uint8Array, off: number): number {
+  const bits = loadU32(buf, off);
+  const u = new Uint32Array([bits]);
+  return new Float32Array(u.buffer)[0]!;
 }
 
-// --- floating point ---
-
-export function loadF32(buf: ArrayBuffer | ArrayBufferView, offset: number): number {
-  return viewOf(buf).getFloat32(offset, true);
+export function storeF32(buf: Uint8Array, off: number, v: number): void {
+  const f = new Float32Array([v]);
+  const u = new Uint32Array(f.buffer);
+  storeU32(buf, off, u[0]!);
 }
 
-export function storeF32(
-  buf: ArrayBuffer | ArrayBufferView,
-  offset: number,
-  value: number,
-): void {
-  viewOf(buf).setFloat32(offset, value, true);
+export function loadF64(buf: Uint8Array, off: number): number {
+  const bits = loadU64(buf, off);
+  const u = new BigUint64Array([bits]);
+  return new Float64Array(u.buffer)[0]!;
 }
 
-export function loadF64(buf: ArrayBuffer | ArrayBufferView, offset: number): number {
-  return viewOf(buf).getFloat64(offset, true);
-}
-
-export function storeF64(
-  buf: ArrayBuffer | ArrayBufferView,
-  offset: number,
-  value: number,
-): void {
-  viewOf(buf).setFloat64(offset, value, true);
+export function storeF64(buf: Uint8Array, off: number, v: number): void {
+  const f = new Float64Array([v]);
+  const u = new BigUint64Array(f.buffer);
+  storeU64(buf, off, u[0]!);
 }
