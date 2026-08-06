@@ -3,16 +3,39 @@
   "version": "0.1.0-dev",
   "description": "Pure TypeScript Cap'n Proto wire runtime (HaoZeke family)",
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./packed": "./src/packed.ts",
-    "./canonical": "./src/canonical.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "bun": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./packed": {
+      "types": "./dist/packed.d.ts",
+      "bun": "./src/packed.ts",
+      "import": "./dist/packed.js",
+      "default": "./dist/packed.js"
+    },
+    "./canonical": {
+      "types": "./dist/canonical.d.ts",
+      "bun": "./src/canonical.ts",
+      "import": "./dist/canonical.js",
+      "default": "./dist/canonical.js"
+    },
+    "./package.json": "./package.json"
   },
   "scripts": {
     "test": "bun test",
-    "build": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsup",
+    "prepublishOnly": "tsup"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0"
   },
   "license": "MIT",
-  "files": ["src", "LICENSE", "README.md"]
+  "sideEffects": false,
+  "files": ["src", "dist", "LICENSE", "README.md"]
 }
