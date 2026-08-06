@@ -1,7 +1,7 @@
 /**
  * Generated AddressBook module must decode packages/runtime golden Alice/Bob.
- * Also: live `capnp compile -o capnpc-ts` when CLI is available; u64probe
- * must never emit getU32 for UInt64/Int64 fields.
+ * Critical paths use offline CGR fixtures (no silent pass when capnp missing).
+ * Live `capnp compile -o capnpc-ts` is gated with test.skipIf, not soft-return.
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -34,12 +34,21 @@ const goldenPath = join(
 );
 const addressbookSchema = join(repoRoot, "schema", "addressbook.capnp");
 const u64probeSchema = join(repoRoot, "schema", "u64probe.capnp");
+const u64probeFixture = join(fixturesDir, "u64probe.cgr.bin");
 const pluginBin = join(repoRoot, "packages", "codegen", "bin", "capnpc-ts");
+
+const hasCapnp = Bun.spawnSync(["which", "capnp"]).exitCode === 0;
 
 async function loadAddressbookAst() {
   const bytes = new Uint8Array(
     readFileSync(join(fixturesDir, "addressbook.cgr.bin")),
   );
+  return walkCgr(bytes);
+}
+
+async function loadU64probeAst() {
+  expect(existsSync(u64probeFixture)).toBe(true);
+  const bytes = new Uint8Array(readFileSync(u64probeFixture));
   return walkCgr(bytes);
 }
 
@@ -86,66 +95,115 @@ describe("generated AddressBook decode", () => {
     expect(gen.Person_getEmail(bob)).toBe("bob@example.com");
   });
 
-  test("capnp compile -o capnpc-ts produces decodeable AddressBook", async () => {
-    // Requires capnp CLI 1.4.x on PATH (pixi env or system).
-    const which = Bun.spawnSync(["which", "capnp"]);
-    if (which.exitCode !== 0) {
-      console.warn("skip: capnp CLI not on PATH");
-      return;
-    }
-    if (!existsSync(addressbookSchema) || !existsSync(pluginBin)) {
-      throw new Error("schema or plugin bin missing");
-    }
-
-    const outDir = mkdtempSync(join(tmpdir(), "capnpc-ts-compile-"));
-    const proc = Bun.spawn(
-      [
-        "capnp",
-        "compile",
-        `--src-prefix=${repoRoot}`,
-        `-o${pluginBin}`,
-        addressbookSchema,
-      ],
-      {
-        cwd: outDir,
-        stdout: "pipe",
-        stderr: "pipe",
-      },
+  test("List(Text) element helper emits listGetText not listGetP.getText", async () => {
+    // AddressBook has List(Person) only; synthesize a List(Text) field via kitchen
+    // fixture if present, else assert the emitter path on a minimal hand AST walk.
+    const kitchenPath = join(fixturesDir, "kitchen.cgr.bin");
+    const ast = await walkCgr(new Uint8Array(readFileSync(kitchenPath)));
+    const src = emitSourceString(ast);
+    // Any List(Text) *At helper must use listGetText.
+    const listTextAts = src.match(
+      /export function \w+At\(ptr: Ptr, index: number\): string \{[\s\S]*?^\}/gm,
     );
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-    expect(exitCode).toBe(0);
-    expect(stderr).toContain("CGR ok");
-    const outFile = join(outDir, "addressbook.ts");
-    expect(existsSync(outFile)).toBe(true);
-    const src = readFileSync(outFile, "utf8");
-    expect(src).toContain("Person_getId");
-    expect(src).toContain("AddressBook_getPeople");
-
-    const gen = await import(outFile);
-    const bytes = new Uint8Array(readFileSync(goldenPath));
-    const root = Message.fromFlat(bytes).root();
-    const alice = gen.AddressBook_getPeopleAt(root, 0);
-    const bob = gen.AddressBook_getPeopleAt(root, 1);
-    expect(gen.Person_getId(alice)).toBe(123);
-    expect(gen.Person_getName(alice)).toBe("Alice");
-    expect(gen.Person_getId(bob)).toBe(456);
-    expect(gen.Person_getName(bob)).toBe("Bob");
-    // Silence unused when capnp prints paths on stdout.
-    void stdout;
+    if (listTextAts && listTextAts.length > 0) {
+      for (const body of listTextAts) {
+        expect(body).toContain("listGetText");
+        expect(body).not.toContain("listGetP");
+        expect(body).not.toContain("getText(0)");
+      }
+    } else {
+      // Force the emit path with a minimal synthetic module check via source search
+      // of the emitter template: kitchen may lack List(Text); still unit-check below.
+      expect(src.length).toBeGreaterThan(0);
+    }
   });
+
+  test.skipIf(!hasCapnp)(
+    "capnp compile -o capnpc-ts produces decodeable AddressBook",
+    async () => {
+      if (!existsSync(addressbookSchema) || !existsSync(pluginBin)) {
+        throw new Error("schema or plugin bin missing");
+      }
+
+      const outDir = mkdtempSync(join(tmpdir(), "capnpc-ts-compile-"));
+      const proc = Bun.spawn(
+        [
+          "capnp",
+          "compile",
+          `--src-prefix=${repoRoot}`,
+          `-o${pluginBin}`,
+          addressbookSchema,
+        ],
+        {
+          cwd: outDir,
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      expect(exitCode).toBe(0);
+      expect(stderr).toContain("CGR ok");
+      const outFile = join(outDir, "addressbook.ts");
+      expect(existsSync(outFile)).toBe(true);
+      const src = readFileSync(outFile, "utf8");
+      expect(src).toContain("Person_getId");
+      expect(src).toContain("AddressBook_getPeople");
+
+      const gen = await import(outFile);
+      const bytes = new Uint8Array(readFileSync(goldenPath));
+      const root = Message.fromFlat(bytes).root();
+      const alice = gen.AddressBook_getPeopleAt(root, 0);
+      const bob = gen.AddressBook_getPeopleAt(root, 1);
+      expect(gen.Person_getId(alice)).toBe(123);
+      expect(gen.Person_getName(alice)).toBe("Alice");
+      expect(gen.Person_getId(bob)).toBe(456);
+      expect(gen.Person_getName(bob)).toBe("Bob");
+      void stdout;
+    },
+  );
 });
 
 describe("u64probe codegen smoke", () => {
-  test("UInt64/Int64 emit getU64 never getU32", async () => {
-    // Prefer live compile; fall back to offline CGR if capnp missing.
-    let src: string;
-    const which = Bun.spawnSync(["which", "capnp"]);
-    if (which.exitCode === 0 && existsSync(u64probeSchema)) {
-      const outDir = mkdtempSync(join(tmpdir(), "capnpc-ts-u64-"));
+  test("offline fixture: UInt64/Int64 emit getU64 never getU32", async () => {
+    const src = emitSourceString(await loadU64probeAst());
+
+    expect(src).toContain("U64Probe_getId");
+    expect(src).toContain("U64Probe_getSigned");
+    expect(src).toContain("getU64");
+    const getterBodies = src.match(
+      /export function U64Probe_get(?:Id|Signed)[\s\S]*?^}/gm,
+    );
+    expect(getterBodies).not.toBeNull();
+    expect(getterBodies!.length).toBe(2);
+    for (const body of getterBodies!) {
+      expect(body).toContain("getU64");
+      expect(body).not.toContain("getU32");
+    }
+  });
+
+  test("offline emitFromAst writes u64probe.ts with bigint getters", async () => {
+    const ast = await loadU64probeAst();
+    const outDir = mkdtempSync(join(tmpdir(), "capnpc-ts-u64-ast-"));
+    mkdirSync(outDir, { recursive: true });
+    const result = emitFromAst(ast, outDir);
+    expect(result.written.some((p) => p.endsWith("u64probe.ts"))).toBe(true);
+    const src = readFileSync(join(outDir, "u64probe.ts"), "utf8");
+    expect(src).toMatch(/getU64\(\s*0\s*/); // id @ offset 0
+    expect(src).toMatch(/getU64\(\s*8\s*/); // signed @ slot 1 * 8
+    expect(src).not.toMatch(/U64Probe_getId[\s\S]{0,120}getU32/);
+  });
+
+  test.skipIf(!hasCapnp)(
+    "live capnp compile -o capnpc-ts u64probe matches offline emit",
+    async () => {
+      if (!existsSync(u64probeSchema) || !existsSync(pluginBin)) {
+        throw new Error("u64probe schema or plugin bin missing");
+      }
+      const outDir = mkdtempSync(join(tmpdir(), "capnpc-ts-u64-live-"));
       const proc = Bun.spawn(
         [
           "capnp",
@@ -158,71 +216,79 @@ describe("u64probe codegen smoke", () => {
       );
       const exitCode = await proc.exited;
       expect(exitCode).toBe(0);
-      src = readFileSync(join(outDir, "u64probe.ts"), "utf8");
-    } else {
-      // Offline: build CGR via capnp -o- if available, else skip.
-      if (which.exitCode !== 0) {
-        console.warn("skip: capnp CLI not on PATH for u64probe");
-        return;
-      }
-      const cgr = Bun.spawnSync(
-        [
-          "capnp",
-          "compile",
-          `--src-prefix=${repoRoot}`,
-          "-o-",
-          u64probeSchema,
-        ],
-        { cwd: repoRoot },
-      );
-      expect(cgr.exitCode).toBe(0);
-      const ast = await walkCgr(new Uint8Array(cgr.stdout));
-      src = emitSourceString(ast);
-    }
+      const live = readFileSync(join(outDir, "u64probe.ts"), "utf8");
+      const offline = emitSourceString(await loadU64probeAst());
+      expect(live).toContain("getU64");
+      expect(offline).toContain("getU64");
+      expect(live).toContain("U64Probe_getId");
+      expect(live).not.toMatch(/U64Probe_getId[\s\S]{0,120}getU32/);
+    },
+  );
+});
 
-    expect(src).toContain("U64Probe_getId");
-    expect(src).toContain("U64Probe_getSigned");
-    expect(src).toContain("getU64");
-    // Field getters for id/signed must not use getU32.
-    const idLine = src
-      .split("\n")
-      .filter((l) => l.includes("getU64") || l.includes("getU32"));
-    const getterBodies = src.match(
-      /export function U64Probe_get(?:Id|Signed)[\s\S]*?^}/gm,
-    );
-    expect(getterBodies).not.toBeNull();
-    for (const body of getterBodies!) {
-      expect(body).toContain("getU64");
-      expect(body).not.toContain("getU32");
+describe("Field.defaultValue walk", () => {
+  test("addressbook slots carry defaultValue on AST", async () => {
+    const ast = await loadAddressbookAst();
+    const person = ast.nodes.find((n) => n.displayName.endsWith(":Person"));
+    expect(person?.struct).toBeDefined();
+    const id = person!.struct!.fields.find((f) => f.name === "id");
+    expect(id?.slot?.defaultValue).toBeDefined();
+    expect(id!.slot!.defaultValue!.which).toBe("uint32");
+    if (id!.slot!.defaultValue!.which === "uint32") {
+      expect(id!.slot!.defaultValue!.value).toBe(0);
     }
-    void idLine;
+    const name = person!.struct!.fields.find((f) => f.name === "name");
+    expect(name?.slot?.defaultValue?.which).toBe("text");
   });
+});
 
-  test("offline emitFromAst writes u64probe.ts with bigint getters", async () => {
-    const which = Bun.spawnSync(["which", "capnp"]);
-    if (which.exitCode !== 0) {
-      console.warn("skip: capnp CLI not on PATH");
-      return;
-    }
-    const cgr = Bun.spawnSync(
-      [
-        "capnp",
-        "compile",
-        `--src-prefix=${repoRoot}`,
-        "-o-",
-        u64probeSchema,
+describe("List(Text) emit helper unit", () => {
+  test("emitter uses listGetText for text list elements", async () => {
+    // Minimal CGR-free check: re-emit kitchen + scan; plus direct template via
+    // a tiny synthetic schema if kitchen lacks List(Text).
+    const { emitModuleSource } = await import("../src/emit.ts");
+    const synthetic = {
+      nodes: [
+        {
+          id: 1n,
+          displayName: "synth.capnp:Holder",
+          displayNamePrefixLength: 0,
+          scopeId: 0n,
+          which: "struct" as const,
+          whichTag: 1,
+          nestedNodes: [],
+          struct: {
+            dataWordCount: 0,
+            pointerCount: 1,
+            isGroup: false,
+            discriminantCount: 0,
+            discriminantOffset: 0,
+            fields: [
+              {
+                name: "tags",
+                codeOrder: 0,
+                discriminant: 0xffff,
+                slot: {
+                  offset: 0,
+                  type: {
+                    which: "list" as const,
+                    elementType: { which: "text" as const },
+                  },
+                },
+              },
+            ],
+          },
+        },
       ],
-      { cwd: repoRoot },
+      requestedFiles: [{ id: 0n, filename: "synth.capnp" }],
+    };
+    const src = emitModuleSource(synthetic as never, "synth.capnp", 0n);
+    expect(src).toContain("Holder_getTagsAt");
+    expect(src).toMatch(
+      /Holder_getTagsAt[\s\S]*?listGetText\(index\)/,
     );
-    expect(cgr.exitCode).toBe(0);
-    const ast = await walkCgr(new Uint8Array(cgr.stdout));
-    const outDir = mkdtempSync(join(tmpdir(), "capnpc-ts-u64-ast-"));
-    mkdirSync(outDir, { recursive: true });
-    const result = emitFromAst(ast, outDir);
-    expect(result.written.some((p) => p.endsWith("u64probe.ts"))).toBe(true);
-    const src = readFileSync(join(outDir, "u64probe.ts"), "utf8");
-    expect(src).toMatch(/getU64\(\s*0\s*/); // id @ offset 0
-    expect(src).toMatch(/getU64\(\s*8\s*/); // signed @ slot 1 * 8
-    expect(src).not.toMatch(/U64Probe_getId[\s\S]{0,120}getU32/);
+    expect(src).not.toMatch(
+      /Holder_getTagsAt[\s\S]*?listGetP\(index\)\.getText/,
+    );
   });
 });

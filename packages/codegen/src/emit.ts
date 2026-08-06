@@ -252,13 +252,15 @@ function emitFieldGetter(
             ``,
           );
         } else if (elem.which === "text") {
+          // listGetText handles List(Text) pointer elements and composite
+          // downgrade (list evolution); never listGetP(i).getText(0).
           lines.push(
             `export function ${fn}Len(ptr: Ptr): number {`,
             `  return ptr.getP(${off}).listLen();`,
             `}`,
             ``,
             `export function ${fn}At(ptr: Ptr, index: number): string {`,
-            `  return ptr.getP(${off}).listGetP(index).getText(0);`,
+            `  return ptr.getP(${off}).listGetText(index);`,
             `}`,
             ``,
           );

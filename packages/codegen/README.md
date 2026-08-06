@@ -66,6 +66,10 @@ export function Person_getName(ptr: Ptr): string {
 export function AddressBook_getPeopleAt(ptr: Ptr, index: number): Ptr {
   return ptr.getP(0).listGetP(index);
 }
+// List(Text) element helpers use listGetText (not listGetP(i).getText(0)):
+// export function Holder_getTagsAt(ptr: Ptr, index: number): string {
+//   return ptr.getP(0).listGetText(index);
+// }
 export const Person_PhoneNumber_Type = {
   mobile: 0,
   home: 1,
@@ -75,6 +79,9 @@ export function Person_employment_which(ptr: Ptr): number {
   return ptr.getU16(4);
 }
 ```
+
+Generated modules take a type-only import from `@haozeke/capnp` (workspace
+link in this monorepo; published consumers need `@haozeke/capnp` installed).
 
 `--src-prefix` is required when the schema path is absolute or outside the
 current directory. Relative schemas under the monorepo root work with
@@ -121,9 +128,10 @@ $ capnp compile --src-prefix=. \
 | `nodes` / `requestedFiles` summary on stderr | **yes** |
 | Typed struct getters + layout constants | **yes** |
 | Enum const maps (no TS `enum`) / unions / `which` | **yes** |
-| List element helpers (`*At` / `*Len`) | **yes** (struct lists) |
+| List element helpers (`*At` / `*Len`) | **yes** (struct via `listGetP`; Text via `listGetText`) |
+| CGR walk of `Field.defaultValue` | **yes** (AST only; not yet emitted into getters) |
 | u64probe `bigint` field paths | **yes** |
-| Non-zero schema-default XOR / full setters | **no** (M6) |
+| Non-zero schema-default XOR / full setters in emit | **no** (M6; getters still use `dflt = 0`) |
 
 ## Package scripts
 

@@ -17,10 +17,13 @@
  *
  * Field: 3 data words, 4 ptrs
  *   codeOrder u16 @0; discriminantValue u16 @2 (default 0xffff, wire XOR);
- *   which u16 @8 (slot=0/group=1); slot.offset u32 @4; slot.type ptr2; group.typeId u64 @16
- *   name Text ptr0
+ *   which u16 @8 (slot=0/group=1); slot.offset u32 @4; group.typeId u64 @16
+ *   name Text ptr0; annotations ptr1; slot.type ptr2; slot.defaultValue ptr3
+ *   slot.hadExplicitDefault :Bool bit 80 (data)
  *
  * Type: which u16 @0; list.elementType ptr0; enum/struct/interface typeId u64 @8
+ *
+ * Value: which u16 @0; scalar payload in data / text-data at ptr0 (schema.capnp)
  *
  * RequestedFile: 1 data word (id u64), 2+ pointers
  *   ptr0 filename : Text
@@ -151,6 +154,36 @@ export type TypeAst =
   | { which: "struct"; typeId: bigint }
   | { which: "interface"; typeId: bigint };
 
+/**
+ * Decoded schema.capnp Value (scalar + text/data only for v1 walk).
+ * Pointer/list/struct/anyPointer defaults are recorded as `{ which }` without payload.
+ */
+export type ValueAst =
+  | { which: "void" }
+  | { which: "bool"; value: boolean }
+  | {
+      which:
+        | "int8"
+        | "int16"
+        | "int32"
+        | "uint8"
+        | "uint16"
+        | "uint32"
+        | "enum";
+      value: number;
+    }
+  | { which: "int64" | "uint64"; value: bigint }
+  | { which: "float32" | "float64"; value: number }
+  | { which: "text"; value: string }
+  | { which: "data"; value: Uint8Array }
+  | {
+      which:
+        | "list"
+        | "struct"
+        | "interface"
+        | "anyPointer";
+    };
+
 /** One struct field (slot or group). */
 export type FieldAst = {
   name: string;
@@ -162,6 +195,10 @@ export type FieldAst = {
     /** Offset in units of the field's own size (bits for Bool, ptr slots for pointers). */
     offset: number;
     type: TypeAst;
+    /** schema.capnp Field.slot.defaultValue (always present on wire; often zero). */
+    defaultValue?: ValueAst;
+    /** Field.slot.hadExplicitDefault (@10). */
+    hadExplicitDefault?: boolean;
   };
   /** Present when field.which == group. */
   group?: {
@@ -332,6 +369,60 @@ function decodeType(t: Ptr): TypeAst {
   return { which };
 }
 
+/**
+ * Decode schema.capnp Value for Field.slot.defaultValue.
+ * Layout mirrors Type tags; scalar payload lives in the data section / ptr0.
+ */
+function decodeValue(v: Ptr): ValueAst {
+  if (v.kind !== PtrKind.Struct) {
+    return { which: "void" };
+  }
+  const tag = v.getU16(0);
+  // Value which tags match Type for void..anyPointer (schema.capnp).
+  switch (tag) {
+    case TYPE_VOID:
+      return { which: "void" };
+    case TYPE_BOOL:
+      return { which: "bool", value: v.getBool(16) };
+    case TYPE_INT8:
+      return { which: "int8", value: (v.getU8(2) << 24) >> 24 };
+    case TYPE_INT16:
+      return { which: "int16", value: (v.getU16(2) << 16) >> 16 };
+    case TYPE_INT32:
+      return { which: "int32", value: v.getU32(4) | 0 };
+    case TYPE_INT64:
+      return { which: "int64", value: v.getU64(8) };
+    case TYPE_UINT8:
+      return { which: "uint8", value: v.getU8(2) };
+    case TYPE_UINT16:
+      return { which: "uint16", value: v.getU16(2) };
+    case TYPE_UINT32:
+      return { which: "uint32", value: v.getU32(4) >>> 0 };
+    case TYPE_UINT64:
+      return { which: "uint64", value: v.getU64(8) };
+    case TYPE_FLOAT32:
+      return { which: "float32", value: v.getU32(4) >>> 0 };
+    case TYPE_FLOAT64:
+      return { which: "float64", value: v.getF64(8) };
+    case TYPE_TEXT:
+      return { which: "text", value: v.getText(0) };
+    case TYPE_DATA:
+      return { which: "data", value: v.getData(0) };
+    case TYPE_ENUM:
+      return { which: "enum", value: v.getU16(2) };
+    case TYPE_LIST:
+      return { which: "list" };
+    case TYPE_STRUCT:
+      return { which: "struct" };
+    case TYPE_INTERFACE:
+      return { which: "interface" };
+    case TYPE_ANY_POINTER:
+      return { which: "anyPointer" };
+    default:
+      return { which: "void" };
+  }
+}
+
 function decodeField(f: Ptr): FieldAst {
   const name = f.kind === PtrKind.Struct ? f.getText(0) : "";
   const codeOrder = f.getU16(0);
@@ -346,7 +437,7 @@ function decodeField(f: Ptr): FieldAst {
       group: { typeId: f.getU64(16) },
     };
   }
-  // slot (default)
+  // slot (default). type = ptr2, defaultValue = ptr3; hadExplicitDefault @ bit 80.
   return {
     name,
     codeOrder,
@@ -354,6 +445,8 @@ function decodeField(f: Ptr): FieldAst {
     slot: {
       offset: f.getU32(4) >>> 0,
       type: decodeType(f.getp(2)),
+      defaultValue: decodeValue(f.getp(3)),
+      hadExplicitDefault: f.getBool(80),
     },
   };
 }
