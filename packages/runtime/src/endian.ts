@@ -1,67 +1,142 @@
-/** Little-endian scalar load/store via DataView (wire is always LE). */
+/**
+ * Little-endian scalar load/store via DataView.
+ *
+ * All multi-byte wire access goes through these helpers so the library never
+ * depends on host endianness or TypedArray multi-byte views over wire bytes.
+ * Offsets are byte offsets into the given buffer.
+ */
 
-const TE = true; // littleEndian
-
-export function loadU8(buf: Uint8Array, byteOff: number): number {
-  return buf[byteOff]!;
+function viewOf(buf: ArrayBuffer | ArrayBufferView): DataView {
+  if (buf instanceof ArrayBuffer) {
+    return new DataView(buf);
+  }
+  return new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
 }
 
-export function loadU16(buf: Uint8Array, byteOff: number): number {
-  return new DataView(buf.buffer, buf.byteOffset + byteOff, 2).getUint16(0, TE);
+// --- unsigned ---
+
+export function loadU8(buf: ArrayBuffer | ArrayBufferView, offset: number): number {
+  return viewOf(buf).getUint8(offset);
 }
 
-export function loadU32(buf: Uint8Array, byteOff: number): number {
-  return new DataView(buf.buffer, buf.byteOffset + byteOff, 4).getUint32(0, TE);
+export function storeU8(
+  buf: ArrayBuffer | ArrayBufferView,
+  offset: number,
+  value: number,
+): void {
+  viewOf(buf).setUint8(offset, value);
 }
 
-export function loadI32(buf: Uint8Array, byteOff: number): number {
-  return new DataView(buf.buffer, buf.byteOffset + byteOff, 4).getInt32(0, TE);
+export function loadU16(buf: ArrayBuffer | ArrayBufferView, offset: number): number {
+  return viewOf(buf).getUint16(offset, true);
 }
 
-export function loadU64(buf: Uint8Array, byteOff: number): bigint {
-  return new DataView(buf.buffer, buf.byteOffset + byteOff, 8).getBigUint64(0, TE);
+export function storeU16(
+  buf: ArrayBuffer | ArrayBufferView,
+  offset: number,
+  value: number,
+): void {
+  viewOf(buf).setUint16(offset, value, true);
 }
 
-export function loadI64(buf: Uint8Array, byteOff: number): bigint {
-  return new DataView(buf.buffer, buf.byteOffset + byteOff, 8).getBigInt64(0, TE);
+export function loadU32(buf: ArrayBuffer | ArrayBufferView, offset: number): number {
+  return viewOf(buf).getUint32(offset, true);
 }
 
-export function loadF32(buf: Uint8Array, byteOff: number): number {
-  return new DataView(buf.buffer, buf.byteOffset + byteOff, 4).getFloat32(0, TE);
+export function storeU32(
+  buf: ArrayBuffer | ArrayBufferView,
+  offset: number,
+  value: number,
+): void {
+  viewOf(buf).setUint32(offset, value, true);
 }
 
-export function loadF64(buf: Uint8Array, byteOff: number): number {
-  return new DataView(buf.buffer, buf.byteOffset + byteOff, 8).getFloat64(0, TE);
+/** Unsigned 64-bit; returns bigint in the range 0n .. 2^64-1. */
+export function loadU64(buf: ArrayBuffer | ArrayBufferView, offset: number): bigint {
+  return viewOf(buf).getBigUint64(offset, true);
 }
 
-export function storeU8(buf: Uint8Array, byteOff: number, v: number): void {
-  buf[byteOff] = v & 0xff;
+export function storeU64(
+  buf: ArrayBuffer | ArrayBufferView,
+  offset: number,
+  value: bigint,
+): void {
+  viewOf(buf).setBigUint64(offset, value, true);
 }
 
-export function storeU16(buf: Uint8Array, byteOff: number, v: number): void {
-  new DataView(buf.buffer, buf.byteOffset + byteOff, 2).setUint16(0, v, TE);
+// --- signed ---
+
+export function loadI8(buf: ArrayBuffer | ArrayBufferView, offset: number): number {
+  return viewOf(buf).getInt8(offset);
 }
 
-export function storeU32(buf: Uint8Array, byteOff: number, v: number): void {
-  new DataView(buf.buffer, buf.byteOffset + byteOff, 4).setUint32(0, v >>> 0, TE);
+export function storeI8(
+  buf: ArrayBuffer | ArrayBufferView,
+  offset: number,
+  value: number,
+): void {
+  viewOf(buf).setInt8(offset, value);
 }
 
-export function storeI32(buf: Uint8Array, byteOff: number, v: number): void {
-  new DataView(buf.buffer, buf.byteOffset + byteOff, 4).setInt32(0, v | 0, TE);
+export function loadI16(buf: ArrayBuffer | ArrayBufferView, offset: number): number {
+  return viewOf(buf).getInt16(offset, true);
 }
 
-export function storeU64(buf: Uint8Array, byteOff: number, v: bigint): void {
-  new DataView(buf.buffer, buf.byteOffset + byteOff, 8).setBigUint64(0, v, TE);
+export function storeI16(
+  buf: ArrayBuffer | ArrayBufferView,
+  offset: number,
+  value: number,
+): void {
+  viewOf(buf).setInt16(offset, value, true);
 }
 
-export function storeI64(buf: Uint8Array, byteOff: number, v: bigint): void {
-  new DataView(buf.buffer, buf.byteOffset + byteOff, 8).setBigInt64(0, v, TE);
+export function loadI32(buf: ArrayBuffer | ArrayBufferView, offset: number): number {
+  return viewOf(buf).getInt32(offset, true);
 }
 
-export function storeF32(buf: Uint8Array, byteOff: number, v: number): void {
-  new DataView(buf.buffer, buf.byteOffset + byteOff, 4).setFloat32(0, v, TE);
+export function storeI32(
+  buf: ArrayBuffer | ArrayBufferView,
+  offset: number,
+  value: number,
+): void {
+  viewOf(buf).setInt32(offset, value, true);
 }
 
-export function storeF64(buf: Uint8Array, byteOff: number, v: number): void {
-  new DataView(buf.buffer, buf.byteOffset + byteOff, 8).setFloat64(0, v, TE);
+/** Signed 64-bit as bigint. */
+export function loadI64(buf: ArrayBuffer | ArrayBufferView, offset: number): bigint {
+  return viewOf(buf).getBigInt64(offset, true);
+}
+
+export function storeI64(
+  buf: ArrayBuffer | ArrayBufferView,
+  offset: number,
+  value: bigint,
+): void {
+  viewOf(buf).setBigInt64(offset, value, true);
+}
+
+// --- floating point ---
+
+export function loadF32(buf: ArrayBuffer | ArrayBufferView, offset: number): number {
+  return viewOf(buf).getFloat32(offset, true);
+}
+
+export function storeF32(
+  buf: ArrayBuffer | ArrayBufferView,
+  offset: number,
+  value: number,
+): void {
+  viewOf(buf).setFloat32(offset, value, true);
+}
+
+export function loadF64(buf: ArrayBuffer | ArrayBufferView, offset: number): number {
+  return viewOf(buf).getFloat64(offset, true);
+}
+
+export function storeF64(
+  buf: ArrayBuffer | ArrayBufferView,
+  offset: number,
+  value: number,
+): void {
+  viewOf(buf).setFloat64(offset, value, true);
 }
