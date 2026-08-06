@@ -9,12 +9,15 @@ zero-copy segment views, defensive traversal limits, and CLI golden parity
 where claimed.
 
 **Status:** early (`0.1.0-dev`). Runtime ships a message reader, stream
-framing, multi-segment builder, packed codec, canonical form, and list
-upgrade/downgrade views. Packed and canonical match Cap'n C++ 1.4.0
-AddressBook goldens byte-for-byte. `capnpc-ts` walks a framed
-`CodeGeneratorRequest` and emits typed ESM (structs, const-map enums,
-unions/`which`, UInt64 via `getU64`/`bigint`). RPC is a later package, not a
-v1 gate.
+framing, multi-segment builder, packed codec, canonical form, orphans,
+deep-copy, and list upgrade/downgrade views. Packed and canonical match
+Cap'n C++ 1.4.0 AddressBook goldens **byte-for-byte** (see
+[`packages/runtime/test/golden/`](packages/runtime/test/golden/):
+`addressbook.bin` 288 B → `addressbook.packed.bin` 151 B,
+`addressbook.canonical.bin` 272 B; proven by `packed.test.ts` and
+`canonical.test.ts`). `capnpc-ts` walks a framed `CodeGeneratorRequest` and
+emits typed ESM (structs, const-map enums, unions/`which`, UInt64 via
+`getU64`/`bigint`). RPC is a later package, not a v1 gate.
 
 npm packages:
 
@@ -40,13 +43,18 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
 - Multi-segment `MessageBuilder` arena with far / double-far pointer paths
 - Same-message orphan `disown` / `adopt`; cross-message `deepCopyPtr` / `structSetP`
 - Scalar get/set with schema-default XOR (codegen passes field defaults)
-- Packed codec (`pack` / `unpack`) byte-identical to Cap'n C++ 1.4.0 on AddressBook
+- Packed codec (`pack` / `unpack`) byte-identical to Cap'n C++ 1.4.0 on
+  AddressBook (`pack(addressbook.bin) == addressbook.packed.bin`, 151 B)
 - Canonical form (`canonicalize` / `canonicalizeFlat`) byte-identical to
   `capnp convert binary:canonical` on AddressBook
+  (`canonicalizeFlat(addressbook.bin) == addressbook.canonical.bin`, 272 B)
 - Traversal word budget (8 Mi words) and nesting depth limit (64), C++ defaults
-- AddressBook sample schema and CLI goldens under `packages/runtime/test/golden/`
+- CLI goldens under `packages/runtime/test/golden/`: AddressBook encode /
+  packed / canonical plus calculator Expression samples
+  (`calculator_add_2_3.bin`, `calculator_mul_add.bin`, `calculator_value_5.bin`)
 - `capnpc-ts` plugin: framed CGR on stdin/file, typed `.ts` per requested schema
-  (layout constants, getters, const-map enums, union `which`, u64probe-safe)
+  (layout constants, getters, const-map enums, union `which`, u64probe-safe
+  `getU64`/`bigint`); AddressBook decode integration test
 
 Not yet shipped: full list-evolution matrix, non-zero default XOR in codegen
 setters, dynamic reflection, RPC.
@@ -72,8 +80,10 @@ present. Do not treat this table as a green checklist for unbuilt work.
 
 The serialization bar is Cap'n C++ 1.4.0 (`capnp encode` /
 `convert binary:packed` / `binary:canonical`) plus the same AddressBook and
-calculator Expression samples used by fortran/janet. Live twin vs
-c-capnproto is Phase 2 interop, not a v1 claim.
+calculator Expression samples used by fortran/janet. Goldens are regenerated
+by `scripts/gen-sample-fixtures.sh` / `bun run fixtures` and checked in under
+`packages/runtime/test/golden/`. Live twin vs c-capnproto is Phase 2 interop,
+not a v1 claim.
 
 Builder output is **not** claimed byte-identical without a documented alloc
 order; semantic build → serialize → decode is the bar and is green for
@@ -182,8 +192,15 @@ Regenerate goldens (needs system `capnp` 1.4.*):
 $ ./scripts/gen-sample-fixtures.sh
 ```
 
-Codegen plugin usage (stub modules today): see
+Codegen plugin usage (typed emit v1): see
 [packages/codegen/README.md](packages/codegen/README.md).
+
+```console
+$ capnp compile --src-prefix=. \
+    -o./packages/codegen/bin/capnpc-ts \
+    schema/addressbook.capnp
+# → addressbook.ts in cwd (Person getters, PhoneNumber.Type const map, which)
+```
 
 ## Layout
 
@@ -192,9 +209,9 @@ packages/runtime/   @haozeke/capnp wire runtime + golden tests
 packages/codegen/   @haozeke/capnpc-ts plugin (typed emit v1)
 schema/             addressbook, calculator Expression, u64probe
 scripts/            fixture regen against capnp CLI
-interop/            live twin notes (Phase 2)
+interop/            offline twin sketch; live twin is Phase 2
 docs/orgmode/       architecture layering
-examples/           Pi/OMP admit harness (planned)
+examples/           pi-admit-harness (Message.fromFlat Alice/Bob dogfood)
 ```
 
 ## Non-goals (v1 / Tier A)
