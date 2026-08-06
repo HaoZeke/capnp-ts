@@ -10,10 +10,22 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Added
 
+- Scalar get/set schema-default XOR (`wire = logical XOR default`) on
+  `Ptr.get*` / `StructBuilder.set*`; float defaults XOR IEEE bit patterns.
+- Same-message orphan `disown` / `adopt` (`Orphan` handle) on
+  `MessageBuilder` / `StructBuilder`.
+- Cross-message deep-copy (`deepCopyPtr`, `deepCopyPtrToSlot`, `structSetP`).
+- `@haozeke/capnp` package exports: `types` / `import` / `default` →
+  optional `tsup` `dist/`; `bun` condition keeps TypeScript `src/` for Bun.
+- Codegen: rich CGR AST walk (nodes, fields, types, enumerants) via
+  `Message.fromFlat`; stub emit path unchanged.
+- Pi admit harness uses `@haozeke/capnp` Message reader + optional builder.
+- Offline c-capnproto twin emitter sketch under `interop/`.
 - Monorepo scaffold: `@haozeke/capnp` (runtime) and `@haozeke/capnpc-ts`
   (codegen plugin stub), MIT license, Bun/pixi workspace.
 - Runtime layers: `kinds`, `endian`, `pointer`, `message`, `builder`,
-  `serialize`, `packed`, `canonical` (public re-exports from `@haozeke/capnp`).
+  `copy`, `serialize`, `packed`, `canonical` (public re-exports from
+  `@haozeke/capnp`).
 - Packed codec with Cap'n C++ 1.4.0 post-`0xff` fewer-than-two-zeros
   verbatim-run heuristic.
 - AddressBook sample schema (`@0x9eb32e19f86ee174`) and CLI golden fixtures
@@ -23,7 +35,7 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Not yet
 
-- Orphans, deep-copy cross-message `setp`, full list-evolution matrix
-- `capnpc-ts` schema compiler (v1 structs/enums/getters)
+- Full list-evolution matrix
+- `capnpc-ts` typed emit (v1 structs/enums/getters)
 - Live c-capnproto twin interop
 - RPC (`@haozeke/capnp-rpc` Phase 2)

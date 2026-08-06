@@ -55,31 +55,30 @@ packed + canonical CLI identity, list evolution / deep-copy / orphans,
 |------|-----|--------|----------|
 | M0 scaffold + parity table + fixtures | `capnp-ts-rdeg` | **mostly** | README parity table, `scripts/gen-sample-fixtures.sh`, goldens present; `bun.lock` still untracked until chore commit |
 | M1 wire reader + AddressBook decode | `capnp-ts-bhhb` | **yes** | `message.test.ts`, `addressbook.test.ts` |
-| M2 builder + framing + multi-seg far | `capnp-ts-x7xr` | **mostly** | Builder + far/double-far tests green; orphan adopt/disown still stubs |
+| M2 builder + framing + multi-seg far | `capnp-ts-x7xr` | **yes** | Builder + far/double-far + orphan adopt/disown tests green |
 | M3 packed + canonical CLI identity | `capnp-ts-73gz` / `4w78` | **yes** for AddressBook | Byte-identical pack + canonical goldens; suite + manual cmp |
-| M4 list evolution + deep-copy + orphans | `capnp-ts-rqle` | **partial** | Upgrade/downgrade tests green; deep-copy `setp` / orphans not implemented |
-| M5 `capnpc-ts` v1 | `capnp-ts-mga5` | **no** | Scaffold (`plugin.ts` / `cgr-walk` / `emit`); not full CGR→typed modules |
+| M4 list evolution + deep-copy + orphans | `capnp-ts-rqle` | **mostly** | Upgrade/downgrade tests green; orphan disown/adopt + deepCopyPtr land; full matrix still open |
+| M5 `capnpc-ts` v1 | `capnp-ts-mga5` | **partial** | CGR open + rich AST walk + stub emit; not full typed modules |
 | u64probe smoke | `capnp-ts-44ob` | **no** | Schema present; not wired into codegen CI |
-| M7 Pi/OMP harness example | `capnp-ts-vjjx` | **stub** | `examples/pi-admit-harness/` only |
+| M7 Pi/OMP harness example | `capnp-ts-vjjx` | **yes** (decode/encode dogfood) | `Message.fromFlat` AddressBook; `CAPNP_ADMIT_BUILD` MessageBuilder; OMP ExtensionAPI wrap docs; no wait on full mga5 emit |
 | Parity audit note | `capnp-ts-89dv` | **no** | Not written |
 
-**Verdict: not Tier A yet.** Strong on wire read, pack, and canonical for the
-AddressBook oracle. Weak on codegen, orphans/deep-copy, and the Pi harness.
+**Verdict: not Tier A yet.** Strong on wire read, pack, canonical, orphans,
+deep-copy, and the Pi admit dogfood path. Weak on full typed codegen (mga5)
+and parity audit.
 
 ## Remaining gaps (ordered by Tier A impact)
 
-1. **`capnpc-ts` real emit** — hand CGR walk must produce importable ESM with
+1. **`capnpc-ts` real emit** — CGR AST walk must drive importable ESM with
    const-map enums, typed getters, unions, List(Text); drift CI vs fixtures.
 2. **u64probe** — generated Int64/UInt64 must use full `bigint` paths (not u32).
-3. **Orphans / deep-copy `setp`** — builder stubs throw; M4 incomplete.
-4. **List-evolution matrix completeness** — suite covers key shapes, not full
+3. **List-evolution matrix completeness** — suite covers key shapes, not full
    fortran/janet matrix (cross-width demotion refusals, etc.).
-5. **Builder byte identity** — not claimed (correct: non-goal without documented
+4. **Builder byte identity** — not claimed (correct: non-goal without documented
    alloc order); semantic round-trip is the bar and is green for AddressBook.
-6. **Pi/OMP admit harness** — extension stub only; no live encode/decode path.
-7. **Codegen package tests** — no `bun test` coverage under `packages/codegen`.
-8. **README honesty** — pack row is **yes**; wire-read/framing/canonical still
-   marked partial while AddressBook goldens are green (tighten after M5).
+5. **Pi/OMP admit harness** — live `Message.fromFlat` decode + builder encode path;
+   full typed codegen still mga5.
+6. **Parity audit note** — family comparison write-up not written.
 
 ## Non-goals (correctly out of Tier A)
 
