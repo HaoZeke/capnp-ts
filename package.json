@@ -1,7 +1,7 @@
 {
   "name": "capnp-ts-workspace",
   "private": true,
-  "workspaces": ["packages/*"],
+  "workspaces": ["packages/*", "examples/*"],
   "scripts": {
     "test": "bun test packages/runtime",
     "build": "bun run --filter @haozeke/capnp build && bun run --filter @haozeke/capnpc-ts build",
