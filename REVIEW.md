@@ -1,14 +1,13 @@
 # capnp-ts review (2026-08-06)
 
 Scope: workspace unit tests (`bun install` + `bun test`), pack/canonical
-golden identity, codegen emit, and gaps vs Tier A acceptance
-(`capnp-ts-iam3`).
+golden identity, codegen emit, and honest Tier A gaps.
 
 ## Test result: PASS
 
 ```text
 bun test packages/runtime packages/codegen
-  →  77 pass / 0 fail  (12 files; 56 runtime + 21 codegen)
+  → runtime + codegen suites green (see `bun test` for current counts)
 ```
 
 | Suite | Result | Notes |
@@ -23,10 +22,11 @@ bun test packages/runtime packages/codegen
 | `calculator.test.ts` | PASS | Expression goldens eval + round-trip |
 | `text-data.test.ts` | PASS | Text/Data edges, List(Text), nested lists |
 | `fuzz-safety.test.ts` | PASS | Untrusted buffers throw only CapnpError |
-| `emit-addressbook.test.ts` | PASS | Generated AddressBook Alice/Bob; u64probe |
+| `reader-security.test.ts` | PASS | Depth, list charge, composite tag, bounds |
+| `emit-addressbook.test.ts` | PASS | Offline CGR fixtures; u64probe; List(Text) helper |
 | `cgr-fixture-smoke.test.ts` | PASS | Large CGR walk + CLI --stdout smoke |
 
-### Ruthless golden identity (suite + sizes)
+### Golden identity (suite + sizes)
 
 Checked-in Cap'n CLI goldens under
 `packages/runtime/test/golden/` (regen: `scripts/gen-sample-fixtures.sh`,
@@ -58,43 +58,45 @@ bytes stay in the verbatim run). AddressBook covers the `bob@exam` /
 - Multi-segment `MessageBuilder` + far/double-far alloc paths
 - Orphans (`disown` / `adopt` same-message) and deep-copy (`deepCopyPtr`,
   `structSetP` / `deepCopyPtrToSlot` across messages)
-- Schema-default XOR on scalar get/set (codegen default wiring for setters
-  still M6)
+- Schema-default XOR on runtime scalar get/set (`dflt` argument); codegen emit
+  still zero-only defaults (AST walks `Field.defaultValue` for M6)
 - List upgrade/downgrade views for supported shapes only
-- `capnpc-ts` v1 typed emit: structs, const-map enums, union `which`,
-  List helpers, UInt64/Int64 via `getU64`/`bigint` (never `getU32`)
+- `capnpc-ts` v1 typed emit: structs, const-map enums (Bun strip-safe), union
+  `which`, List(Text) via `listGetText`, UInt64/Int64 via `getU64`/`bigint`
+- Public kinds use const objects (`WireKind` / `PtrKind` / `ElemSize`), not
+  TypeScript `const enum`
 - Pi admit harness dogfoods `Message.fromFlat` AddressBook + optional builder
 
-## Tier A readiness (`capnp-ts-iam3`)
+## Tier A readiness
 
 Tier A = harness-ready: scaffold + honest parity, AddressBook decode/build,
 packed + canonical CLI identity, list evolution / deep-copy / orphans,
-`capnpc-ts` v1 + u64probe, Pi/OMP example, parity audit.
+`capnpc-ts` v1 + u64probe, Pi/OMP example, family parity write-up.
 
-| Gate | ID | Status | Evidence |
-|------|-----|--------|----------|
-| M0 scaffold + parity table + fixtures | `capnp-ts-rdeg` | **yes** | README parity table, fixtures script, goldens checked in |
-| M1 wire reader + AddressBook decode | `capnp-ts-bhhb` | **yes** | `message.test.ts`, `addressbook.test.ts` |
-| M2 builder + framing + multi-seg far | `capnp-ts-x7xr` | **yes** | Builder + far/double-far + orphan adopt/disown tests green |
-| M3 packed + canonical CLI identity | `capnp-ts-73gz` / `4w78` | **yes** for AddressBook | Byte-identical 151 B packed + 272 B canonical goldens |
-| M4 list evolution + deep-copy + orphans | `capnp-ts-rqle` | **mostly** | Upgrade/downgrade subset + orphan + deepCopy green; full matrix open |
-| M5 `capnpc-ts` v1 | `capnp-ts-mga5` | **yes** | Typed emit structs/enums/unions; AddressBook Alice/Bob decode |
-| u64probe smoke | `capnp-ts-44ob` | **yes** | Generated `getU64` for UInt64/Int64; codegen CI test |
-| M7 Pi/OMP harness example | `capnp-ts-vjjx` | **yes** | `examples/pi-admit-harness` Message API dogfood |
-| Parity audit note | `capnp-ts-89dv` | **no** | Vault family matrix write-up not present |
+| Gate | Status | Evidence |
+|------|--------|----------|
+| M0 scaffold + parity table + fixtures | **yes** | README parity table, fixtures script, goldens checked in |
+| M1 wire reader + AddressBook decode | **yes** | `message.test.ts`, `addressbook.test.ts` |
+| M2 builder + framing + multi-seg far | **yes** | Builder + far/double-far + orphan adopt/disown tests green |
+| M3 packed + canonical CLI identity | **yes** for AddressBook | Byte-identical 151 B packed + 272 B canonical goldens |
+| M4 list evolution + deep-copy + orphans | **mostly** | Upgrade/downgrade subset + orphan + deepCopy green; full matrix open |
+| M5 `capnpc-ts` v1 | **yes** | Typed emit structs/enums/unions; AddressBook Alice/Bob decode |
+| u64probe smoke | **yes** | Offline CGR fixture + generated `getU64`; no soft-skip silent pass |
+| M7 Pi/OMP harness example | **yes** | `examples/pi-admit-harness` Message API dogfood |
+| Family parity audit note | **no** | Cross-family comparison write-up not in-repo |
 
 **Verdict: not fully Tier A.** Core runtime + pack/canonical + codegen v1 +
-Pi harness are green. Remaining Tier A gaps: full list-evolution matrix,
-parity audit note (`capnp-ts-89dv`), and codegen M6 (non-zero default XOR /
-full builders) if counted under the gate.
+Pi harness are green. Remaining gaps: full list-evolution matrix, family
+parity audit note, and codegen M6 (emit non-zero default XOR / full builders)
+if counted under the gate.
 
 ## Remaining gaps (ordered by Tier A impact)
 
-1. **Parity audit note** (`capnp-ts-89dv`) — family comparison write-up not
-   written under the vault.
+1. **Family parity audit note** — in-repo family comparison write-up not done.
 2. **List-evolution matrix completeness** — suite covers key shapes, not full
    fortran/janet matrix (cross-width demotion refusals, etc.).
-3. **Codegen M6** — non-zero schema-default XOR on setters; fuller builders.
+3. **Codegen M6** — wire walked `Field.defaultValue` into getter/setter emit;
+   fuller builders.
 4. **Builder byte identity** — not claimed (correct: non-goal without
    documented alloc order); semantic round-trip is the bar and is green for
    AddressBook.
@@ -118,5 +120,5 @@ bun run fixtures         # regen CLI goldens (needs capnp 1.4 via pixi)
 Runtime pack and canonical are **byte-identical** to Cap'n C++ 1.4.0 AddressBook
 goldens (`addressbook.packed.bin` 151 B, `addressbook.canonical.bin` 272 B).
 Reader, multi-seg builder, orphans, deep-copy, calculator Expression decode,
-and `capnpc-ts` v1 emit are green under Bun (77/0). **Do not claim full family
-parity until `capnp-ts-89dv` closes with evidence.**
+and `capnpc-ts` v1 emit are green under Bun. **Do not claim full family
+parity until an in-repo parity audit closes with evidence.**

@@ -43,7 +43,8 @@ graphs, or (once RPC exists) method invocations exposed by the application.
 Defensive defaults match Cap'n C++ readers, not a trust-the-peer model:
 
 - Traversal limit: 8 Mi words (`DEFAULT_TRAVERSAL_WORDS`)
-- Nesting depth limit: 64 (`DEFAULT_DEPTH_LIMIT`)
+- Nesting depth limit: 64 (`DEFAULT_DEPTH_LIMIT`); root is depth 0, each
+  far hop and `getP` / `listGetP` walk uses `depth + 1` against the limit
 - Segment count cap (`MAX_SEGMENTS`)
 - Bounds, kind, depth, framing, and pack failures surface as `CapnpError`
 
@@ -52,5 +53,5 @@ Do not raise limits without a concrete need. Zero-copy views
 Do not feed untrusted Cap'n streams into production without keeping those
 limits in place.
 
-Generated code from `capnpc-ts` (when shipped) will rely on the same runtime
-checks; untrusted input is still untrusted after codegen.
+Generated code from `capnpc-ts` relies on the same runtime checks; untrusted
+input is still untrusted after codegen.

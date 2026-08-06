@@ -42,22 +42,26 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
 - Stream segment-table serialize (`serializeToFlat` / `frameSegments`)
 - Multi-segment `MessageBuilder` arena with far / double-far pointer paths
 - Same-message orphan `disown` / `adopt`; cross-message `deepCopyPtr` / `structSetP`
-- Scalar get/set with schema-default XOR (codegen passes field defaults)
+- Scalar get/set with schema-default XOR on the runtime (`get*` / `set*` take
+  an optional `dflt`); codegen still emits zero-only default arguments (M6
+  wires schema `Field.defaultValue` into getters/setters)
 - Packed codec (`pack` / `unpack`) byte-identical to Cap'n C++ 1.4.0 on
   AddressBook (`pack(addressbook.bin) == addressbook.packed.bin`, 151 B)
 - Canonical form (`canonicalize` / `canonicalizeFlat`) byte-identical to
   `capnp convert binary:canonical` on AddressBook
   (`canonicalizeFlat(addressbook.bin) == addressbook.canonical.bin`, 272 B)
-- Traversal word budget (8 Mi words) and nesting depth limit (64), C++ defaults
+- Traversal word budget (8 Mi words) and nesting depth limit (64), matching
+  Cap'n C++ reader defaults (`DEFAULT_TRAVERSAL_WORDS` / `DEFAULT_DEPTH_LIMIT`;
+  far hops and `getP` / `listGetP` accumulate depth)
 - CLI goldens under `packages/runtime/test/golden/`: AddressBook encode /
   packed / canonical plus calculator Expression samples
   (`calculator_add_2_3.bin`, `calculator_mul_add.bin`, `calculator_value_5.bin`)
 - `capnpc-ts` plugin: framed CGR on stdin/file, typed `.ts` per requested schema
-  (layout constants, getters, const-map enums, union `which`, u64probe-safe
-  `getU64`/`bigint`); AddressBook decode integration test
+  (layout constants, getters, const-map enums, union `which`, List(Text) via
+  `listGetText`, u64probe-safe `getU64`/`bigint`); AddressBook decode test
 
 Not yet shipped: full list-evolution matrix, non-zero default XOR in codegen
-setters, dynamic reflection, RPC.
+emit, dynamic reflection, RPC.
 
 ## Parity
 
@@ -71,12 +75,12 @@ present. Do not treat this table as a green checklist for unbuilt work.
 | Stream framing | yes | yes | yes | yes | **yes** (`fromFlat` / `viewFlat` / `serializeToFlat` / `frameSegments`) |
 | Packed codec | yes | yes | yes | yes | **yes** (C++ 1.4.0 `0xff` fewer-than-two-zeros heuristic; AddressBook golden) |
 | Zero-copy reads from caller buffer | yes | yes | yes | yes | **yes** (`Message.viewFlat`) |
-| Traversal and depth limits | no | yes | yes | yes | **yes** |
+| Traversal and depth limits | no | yes | yes | yes | **yes** (8 Mi words + depth 64; far/`getP`/`listGetP` accumulate; see SECURITY.md) |
 | Schema-evolution reads (defaults past end, list up/downgrade) | partial | yes | yes | yes | **partial** (supported upgrade/downgrade views; not full matrix) |
 | Builder / deep copy / orphans | limited | yes | yes | partial | **yes** (multi-seg arena + far/double-far; orphan disown/adopt; deepCopyPtr) |
 | Canonical form | no | yes | yes | yes | **yes** (AddressBook golden byte-identical to CLI) |
-| Code generator (`capnp compile -o`) | yes | yes | yes | yes | **yes** (v1: structs/enums/unions/getters; M6 defaults/setters open) |
-| RPC | no | yes | yes | out of scope for v0.x | **no** (Phase 2 package; not Tier A) |
+| Code generator (`capnp compile -o`) | yes | yes | yes | yes | **yes** (v1: structs/enums/unions/getters/List helpers; schema defaults in emit still zero-only) |
+| RPC | no | yes | yes | out of scope for v0.x | **no** (Phase 2 package) |
 
 The serialization bar is Cap'n C++ 1.4.0 (`capnp encode` /
 `convert binary:packed` / `binary:canonical`) plus the same AddressBook and
@@ -112,6 +116,16 @@ tagged):
 ```console
 $ bun add @haozeke/capnp
 ```
+
+Package exports (dual):
+
+| Consumer | Resolution |
+|----------|------------|
+| **Bun** | TypeScript `packages/runtime/src/` via the `bun` export condition (no build) |
+| **Node / other** | `dist/` from `bun run build` / `tsup` in `@haozeke/capnp` before publish or Node use |
+
+Generated modules import `import type { Ptr } from "@haozeke/capnp"`. In this
+workspace, Bun resolves that to the runtime package via the workspace link.
 
 ## Quick start: AddressBook
 

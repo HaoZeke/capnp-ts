@@ -11,10 +11,13 @@ Pre-1.0 minor releases may include breaking API changes.
 ### Added
 
 - `capnpc-ts` v1 typed emit: structs (word counts + getters), enums as const
-  maps (no TS `enum`), union `which()` + arm tags, List element helpers;
-  UInt64/Int64 always via `getU64`/`bigint` (u64probe CI smoke).
-- Generated AddressBook decodes runtime golden Alice/Bob; `capnp compile
-  -o…/capnpc-ts schema/addressbook.capnp` integration test.
+  maps (no TS `enum` / no public `const enum`), union `which()` + arm tags,
+  List(Struct) via `listGetP` and List(Text) via `listGetText`;
+  UInt64/Int64 always via `getU64`/`bigint` (offline u64probe CGR fixture).
+- Generated AddressBook decodes runtime golden Alice/Bob; live
+  `capnp compile -o…/capnpc-ts` gated with `test.skipIf` (no soft-skip pass).
+- CGR walk of `Field.slot.defaultValue` / `hadExplicitDefault` into the AST
+  (emit still zero-only `dflt` until M6).
 - Scalar get/set schema-default XOR (`wire = logical XOR default`) on
   `Ptr.get*` / `StructBuilder.set*`; float defaults XOR IEEE bit patterns.
 - Same-message orphan `disown` / `adopt` (`Orphan` handle) on
@@ -22,7 +25,7 @@ Pre-1.0 minor releases may include breaking API changes.
 - Cross-message deep-copy (`deepCopyPtr`, `deepCopyPtrToSlot`, `structSetP`).
 - `@haozeke/capnp` package exports: `types` / `import` / `default` →
   optional `tsup` `dist/`; `bun` condition keeps TypeScript `src/` for Bun.
-- Codegen: rich CGR AST walk (nodes, fields, types, enumerants) via
+- Codegen: rich CGR AST walk (nodes, fields, types, enumerants, defaults) via
   `Message.fromFlat`.
 - Pi admit harness (`examples/pi-admit-harness`) uses `@haozeke/capnp`
   `Message.fromFlat` / optional `MessageBuilder` for AddressBook Alice/Bob.
@@ -49,14 +52,14 @@ Pre-1.0 minor releases may include breaking API changes.
   `calculator_value_5.bin`); regen via `scripts/gen-sample-fixtures.sh`.
 - Suite coverage beyond goldens: multi-segment far/double-far stress,
   text/data edges, untrusted-buffer fuzz, list upgrade/downgrade subset,
-  CGR fixture smoke + u64probe codegen.
+  CGR fixture smoke + u64probe codegen (offline fixtures first).
 - Docs: root README with honest family parity table, `SECURITY.md`,
   `CONTRIBUTING.md`, runtime package README, architecture org note.
 
 ### Not yet
 
 - Full list-evolution matrix (cross-width refusals beyond the covered subset)
-- Codegen non-zero default XOR / full builders (M6)
+- Codegen non-zero default XOR / full builders in emit (M6; AST walk present)
 - Live c-capnproto twin interop (Phase 2; offline sketch only)
-- Family parity audit write-up (`capnp-ts-89dv`)
+- In-repo family parity audit write-up
 - RPC (`@haozeke/capnp-rpc` Phase 2)
