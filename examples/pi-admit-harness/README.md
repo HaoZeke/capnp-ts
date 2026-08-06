@@ -119,45 +119,52 @@ access via pointer offsets. RPC, packed transport, and capability tables are
 out of scope for this harness (packed helpers exist on `@haozeke/capnp` if the
 extension needs them later).
 
-## Decode path (no hand frame scan)
+## Decode path (Message + generated getters)
 
 ```ts
-import { Message, PtrKind } from "@haozeke/capnp";
+import { Message } from "@haozeke/capnp";
+import {
+  AddressBook_getPeopleAt,
+  Person_getId,
+  Person_getName,
+  Person_getEmail,
+} from "./gen/addressbook.ts";
 
 const msg = Message.fromFlat(bytes);
-const people = msg.root().getP(0); // AddressBook.people
-// Person: id @0 :UInt32; name @1 :Text; email @2 :Text
-const alice = people.listGetP(0);
-alice.getU32(0);   // 123
-alice.getText(0);  // "Alice"
-alice.getText(1);  // "alice@example.com"
+const root = msg.root();
+const alice = AddressBook_getPeopleAt(root, 0);
+Person_getId(alice);    // 123
+Person_getName(alice);  // "Alice"
+Person_getEmail(alice); // "alice@example.com"
 ```
 
-Layout constants live in `admit-harness.ts` (aligned with
-`schema/addressbook.capnp` and the interim
-`packages/runtime/src/generated/addressbook.ts`). Full typed getters replace
-these when `capnpc-ts` emit lands.
+`gen/addressbook.ts` is produced by `@haozeke/capnpc-ts` from
+`schema/addressbook.capnp`. Admit uses `Message.fromFlat` / `Message.viewFlat`
+and the generated `AddressBook_*` / `Person_*` helpers (no hand frame scan).
 
 ## Schema compile for harness messages
 
-When `capnpc-ts` is available:
+Regenerate the checked-in module when the schema changes:
 
 ```bash
-# plugin on PATH from packages/codegen
-capnp compile -o ts schema/addressbook.capnp
+# from monorepo root; plugin binary is packages/codegen/bin/capnpc-ts
+capnp compile --src-prefix=. \
+  -o./packages/codegen/bin/capnpc-ts:examples/pi-admit-harness/gen \
+  schema/addressbook.capnp
 ```
 
 Generated modules are Bun-strip-safe ESM (const-map enums, no `enum` keyword).
-Until then, the harness uses hand layout offsets + `Message` accessors against
-the AddressBook golden (Alice / Bob from `scripts/gen-sample-fixtures.sh`).
+Default admit target is the AddressBook golden (Alice / Bob from
+`scripts/gen-sample-fixtures.sh`).
 
 ## Layout
 
-| File              | Role                                      |
-|-------------------|-------------------------------------------|
-| `admit-harness.ts`| Standalone admit script + reusable helpers |
-| `package.json`    | ESM package; workspace dep on runtime     |
-| `README.md`       | This doc                                  |
+| File                 | Role                                         |
+|----------------------|----------------------------------------------|
+| `admit-harness.ts`   | Standalone admit script + reusable helpers   |
+| `gen/addressbook.ts` | capnpc-ts emit (typed getters for decode)    |
+| `package.json`       | ESM package; workspace dep on runtime        |
+| `README.md`          | This doc                                     |
 
 ## Related
 

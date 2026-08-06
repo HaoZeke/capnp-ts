@@ -20,9 +20,8 @@
  *   //   });
  *   // }
  *
- * Decode path: Message.fromFlat → root/list/struct accessors (no hand frame scan).
- * AddressBook layout matches schema/addressbook.capnp (hand constants until
- * capnpc-ts emit lands); Alice/Bob golden is the default fixture.
+ * Decode path: Message.fromFlat → gen/addressbook.ts getters (capnpc-ts emit).
+ * Default fixture: packages/runtime/test/golden/addressbook.bin (Alice / Bob).
  */
 
 import { readFileSync, existsSync } from "node:fs";
@@ -35,6 +34,29 @@ import {
   PtrKind,
   type Ptr,
 } from "@haozeke/capnp";
+import {
+  ADDRESS_BOOK_DWORDS,
+  ADDRESS_BOOK_PWORDS,
+  AddressBook_getPeople,
+  AddressBook_getPeopleAt,
+  AddressBook_getPeopleLen,
+  PERSON_DWORDS,
+  PERSON_PWORDS,
+  PERSON_PHONE_NUMBER_DWORDS,
+  PERSON_PHONE_NUMBER_PWORDS,
+  Person_PhoneNumber_Type,
+  Person_PhoneNumber_getNumber,
+  Person_PhoneNumber_getType,
+  Person_employment,
+  Person_employment_getEmployer,
+  Person_employment_getSchool,
+  Person_employment_which,
+  Person_getEmail,
+  Person_getId,
+  Person_getName,
+  Person_getPhonesAt,
+  Person_getPhonesLen,
+} from "./gen/addressbook.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "../..");
@@ -43,41 +65,9 @@ const DEFAULT_GOLDEN = join(
   "packages/runtime/test/golden/addressbook.bin",
 );
 
-/** Person layout (addressbook.capnp): 1 data word, 4 pointers. */
-const PERSON_DWORDS = 1;
-const PERSON_PWORDS = 4;
-const PERSON_ID_OFF = 0;
-const PERSON_NAME_PTR = 0;
-const PERSON_EMAIL_PTR = 1;
-const PERSON_PHONES_PTR = 2;
-const PERSON_EMPLOYMENT_TAG_OFF = 4;
-const PERSON_EMPLOYMENT_PTR = 3;
-
-const EMP_UNEMPLOYED = 0;
-const EMP_EMPLOYER = 1;
-const EMP_SCHOOL = 2;
-const EMP_SELF_EMPLOYED = 3;
-
-const PHONE_DWORDS = 1;
-const PHONE_PWORDS = 1;
-const PHONE_TYPE_OFF = 0;
-const PHONE_NUMBER_PTR = 0;
-
-/** AddressBook: people @0 :List(Person). */
-const ADDRESS_BOOK_PEOPLE_PTR = 0;
-
-const EmploymentWhich = {
-  unemployed: EMP_UNEMPLOYED,
-  employer: EMP_EMPLOYER,
-  school: EMP_SCHOOL,
-  selfEmployed: EMP_SELF_EMPLOYED,
-} as const;
-
-const PhoneNumberType = {
-  mobile: 0,
-  home: 1,
-  work: 2,
-} as const;
+/** Re-export enum maps for OMP wrappers (schema tags without hand offsets). */
+export const EmploymentWhich = Person_employment;
+export const PhoneNumberType = Person_PhoneNumber_Type;
 
 export type AdmittedPerson = {
   id: number;
@@ -107,72 +97,58 @@ export type AdmitView = {
   rootText?: string;
 };
 
-function employmentLabel(tag: number): AdmittedPerson["employment"]["which"] {
-  switch (tag) {
-    case EMP_EMPLOYER:
-      return "employer";
-    case EMP_SCHOOL:
-      return "school";
-    case EMP_SELF_EMPLOYED:
-      return "selfEmployed";
-    default:
-      return "unemployed";
+function employmentFromPtr(p: Ptr): AdmittedPerson["employment"] {
+  const tag = Person_employment_which(p);
+  if (tag === Person_employment.employer) {
+    return { which: "employer", employer: Person_employment_getEmployer(p) };
   }
+  if (tag === Person_employment.school) {
+    return { which: "school", school: Person_employment_getSchool(p) };
+  }
+  if (tag === Person_employment.selfEmployed) {
+    return { which: "selfEmployed" };
+  }
+  return { which: "unemployed" };
 }
 
 function decodePerson(p: Ptr): AdmittedPerson {
-  const tag = p.getU16(PERSON_EMPLOYMENT_TAG_OFF);
-  const which = employmentLabel(tag);
-  let employment: AdmittedPerson["employment"];
-  if (which === "employer") {
-    employment = { which, employer: p.getText(PERSON_EMPLOYMENT_PTR) };
-  } else if (which === "school") {
-    employment = { which, school: p.getText(PERSON_EMPLOYMENT_PTR) };
-  } else if (which === "selfEmployed") {
-    employment = { which };
-  } else {
-    employment = { which: "unemployed" };
-  }
-
-  const phonesPtr = p.getP(PERSON_PHONES_PTR);
   const phones: AdmittedPerson["phones"] = [];
-  if (phonesPtr.kind === PtrKind.List) {
-    for (let i = 0; i < phonesPtr.listLen(); i++) {
-      const ph = phonesPtr.listGetP(i);
-      phones.push({
-        number: ph.getText(PHONE_NUMBER_PTR),
-        type: ph.getU16(PHONE_TYPE_OFF),
-      });
-    }
+  const nPhones = Person_getPhonesLen(p);
+  for (let i = 0; i < nPhones; i++) {
+    const ph = Person_getPhonesAt(p, i);
+    phones.push({
+      number: Person_PhoneNumber_getNumber(ph),
+      type: Person_PhoneNumber_getType(ph),
+    });
   }
-
   return {
-    id: p.getU32(PERSON_ID_OFF),
-    name: p.getText(PERSON_NAME_PTR),
-    email: p.getText(PERSON_EMAIL_PTR),
-    employment,
+    id: Person_getId(p),
+    name: Person_getName(p),
+    email: Person_getEmail(p),
+    employment: employmentFromPtr(p),
     phones,
   };
 }
 
 /**
- * Try AddressBook decode: root.people is composite List(Person).
+ * Try AddressBook decode via Message root + generated AddressBook_* getters.
  * Returns undefined when the root is not that shape (e.g. tiny Text fixture).
  */
 export function tryDecodeAddressBook(root: Ptr): AdmitView["addressBook"] {
   if (root.kind !== PtrKind.Struct) return undefined;
-  const people = root.getP(ADDRESS_BOOK_PEOPLE_PTR);
+  const people = AddressBook_getPeople(root);
   // AddressBook.people is List(Person) — composite (not Text/byte list).
   if (
     people.kind !== PtrKind.List ||
     people.esize !== ElemSize.Composite ||
-    people.listLen() === 0
+    AddressBook_getPeopleLen(root) === 0
   ) {
     return undefined;
   }
   const out: AdmittedPerson[] = [];
-  for (let i = 0; i < people.listLen(); i++) {
-    out.push(decodePerson(people.listGetP(i)));
+  const n = AddressBook_getPeopleLen(root);
+  for (let i = 0; i < n; i++) {
+    out.push(decodePerson(AddressBook_getPeopleAt(root, i)));
   }
   return { people: out };
 }
@@ -190,19 +166,24 @@ export function buildTinyFramedText(text: string): Uint8Array {
 
 /**
  * Build a minimal AddressBook (one person) via MessageBuilder — encode path
- * for dogfood when CAPNP_ADMIT_BUILD=1.
+ * for dogfood when CAPNP_ADMIT_BUILD=1. Layout constants from gen/addressbook.ts.
  */
 export function buildMiniAddressBook(): Uint8Array {
   const b = new MessageBuilder();
-  const book = b.initRoot(0, 1);
-  const people0 = book.initList(0, 1, PERSON_DWORDS, PERSON_PWORDS);
-  people0.setU32(PERSON_ID_OFF, 1);
-  people0.setU16(PERSON_EMPLOYMENT_TAG_OFF, EMP_UNEMPLOYED);
-  people0.setText(PERSON_NAME_PTR, "Admit");
-  people0.setText(PERSON_EMAIL_PTR, "admit@example.com");
-  const phones = people0.initList(PERSON_PHONES_PTR, 1, PHONE_DWORDS, PHONE_PWORDS);
-  phones.setU16(PHONE_TYPE_OFF, PhoneNumberType.mobile);
-  phones.setText(PHONE_NUMBER_PTR, "555-0000");
+  const book = b.initRoot(ADDRESS_BOOK_DWORDS, ADDRESS_BOOK_PWORDS);
+  const person = book.initList(0, 1, PERSON_DWORDS, PERSON_PWORDS);
+  person.setU32(0, 1); // Person.id
+  person.setU16(4, Person_employment.unemployed);
+  person.setText(0, "Admit");
+  person.setText(1, "admit@example.com");
+  const phones = person.initList(
+    2,
+    1,
+    PERSON_PHONE_NUMBER_DWORDS,
+    PERSON_PHONE_NUMBER_PWORDS,
+  );
+  phones.setU16(0, PhoneNumberType.mobile);
+  phones.setText(0, "555-0000");
   return b.toFlat();
 }
 
@@ -253,7 +234,7 @@ export function formatAdmitReport(view: AdmitView): string {
   const lines: string[] = [
     `admit source: ${view.source}`,
     `segments: ${view.segmentCount} (words: ${view.segmentWordCounts.join(", ")})`,
-    `reader: Message.fromFlat (@haozeke/capnp)`,
+    `reader: Message.fromFlat (@haozeke/capnp) + gen/addressbook.ts`,
   ];
   if (view.addressBook) {
     lines.push(`addressBook.people (${view.addressBook.people.length}):`);
@@ -279,7 +260,7 @@ export function formatAdmitReport(view: AdmitView): string {
     lines.push("root: (no AddressBook / Text decode applied)");
   }
   lines.push(
-    "note: pure ESM admit path; no native addon. Layout constants match addressbook.capnp until capnpc-ts emit.",
+    "note: pure ESM admit path; no native addon. Typed getters from capnpc-ts gen/addressbook.ts.",
   );
   return lines.join("\n");
 }
@@ -321,11 +302,12 @@ if (isMain) {
   main();
 }
 
-// Re-export layout maps for OMP wrappers that want schema tags without codegen.
+// Layout / enum maps for OMP wrappers (from generated schema module).
 export {
-  EmploymentWhich,
-  PhoneNumberType,
   PERSON_DWORDS,
   PERSON_PWORDS,
-  ADDRESS_BOOK_PEOPLE_PTR,
+  ADDRESS_BOOK_DWORDS,
+  ADDRESS_BOOK_PWORDS,
+  Person_employment,
+  Person_PhoneNumber_Type,
 };
