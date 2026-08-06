@@ -124,7 +124,9 @@ export class Message {
 
   root(): Ptr {
     assertCapnp(this.segs.length > 0, "ARG");
-    return resolvePtr(this, 0, 0, this.depthLimit);
+    // Nesting level 0 (capnp-fortran / encoding.html): depth_limit=0 still
+    // allows the root object; the first getP uses depth 1 and fails.
+    return resolvePtr(this, 0, 0, 0);
   }
 
   /** Word count of segment `seg`. */
@@ -208,12 +210,36 @@ function parseFlat(
 }
 
 function boundsWord(m: Message, seg: number, word: number): void {
-  assertCapnp(seg < m.segs.length, "SEGMENT");
-  assertCapnp(word < m.segs[seg]!.words, "BOUNDS");
+  assertCapnp(seg >= 0 && seg < m.segs.length, "SEGMENT");
+  // Negative word offsets must not reach loadU64 (would throw TypeError/RangeError).
+  assertCapnp(word >= 0 && word < m.segs[seg]!.words, "BOUNDS");
 }
 
 function readWord(m: Message, seg: number, word: number): bigint {
   return loadU64(m.segs[seg]!.data, word * WORD_BYTES);
+}
+
+/**
+ * Charge `words` against the traversal budget. Rejects non-finite / negative
+ * sizes before mutating the budget (no under-charge via wrap).
+ */
+function chargeWords(m: Message, words: number | bigint): void {
+  const w = typeof words === "bigint" ? words : BigInt(words);
+  assertCapnp(w >= 0n, "BOUNDS");
+  if (w > BigInt(m.traversalLeft)) {
+    throw new CapnpError("TRAVERSAL");
+  }
+  m.charge(Number(w));
+}
+
+/**
+ * Word count for a primitive list body: ceil(count * stepBits / 64).
+ * Uses bigint so large counts cannot wrap via `>>>` (uint32) under-charge.
+ */
+function primitiveListWords(count: number, stepBits: number): bigint {
+  if (stepBits <= 0 || count <= 0) return 0n;
+  const bits = BigInt(count) * BigInt(stepBits);
+  return (bits + 63n) / 64n;
 }
 
 function resolvePtr(m: Message, seg: number, word: number, depth: number): Ptr {
@@ -229,14 +255,17 @@ function resolveWord(
   w: bigint,
   depth: number,
 ): Ptr {
-  if (depth <= 0) throw new CapnpError("DEPTH");
-  if (w === 0n) return Ptr.nullPtr(m, seg, word);
+  // Absolute nesting level (capnp-fortran): root = 0; each far hop / getP +1.
+  if (depth > m.depthLimit) throw new CapnpError("DEPTH");
+  if (w === 0n) return Ptr.nullPtr(m, seg, word, depth);
 
   const kind = wpKind(w);
   if (kind === WireKind.Far) {
     const tseg = wpFarSeg(w);
     const toff = wpFarOff(w);
     if (wpFarTwo(w)) {
+      // Double-far counts as one nesting step for the landing object.
+      if (depth + 1 > m.depthLimit) throw new CapnpError("DEPTH");
       boundsWord(m, tseg, toff);
       boundsWord(m, tseg, toff + 1);
       m.charge(2);
@@ -245,20 +274,28 @@ function resolveWord(
       assertCapnp(wpKind(pad) === WireKind.Far && !wpFarTwo(pad), "KIND");
       const cseg = wpFarSeg(pad);
       const coff = wpFarOff(pad);
+      const landDepth = depth + 1;
       if (wpKind(tag) === WireKind.Struct) {
         const dwords = wpStructDwords(tag);
         const pwords = wpStructPwords(tag);
-        m.charge(dwords + pwords);
-        return Ptr.struct(m, cseg, coff, dwords, pwords);
+        if (dwords || pwords) {
+          const end = coff + dwords + pwords;
+          boundsWord(m, cseg, coff);
+          if (end > 0) boundsWord(m, cseg, end - 1);
+        } else {
+          assertCapnp(cseg >= 0 && cseg < m.segs.length, "SEGMENT");
+        }
+        chargeWords(m, dwords + pwords);
+        return Ptr.struct(m, cseg, coff, dwords, pwords, landDepth);
       }
       if (wpKind(tag) === WireKind.List) {
-        return finishList(m, cseg, coff, tag);
+        return finishList(m, cseg, coff, tag, landDepth);
       }
       throw new CapnpError("KIND");
     }
     boundsWord(m, tseg, toff);
     m.charge(1);
-    return resolveWord(m, tseg, toff, readWord(m, tseg, toff), depth - 1);
+    return resolveWord(m, tseg, toff, readWord(m, tseg, toff), depth + 1);
   }
 
   if (kind === WireKind.Struct) {
@@ -271,50 +308,74 @@ function resolveWord(
       boundsWord(m, seg, body);
       if (end > 0) boundsWord(m, seg, end - 1);
     }
-    m.charge(dwords + pwords);
-    return Ptr.struct(m, seg, body, dwords, pwords);
+    chargeWords(m, dwords + pwords);
+    return Ptr.struct(m, seg, body, dwords, pwords, depth);
   }
 
   if (kind === WireKind.List) {
     const off = wpOffset(w);
-    return finishList(m, seg, word + 1 + off, w);
+    return finishList(m, seg, word + 1 + off, w, depth);
   }
 
   if (kind === WireKind.Cap) {
-    return Ptr.cap(m, seg, word, Number((w >> 32n) & 0xffff_ffffn));
+    return Ptr.cap(m, seg, word, Number((w >> 32n) & 0xffff_ffffn), depth);
   }
   throw new CapnpError("KIND");
 }
 
-function finishList(m: Message, seg: number, start: number, w: bigint): Ptr {
+/**
+ * Populate a list handle. For composite lists the list pointer's count is the
+ * content word count (excluding tag); the tag word holds element count and
+ * struct shape (encoding.html / capnp-fortran fill_list).
+ */
+function finishList(
+  m: Message,
+  seg: number,
+  start: number,
+  w: bigint,
+  depth: number,
+): Ptr {
   const esize = wpListEsize(w);
-  let count = wpListCount(w);
+  const wireCount = wpListCount(w);
+
   if (esize === ElemSize.Composite) {
+    // contentWords = words after the tag; charge tag + content up front so a
+    // zero-size-element amp still pays the declared word budget.
+    const contentWords = wireCount;
+    const totalWords = BigInt(contentWords) + 1n;
+    chargeWords(m, totalWords);
     boundsWord(m, seg, start);
-    m.charge(1);
+    if (contentWords > 0) {
+      boundsWord(m, seg, start + contentWords);
+    }
     const tag = readWord(m, seg, start);
-    count = wpOffset(tag) >>> 0;
+    assertCapnp(wpKind(tag) === WireKind.Struct, "KIND");
+    // Element count lives in the tag "offset" field as unsigned 30-bit.
+    const nelem = Number((tag >> 2n) & 0x3fff_ffffn);
     const dwords = wpStructDwords(tag);
     const pwords = wpStructPwords(tag);
     const step = dwords + pwords;
-    const need = count * step;
-    if (need) {
-      boundsWord(m, seg, start + 1 + need - 1);
-      m.charge(need);
+    // nelem * (dwords+pwords) must fit the declared content words.
+    if (BigInt(nelem) * BigInt(step) > BigInt(contentWords)) {
+      throw new CapnpError("BOUNDS");
     }
-    return Ptr.list(m, seg, start + 1, esize, count, dwords, pwords, step);
+    return Ptr.list(m, seg, start + 1, esize, nelem, dwords, pwords, step, depth);
   }
 
   const stepBits = listStepBits(esize);
   if (stepBits < 0) throw new CapnpError("KIND");
-  const bits =
-    stepBits === 0 ? 0 : stepBits === 1 ? count : count * stepBits;
-  const words = (bits + 63) >>> 6;
-  if (words) {
-    boundsWord(m, seg, start + words - 1);
-    m.charge(words);
+  const words = primitiveListWords(wireCount, stepBits);
+  if (words > 0n) {
+    // Charge first (capnp-fortran fill_list) so wrap/amp cannot under-pay;
+    // then bounds-check content against the segment.
+    chargeWords(m, words);
+    const last = BigInt(start) + words - 1n;
+    if (start < 0 || last > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new CapnpError("BOUNDS");
+    }
+    boundsWord(m, seg, Number(last));
   }
-  return Ptr.list(m, seg, start, esize, count, 0, 0, 0);
+  return Ptr.list(m, seg, start, esize, wireCount, 0, 0, 0, depth);
 }
 
 /** Resolved object handle (struct or list). Never a far landing pad. */
@@ -330,6 +391,11 @@ export class Ptr {
   readonly stepWords: number;
   readonly bodyByte: number;
   readonly dataBits: number;
+  /**
+   * Nesting level at which this handle was resolved (root = 0). Subsequent
+   * getP / listGetP walks use depth+1 against msg.depthLimit (capnp-fortran).
+   */
+  readonly depth: number;
 
   private constructor(init: {
     msg: Message;
@@ -343,6 +409,7 @@ export class Ptr {
     stepWords?: number;
     bodyByte?: number;
     dataBits?: number;
+    depth?: number;
   }) {
     this.msg = init.msg;
     this.seg = init.seg;
@@ -355,10 +422,11 @@ export class Ptr {
     this.stepWords = init.stepWords ?? 0;
     this.bodyByte = init.bodyByte ?? 0;
     this.dataBits = init.dataBits ?? 0;
+    this.depth = init.depth ?? 0;
   }
 
-  static nullPtr(msg: Message, seg: number, word: number): Ptr {
-    return new Ptr({ msg, seg, word, kind: PtrKind.Null });
+  static nullPtr(msg: Message, seg: number, word: number, depth = 0): Ptr {
+    return new Ptr({ msg, seg, word, kind: PtrKind.Null, depth });
   }
 
   static struct(
@@ -367,8 +435,17 @@ export class Ptr {
     word: number,
     dwords: number,
     pwords: number,
+    depth = 0,
   ): Ptr {
-    return new Ptr({ msg, seg, word, kind: PtrKind.Struct, dwords, pwords });
+    return new Ptr({
+      msg,
+      seg,
+      word,
+      kind: PtrKind.Struct,
+      dwords,
+      pwords,
+      depth,
+    });
   }
 
   static list(
@@ -380,6 +457,7 @@ export class Ptr {
     dwords: number,
     pwords: number,
     stepWords: number,
+    depth = 0,
   ): Ptr {
     return new Ptr({
       msg,
@@ -391,11 +469,18 @@ export class Ptr {
       dwords,
       pwords,
       stepWords,
+      depth,
     });
   }
 
-  static cap(msg: Message, seg: number, word: number, index: number): Ptr {
-    return new Ptr({ msg, seg, word, kind: PtrKind.Cap, count: index });
+  static cap(
+    msg: Message,
+    seg: number,
+    word: number,
+    index: number,
+    depth = 0,
+  ): Ptr {
+    return new Ptr({ msg, seg, word, kind: PtrKind.Cap, count: index, depth });
   }
 
   get isNull(): boolean {
@@ -465,13 +550,14 @@ export class Ptr {
   getP(ptrIndex: number): Ptr {
     assertCapnp(this.kind === PtrKind.Struct, "KIND");
     if (ptrIndex >= this.pwords) {
-      return Ptr.nullPtr(this.msg, this.seg, 0);
+      return Ptr.nullPtr(this.msg, this.seg, 0, this.depth);
     }
+    // Nesting budget continues from this handle — never restart at depthLimit.
     return resolvePtr(
       this.msg,
       this.seg,
       this.word + this.dwords + ptrIndex,
-      this.msg.depthLimit,
+      this.depth + 1,
     );
   }
 
@@ -514,13 +600,13 @@ export class Ptr {
 
   listGetP(index: number): Ptr {
     assertCapnp(this.kind === PtrKind.List, "KIND");
-    assertCapnp(index < this.count, "BOUNDS");
+    assertCapnp(index >= 0 && index < this.count, "BOUNDS");
     if (this.esize === ElemSize.Pointer) {
       return resolvePtr(
         this.msg,
         this.seg,
         this.word + index,
-        this.msg.depthLimit,
+        this.depth + 1,
       );
     }
     if (this.esize === ElemSize.Composite) {
@@ -530,6 +616,7 @@ export class Ptr {
         this.word + index * this.stepWords,
         this.dwords,
         this.pwords,
+        this.depth,
       );
     }
     throw new CapnpError("KIND");
@@ -561,6 +648,7 @@ export class Ptr {
         this.word + index * this.stepWords,
         this.dwords,
         this.pwords,
+        this.depth,
       );
     }
     if (this.esize === ElemSize.Pointer) {
@@ -572,6 +660,7 @@ export class Ptr {
         kind: PtrKind.Struct,
         dwords: 0,
         pwords: 1,
+        depth: this.depth,
       });
     }
     if (this.esize === ElemSize.Void || this.esize === ElemSize.Bit) {
@@ -609,6 +698,7 @@ export class Ptr {
       pwords: 0,
       bodyByte: absByte % WORD_BYTES,
       dataBits: elemBytes * 8,
+      depth: this.depth,
     });
   }
 
@@ -645,7 +735,9 @@ export class Ptr {
   }
 
   listGetU8(index: number, dflt = 0): number {
-    if (this.kind !== PtrKind.List || index >= this.count) return dflt;
+    if (this.kind !== PtrKind.List) return dflt;
+    assertCapnp(index >= 0, "BOUNDS");
+    if (index >= this.count) return dflt;
     if (this.esize === ElemSize.Byte) return this.listElemBytes(index, 1)[0]!;
     if (this.esize === ElemSize.Composite && this.dwords >= 1) {
       return this.compositeElemData(index)[0]!;
@@ -654,7 +746,9 @@ export class Ptr {
   }
 
   listGetU16(index: number, dflt = 0): number {
-    if (this.kind !== PtrKind.List || index >= this.count) return dflt;
+    if (this.kind !== PtrKind.List) return dflt;
+    assertCapnp(index >= 0, "BOUNDS");
+    if (index >= this.count) return dflt;
     if (this.esize === ElemSize.TwoBytes) {
       return loadU16(this.listElemBytes(index, 2), 0);
     }
@@ -665,7 +759,9 @@ export class Ptr {
   }
 
   listGetU32(index: number, dflt = 0): number {
-    if (this.kind !== PtrKind.List || index >= this.count) return dflt;
+    if (this.kind !== PtrKind.List) return dflt;
+    assertCapnp(index >= 0, "BOUNDS");
+    if (index >= this.count) return dflt;
     if (this.esize === ElemSize.FourBytes) {
       return loadU32(this.listElemBytes(index, 4), 0);
     }
@@ -676,7 +772,9 @@ export class Ptr {
   }
 
   listGetU64(index: number, dflt = 0n): bigint {
-    if (this.kind !== PtrKind.List || index >= this.count) return dflt;
+    if (this.kind !== PtrKind.List) return dflt;
+    assertCapnp(index >= 0, "BOUNDS");
+    if (index >= this.count) return dflt;
     if (this.esize === ElemSize.EightBytes) {
       return loadU64(this.listElemBytes(index, 8), 0);
     }
@@ -687,7 +785,9 @@ export class Ptr {
   }
 
   listGetF64(index: number, dflt = 0): number {
-    if (this.kind !== PtrKind.List || index >= this.count) return dflt;
+    if (this.kind !== PtrKind.List) return dflt;
+    assertCapnp(index >= 0, "BOUNDS");
+    if (index >= this.count) return dflt;
     if (this.esize === ElemSize.EightBytes) {
       return loadF64(this.listElemBytes(index, 8), 0);
     }
@@ -698,13 +798,11 @@ export class Ptr {
   }
 
   listGetBool(index: number, dflt = false): boolean {
-    if (
-      this.kind !== PtrKind.List ||
-      this.esize !== ElemSize.Bit ||
-      index >= this.count
-    ) {
+    if (this.kind !== PtrKind.List || this.esize !== ElemSize.Bit) {
       return dflt;
     }
+    assertCapnp(index >= 0, "BOUNDS");
+    if (index >= this.count) return dflt;
     const base = this.msg.segs[this.seg]!.data;
     const off = this.word * WORD_BYTES + ((index / 8) | 0);
     const bit = 1 << (index % 8);
