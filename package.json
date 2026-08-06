@@ -3,7 +3,7 @@
   "private": true,
   "workspaces": ["packages/*", "examples/*"],
   "scripts": {
-    "test": "bun test packages/runtime",
+    "test": "bun test packages/runtime packages/codegen",
     "build": "bun run --filter @haozeke/capnp build && bun run --filter @haozeke/capnpc-ts build",
     "fixtures": "bash scripts/gen-sample-fixtures.sh"
   },
