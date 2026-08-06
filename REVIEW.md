@@ -58,8 +58,8 @@ packed + canonical CLI identity, list evolution / deep-copy / orphans,
 | M2 builder + framing + multi-seg far | `capnp-ts-x7xr` | **yes** | Builder + far/double-far + orphan adopt/disown tests green |
 | M3 packed + canonical CLI identity | `capnp-ts-73gz` / `4w78` | **yes** for AddressBook | Byte-identical pack + canonical goldens; suite + manual cmp |
 | M4 list evolution + deep-copy + orphans | `capnp-ts-rqle` | **mostly** | Upgrade/downgrade tests green; orphan disown/adopt + deepCopyPtr land; full matrix still open |
-| M5 `capnpc-ts` v1 | `capnp-ts-mga5` | **partial** | CGR open + rich AST walk + stub emit; not full typed modules |
-| u64probe smoke | `capnp-ts-44ob` | **no** | Schema present; not wired into codegen CI |
+| M5 `capnpc-ts` v1 | `capnp-ts-mga5` | **yes** | Typed emit: structs/enums/unions; AddressBook Alice/Bob decode |
+| u64probe smoke | `capnp-ts-44ob` | **yes** | Generated getU64 for UInt64/Int64; codegen CI test |
 | M7 Pi/OMP harness example | `capnp-ts-vjjx` | **yes** (decode/encode dogfood) | `Message.fromFlat` AddressBook; `CAPNP_ADMIT_BUILD` MessageBuilder; OMP ExtensionAPI wrap docs; no wait on full mga5 emit |
 | Parity audit note | `capnp-ts-89dv` | **no** | Not written |
 

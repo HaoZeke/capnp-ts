@@ -10,6 +10,11 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Added
 
+- `capnpc-ts` v1 typed emit: structs (word counts + getters), enums as const
+  maps (no TS `enum`), union `which()` + arm tags, List element helpers;
+  UInt64/Int64 always via `getU64`/`bigint` (u64probe CI smoke).
+- Generated AddressBook decodes runtime golden Alice/Bob; `capnp compile
+  -o…/capnpc-ts schema/addressbook.capnp` integration test.
 - Scalar get/set schema-default XOR (`wire = logical XOR default`) on
   `Ptr.get*` / `StructBuilder.set*`; float defaults XOR IEEE bit patterns.
 - Same-message orphan `disown` / `adopt` (`Orphan` handle) on
@@ -18,11 +23,11 @@ Pre-1.0 minor releases may include breaking API changes.
 - `@haozeke/capnp` package exports: `types` / `import` / `default` →
   optional `tsup` `dist/`; `bun` condition keeps TypeScript `src/` for Bun.
 - Codegen: rich CGR AST walk (nodes, fields, types, enumerants) via
-  `Message.fromFlat`; stub emit path unchanged.
+  `Message.fromFlat`.
 - Pi admit harness uses `@haozeke/capnp` Message reader + optional builder.
 - Offline c-capnproto twin emitter sketch under `interop/`.
 - Monorepo scaffold: `@haozeke/capnp` (runtime) and `@haozeke/capnpc-ts`
-  (codegen plugin stub), MIT license, Bun/pixi workspace.
+  (codegen plugin), MIT license, Bun/pixi workspace.
 - Runtime layers: `kinds`, `endian`, `pointer`, `message`, `builder`,
   `copy`, `serialize`, `packed`, `canonical` (public re-exports from
   `@haozeke/capnp`).
@@ -36,6 +41,6 @@ Pre-1.0 minor releases may include breaking API changes.
 ### Not yet
 
 - Full list-evolution matrix
-- `capnpc-ts` typed emit (v1 structs/enums/getters)
+- Codegen non-zero default XOR / full builders (M6)
 - Live c-capnproto twin interop
 - RPC (`@haozeke/capnp-rpc` Phase 2)

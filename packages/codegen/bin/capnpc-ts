@@ -5,7 +5,7 @@
  *   capnp compile -o./packages/codegen/bin/capnpc-ts schema.capnp
  *
  * Reads a framed CodeGeneratorRequest from stdin (or a file argument) and
- * writes stub .ts modules into the process working directory.
+ * writes typed .ts modules (structs/enums/unions) into the process cwd.
  */
 import { main } from "../src/plugin.ts";
 

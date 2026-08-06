@@ -1,6 +1,6 @@
 /**
  * capnpc-ts entry: read framed CodeGeneratorRequest from stdin or a file arg,
- * open CGR (Message.fromFlat when available, else hand-offset walk), emit stubs.
+ * walk full CGR AST (Message.fromFlat), emit typed TypeScript modules.
  *
  * Usage (from repo root or any cwd):
  *   capnp compile -o./packages/codegen/bin/capnpc-ts schema.capnp
@@ -11,8 +11,12 @@
  */
 
 import { readFileSync } from "node:fs";
-import { summarizeCgr, type CgrSummary } from "./cgr-walk.ts";
-import { emitFromSummary, emitSourceString } from "./emit.ts";
+import {
+  walkCgr,
+  summaryFromAst,
+  type CgrAst,
+} from "./cgr-walk.ts";
+import { emitFromAst, emitSourceString } from "./emit.ts";
 
 async function readInput(argv: string[]): Promise<Uint8Array> {
   const fileArg = argv.find((a) => a !== "--stdout" && a !== "-");
@@ -43,11 +47,9 @@ async function readInput(argv: string[]): Promise<Uint8Array> {
 }
 
 /**
- * Open CGR: try @haozeke/capnp Message.fromFlat, then hand walk.
- * On total failure, dump byte length and exit 1 with a helpful message.
+ * Open CGR via Message.fromFlat walk. On total failure, dump byte length and exit 1.
  */
-async function openCgr(bytes: Uint8Array): Promise<CgrSummary> {
-  // Probe Message availability (for diagnostics); summarizeCgr already prefers it.
+async function openCgr(bytes: Uint8Array): Promise<CgrAst> {
   let hasMessage = false;
   try {
     const capnp = await import("@haozeke/capnp");
@@ -57,7 +59,7 @@ async function openCgr(bytes: Uint8Array): Promise<CgrSummary> {
   }
 
   try {
-    return await summarizeCgr(bytes);
+    return await walkCgr(bytes);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(
@@ -66,12 +68,10 @@ async function openCgr(bytes: Uint8Array): Promise<CgrSummary> {
     console.error(`  ${msg}`);
     if (!hasMessage) {
       console.error(
-        "  @haozeke/capnp Message/fromFlat is not importable; hand walk also failed.",
+        "  @haozeke/capnp Message/fromFlat is not importable; CGR walk failed.",
       );
     } else {
-      console.error(
-        "  Message.fromFlat and hand-offset walk both failed on this buffer.",
-      );
+      console.error("  Message.fromFlat CGR walk failed on this buffer.");
     }
     console.error(
       "  Usage: capnp compile -o./packages/codegen/bin/capnpc-ts schema.capnp",
@@ -102,14 +102,15 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     return;
   }
 
-  let summary: CgrSummary;
+  let ast: CgrAst;
   try {
-    summary = await openCgr(bytes);
+    ast = await openCgr(bytes);
   } catch {
     console.error(`capnpc-ts: input byte length = ${bytes.length}`);
     return;
   }
 
+  const summary = summaryFromAst(ast);
   console.error(
     `capnpc-ts: CGR ok - nodes=${summary.nodeCount}, requestedFiles=${summary.requestedFileCount}` +
       (summary.requestedFilenames.length
@@ -119,11 +120,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
 
   const dry = argv.includes("--stdout");
   if (dry) {
-    process.stdout.write(emitSourceString(summary));
+    process.stdout.write(emitSourceString(ast));
     return;
   }
 
-  const result = emitFromSummary(summary, process.cwd());
+  const result = emitFromAst(ast, process.cwd());
   for (const p of result.written) {
     console.error(`capnpc-ts: wrote ${p}`);
   }

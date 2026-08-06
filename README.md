@@ -11,16 +11,17 @@ where claimed.
 **Status:** early (`0.1.0-dev`). Runtime ships a message reader, stream
 framing, multi-segment builder, packed codec, canonical form, and list
 upgrade/downgrade views. Packed and canonical match Cap'n C++ 1.4.0
-AddressBook goldens byte-for-byte. `capnpc-ts` opens a framed
-`CodeGeneratorRequest` and writes stub modules; full typed struct/enum emit
-is not shipped. RPC is a later package, not a v1 gate.
+AddressBook goldens byte-for-byte. `capnpc-ts` walks a framed
+`CodeGeneratorRequest` and emits typed ESM (structs, const-map enums,
+unions/`which`, UInt64 via `getU64`/`bigint`). RPC is a later package, not a
+v1 gate.
 
 npm packages:
 
 | Package | Role |
 |---------|------|
 | [`@haozeke/capnp`](packages/runtime) | Wire runtime (kinds, pointer, message, builder, packed, canonical) |
-| [`@haozeke/capnpc-ts`](packages/codegen) | `capnp compile -o` plugin (CGR open + stub emit; typed modules not ready) |
+| [`@haozeke/capnpc-ts`](packages/codegen) | `capnp compile -o` plugin (typed struct/enum/union emit) |
 
 Not a soft fork of the unmaintained `jdiaz5513/capnp-ts`, not a libcapnp /
 node-capnp FFI wrapper, and not Cap'n Web.
@@ -44,10 +45,11 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
   `capnp convert binary:canonical` on AddressBook
 - Traversal word budget (8 Mi words) and nesting depth limit (64), C++ defaults
 - AddressBook sample schema and CLI goldens under `packages/runtime/test/golden/`
-- `capnpc-ts` plugin: framed CGR on stdin/file, stub `.ts` per requested schema
+- `capnpc-ts` plugin: framed CGR on stdin/file, typed `.ts` per requested schema
+  (layout constants, getters, const-map enums, union `which`, u64probe-safe)
 
-Not yet shipped: full list-evolution matrix, full `capnpc-ts` typed emit
-(structs/enums/unions), dynamic reflection, RPC.
+Not yet shipped: full list-evolution matrix, non-zero default XOR in codegen
+setters, dynamic reflection, RPC.
 
 ## Parity
 
@@ -65,7 +67,7 @@ present. Do not treat this table as a green checklist for unbuilt work.
 | Schema-evolution reads (defaults past end, list up/downgrade) | partial | yes | yes | yes | **partial** (supported upgrade/downgrade views; not full matrix) |
 | Builder / deep copy / orphans | limited | yes | yes | partial | **yes** (multi-seg arena + far/double-far; orphan disown/adopt; deepCopyPtr) |
 | Canonical form | no | yes | yes | yes | **yes** (AddressBook golden byte-identical to CLI) |
-| Code generator (`capnp compile -o`) | yes | yes | yes | yes | **partial** (opens CGR + stub modules; typed emit not shipped) |
+| Code generator (`capnp compile -o`) | yes | yes | yes | yes | **yes** (v1: structs/enums/unions/getters; M6 defaults/setters open) |
 | RPC | no | yes | yes | out of scope for v0.x | **no** (Phase 2 package; not Tier A) |
 
 The serialization bar is Cap'n C++ 1.4.0 (`capnp encode` /
@@ -187,7 +189,7 @@ Codegen plugin usage (stub modules today): see
 
 ```
 packages/runtime/   @haozeke/capnp wire runtime + golden tests
-packages/codegen/   @haozeke/capnpc-ts plugin (CGR + stub emit)
+packages/codegen/   @haozeke/capnpc-ts plugin (typed emit v1)
 schema/             addressbook, calculator Expression, u64probe
 scripts/            fixture regen against capnp CLI
 interop/            live twin notes (Phase 2)
@@ -209,7 +211,7 @@ examples/           Pi/OMP admit harness (planned)
 
 | Tree | Product | Role |
 |------|---------|------|
-| TypeScript | this repo | Wire runtime + `capnpc-ts` (stub emit today) |
+| TypeScript | this repo | Wire runtime + `capnpc-ts` (typed emit v1) |
 | Fortran | [capnp-fortran](https://github.com/HaoZeke/capnp-fortran) | Serialization + RPC parity bar |
 | Janet | [capnp-janet](https://github.com/HaoZeke/capnp-janet) | Ship lessons (`List(Text)` C=6, pack 0xff) |
 | C | [c-capnproto](https://github.com/HaoZeke/c-capnproto) | Live golden peer (Phase 2) |

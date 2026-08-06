@@ -1,12 +1,23 @@
 /**
- * v1 emit skeleton for capnpc-ts.
+ * TypeScript emitter for CodeGeneratorRequest ASTs (capnpc-ts v1).
  *
- * Full struct/enum/union emit is TODO (capnp-ts-mga5). This path writes a
- * TypeScript module whose header comment records CGR node / requestedFiles
- * counts so the plugin pipeline can be smoke-tested before the full emitter.
+ * Emits one ESM module per requested schema file:
+ *   - struct dataWordCount / pointerCount layout constants
+ *   - typed field getters (Ptr methods)
+ *   - enums as const maps (no TypeScript `enum` keyword)
+ *   - union which() + arm tag constants
+ *   - UInt64/Int64 always via getU64 (bigint), never getU32
+ *
+ * Defaults XOR is zero-only for v1 (schema default 0). M6 adds non-zero defaults.
  */
 
-import type { CgrSummary } from "./cgr-walk.ts";
+import type {
+  CgrAst,
+  FieldAst,
+  NodeAst,
+  TypeAst,
+} from "./cgr-walk.ts";
+import { NO_DISCRIMINANT } from "./cgr-walk.ts";
 import { basename, dirname, join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
 
@@ -24,43 +35,443 @@ export function outputNameForSchema(schemaPath: string): string {
   return `${stem}.ts`;
 }
 
+// ---------------------------------------------------------------------------
+// Naming
+// ---------------------------------------------------------------------------
+
+/** Short type name from Node.displayName (`path:Person.PhoneNumber` -> `Person_PhoneNumber`). */
+export function shortTypeName(displayName: string): string {
+  const colon = displayName.lastIndexOf(":");
+  const nested = colon >= 0 ? displayName.slice(colon + 1) : displayName;
+  const bare = nested.includes("/")
+    ? nested.slice(nested.lastIndexOf("/") + 1)
+    : nested;
+  // Cap'n nested dots are not valid TS identifiers; use underscores.
+  return bare.replace(/\./g, "_").replace(/[^A-Za-z0-9_]/g, "_");
+}
+
+/** Safe identifier for a field / enumerant name (already schema identifiers). */
+function ident(name: string): string {
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return name;
+  return name.replace(/[^A-Za-z0-9_]/g, "_");
+}
+
+/** Upper-snake layout constant prefix from short type name. */
+function upperSnake(name: string): string {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/_+/g, "_")
+    .toUpperCase();
+}
+
+// ---------------------------------------------------------------------------
+// Type / offset helpers
+// ---------------------------------------------------------------------------
+
+/** Cap'n slot offset → data-section byte offset (or bit for bool). */
+function dataByteOffset(typeWhich: string, slotOffset: number): number {
+  switch (typeWhich) {
+    case "bool":
+      return slotOffset; // bit index; caller uses getBool
+    case "int8":
+    case "uint8":
+      return slotOffset;
+    case "int16":
+    case "uint16":
+    case "enum":
+      return slotOffset * 2;
+    case "int32":
+    case "uint32":
+    case "float32":
+      return slotOffset * 4;
+    case "int64":
+    case "uint64":
+    case "float64":
+      return slotOffset * 8;
+    default:
+      return slotOffset;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Node selection for a requested file
+// ---------------------------------------------------------------------------
+
+/** All node ids nested under a file id (scopeId chain). */
+export function nodesForFile(ast: CgrAst, fileId: bigint): NodeAst[] {
+  const ids = new Set<bigint>([fileId]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const n of ast.nodes) {
+      if (ids.has(n.scopeId) && !ids.has(n.id)) {
+        ids.add(n.id);
+        grew = true;
+      }
+    }
+  }
+  return ast.nodes.filter((n) => ids.has(n.id) && n.which !== "file");
+}
+
+// ---------------------------------------------------------------------------
+// Emit one module
+// ---------------------------------------------------------------------------
+
+function emitEnum(node: NodeAst, lines: string[]): void {
+  const name = shortTypeName(node.displayName);
+  const enumerants = node.enumerants ?? [];
+  lines.push(`/** Enum ${node.displayName} (const map; no TS enum keyword). */`);
+  lines.push(`export const ${name} = {`);
+  for (let i = 0; i < enumerants.length; i++) {
+    const e = enumerants[i]!;
+    lines.push(`  ${ident(e.name)}: ${i},`);
+  }
+  lines.push(`} as const;`);
+  lines.push(
+    `export type ${name} = (typeof ${name})[keyof typeof ${name}];`,
+  );
+  lines.push(``);
+}
+
+function emitFieldGetter(
+  typeName: string,
+  field: FieldAst,
+  lines: string[],
+): void {
+  if (!field.slot) return;
+  const fname = ident(field.name);
+  const fn = `${typeName}_get${fname[0]!.toUpperCase()}${fname.slice(1)}`;
+  const t = field.slot.type;
+  const off = field.slot.offset;
+
+  switch (t.which) {
+    case "void":
+      // No payload; union arms use which() only.
+      return;
+    case "bool":
+      lines.push(
+        `export function ${fn}(ptr: Ptr, dflt = false): boolean {`,
+        `  return ptr.getBool(${off}, dflt);`,
+        `}`,
+        ``,
+      );
+      return;
+    case "int8":
+    case "uint8":
+      lines.push(
+        `export function ${fn}(ptr: Ptr, dflt = 0): number {`,
+        `  return ptr.getU8(${dataByteOffset(t.which, off)}, dflt);`,
+        `}`,
+        ``,
+      );
+      return;
+    case "int16":
+    case "uint16":
+    case "enum":
+      lines.push(
+        `export function ${fn}(ptr: Ptr, dflt = 0): number {`,
+        `  return ptr.getU16(${dataByteOffset(t.which, off)}, dflt);`,
+        `}`,
+        ``,
+      );
+      return;
+    case "int32":
+    case "uint32":
+      lines.push(
+        `export function ${fn}(ptr: Ptr, dflt = 0): number {`,
+        `  return ptr.getU32(${dataByteOffset(t.which, off)}, dflt);`,
+        `}`,
+        ``,
+      );
+      return;
+    case "int64":
+    case "uint64":
+      // CRITICAL: full u64 path (bigint). Never getU32 for 64-bit fields.
+      lines.push(
+        `export function ${fn}(ptr: Ptr, dflt: bigint = 0n): bigint {`,
+        `  return ptr.getU64(${dataByteOffset(t.which, off)}, dflt);`,
+        `}`,
+        ``,
+      );
+      return;
+    case "float32":
+      // Runtime exposes f64; float32 wire is u32 bits — read as u32 for v1.
+      lines.push(
+        `export function ${fn}(ptr: Ptr, dflt = 0): number {`,
+        `  return ptr.getU32(${dataByteOffset(t.which, off)}, dflt);`,
+        `}`,
+        ``,
+      );
+      return;
+    case "float64":
+      lines.push(
+        `export function ${fn}(ptr: Ptr, dflt = 0): number {`,
+        `  return ptr.getF64(${dataByteOffset(t.which, off)}, dflt);`,
+        `}`,
+        ``,
+      );
+      return;
+    case "text":
+      lines.push(
+        `export function ${fn}(ptr: Ptr): string {`,
+        `  return ptr.getText(${off});`,
+        `}`,
+        ``,
+      );
+      return;
+    case "data":
+      lines.push(
+        `export function ${fn}(ptr: Ptr): Uint8Array {`,
+        `  return ptr.getData(${off});`,
+        `}`,
+        ``,
+      );
+      return;
+    case "list":
+    case "struct":
+    case "interface":
+    case "anyPointer":
+      lines.push(
+        `export function ${fn}(ptr: Ptr): Ptr {`,
+        `  return ptr.getP(${off});`,
+        `}`,
+        ``,
+      );
+      if (t.which === "list") {
+        // Element access helpers for List(Struct|Text|Data).
+        const elem = t.elementType;
+        if (elem.which === "struct" || elem.which === "list") {
+          lines.push(
+            `export function ${fn}Len(ptr: Ptr): number {`,
+            `  return ptr.getP(${off}).listLen();`,
+            `}`,
+            ``,
+            `export function ${fn}At(ptr: Ptr, index: number): Ptr {`,
+            `  return ptr.getP(${off}).listGetP(index);`,
+            `}`,
+            ``,
+          );
+        } else if (elem.which === "text") {
+          lines.push(
+            `export function ${fn}Len(ptr: Ptr): number {`,
+            `  return ptr.getP(${off}).listLen();`,
+            `}`,
+            ``,
+            `export function ${fn}At(ptr: Ptr, index: number): string {`,
+            `  return ptr.getP(${off}).listGetP(index).getText(0);`,
+            `}`,
+            ``,
+          );
+        }
+      }
+      return;
+    default:
+      return;
+  }
+}
+
+function emitStruct(node: NodeAst, lines: string[]): void {
+  const s = node.struct;
+  if (!s) return;
+  const typeName = shortTypeName(node.displayName);
+  const upper = upperSnake(typeName);
+
+  lines.push(
+    `/** Struct ${node.displayName}` +
+      (s.isGroup ? " (group / union overlay)" : "") +
+      `. */`,
+  );
+  lines.push(`export const ${upper}_DWORDS = ${s.dataWordCount};`);
+  lines.push(`export const ${upper}_PWORDS = ${s.pointerCount};`);
+  lines.push(`export const ${typeName}_dataWordCount = ${s.dataWordCount};`);
+  lines.push(`export const ${typeName}_pointerCount = ${s.pointerCount};`);
+
+  if (s.discriminantCount > 0) {
+    // discriminantOffset is in 16-bit units → byte offset * 2.
+    const discByte = (s.discriminantOffset * 2) >>> 0;
+    lines.push(
+      `/** Union discriminant byte offset (u16). */`,
+      `export const ${typeName}_discriminantOffset = ${discByte};`,
+      `export function ${typeName}_which(ptr: Ptr): number {`,
+      `  return ptr.getU16(${discByte});`,
+      `}`,
+    );
+    // Arm tag constants from fields that carry a discriminant.
+    const tags: { name: string; tag: number }[] = [];
+    for (const f of s.fields) {
+      if (f.discriminant !== NO_DISCRIMINANT) {
+        tags.push({ name: ident(f.name), tag: f.discriminant });
+      }
+    }
+    if (tags.length > 0) {
+      lines.push(`export const ${typeName} = {`);
+      for (const t of tags) {
+        lines.push(`  ${t.name}: ${t.tag},`);
+      }
+      lines.push(`} as const;`);
+      lines.push(
+        `export type ${typeName} = (typeof ${typeName})[keyof typeof ${typeName}];`,
+      );
+    }
+    lines.push(``);
+  } else {
+    lines.push(``);
+  }
+
+  for (const f of s.fields) {
+    if (f.group) {
+      // Group field: same Ptr as parent; which/getters live on the group node.
+      const gName = ident(f.name);
+      lines.push(
+        `/** Group field \`${f.name}\` — same wire Ptr as parent; see group node helpers. */`,
+        `export function ${typeName}_get${gName[0]!.toUpperCase()}${gName.slice(1)}(ptr: Ptr): Ptr {`,
+        `  return ptr;`,
+        `}`,
+        ``,
+      );
+      continue;
+    }
+    emitFieldGetter(typeName, f, lines);
+  }
+}
+
 /**
- * Emit one stub TypeScript module for a requested schema file.
- * Content is intentionally minimal: counts + TODO markers for full emit.
+ * Emit one TypeScript module source for a requested schema file.
+ */
+export function emitModuleSource(
+  ast: CgrAst,
+  schemaPath: string,
+  fileId?: bigint,
+): string {
+  const resolvedId =
+    fileId ??
+    ast.requestedFiles.find((f) => f.filename === schemaPath)?.id ??
+    ast.requestedFiles[0]?.id ??
+    0n;
+
+  const nodes =
+    resolvedId === 0n
+      ? ast.nodes.filter((n) => n.which !== "file")
+      : nodesForFile(ast, resolvedId);
+
+  const lines: string[] = [];
+  lines.push(`/**`);
+  lines.push(` * Generated by @haozeke/capnpc-ts. Do not hand-edit.`);
+  lines.push(` *`);
+  lines.push(` * Source schema: ${schemaPath}`);
+  lines.push(
+    ` * CodeGeneratorRequest: nodes=${ast.nodes.length}, requestedFiles=${ast.requestedFiles.length}`,
+  );
+  lines.push(
+    ` * File id: 0x${resolvedId.toString(16)} (emitted ${nodes.length} nested nodes)`,
+  );
+  lines.push(` *`);
+  lines.push(
+    ` * Enums are const maps (Bun strip-safe). UInt64/Int64 use getU64/bigint.`,
+  );
+  lines.push(` */`);
+  lines.push(``);
+  lines.push(`import type { Ptr } from "@haozeke/capnp";`);
+  lines.push(``);
+  lines.push(
+    `export const __capnpcTsMeta = {`,
+    `  schemaPath: ${JSON.stringify(schemaPath)},`,
+    `  nodeCount: ${ast.nodes.length},`,
+    `  requestedFileCount: ${ast.requestedFiles.length},`,
+    `  fileId: 0x${resolvedId.toString(16)}n,`,
+    `  emittedNodes: ${nodes.length},`,
+    `} as const;`,
+    ``,
+  );
+
+  // Enums first (referenced by struct field comments / types).
+  for (const n of nodes) {
+    if (n.which === "enum") emitEnum(n, lines);
+  }
+  for (const n of nodes) {
+    if (n.which === "struct") emitStruct(n, lines);
+  }
+
+  // Interfaces / consts / annotations: v1 emits nothing (M6+).
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Public write API
+// ---------------------------------------------------------------------------
+
+/**
+ * Write typed modules for each requested file under `outDir` (default cwd).
+ */
+export function emitFromAst(
+  ast: CgrAst,
+  outDir: string = process.cwd(),
+): EmitResult {
+  const written: string[] = [];
+  const files =
+    ast.requestedFiles.length > 0
+      ? ast.requestedFiles
+      : [{ id: 0n, filename: "codegen-request.capnp" }];
+
+  for (const rf of files) {
+    const schemaPath = rf.filename || "codegen-request.capnp";
+    const name = outputNameForSchema(schemaPath);
+    const dest = join(outDir, name);
+    const src = emitModuleSource(ast, schemaPath, rf.id);
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, src, "utf8");
+    written.push(dest);
+  }
+
+  return { written };
+}
+
+/**
+ * Single-module string emit (tests / dry-run). Prefers first requested filename.
+ */
+export function emitSourceString(ast: CgrAst): string {
+  const schemaPath =
+    ast.requestedFiles[0]?.filename ?? "codegen-request.capnp";
+  const fileId = ast.requestedFiles[0]?.id;
+  return emitModuleSource(ast, schemaPath, fileId);
+}
+
+// ---------------------------------------------------------------------------
+// Backward-compat aliases (summary-only callers during migration)
+// ---------------------------------------------------------------------------
+
+import type { CgrSummary } from "./cgr-walk.ts";
+
+/**
+ * @deprecated Prefer emitFromAst(walkCgr(...)). Summary-only path cannot emit
+ * typed getters; writes a minimal meta module for smoke continuity.
  */
 export function emitStubModule(
   summary: CgrSummary,
   schemaPath: string,
 ): string {
   const out = outputNameForSchema(schemaPath);
-  const lines = [
+  return [
     `/**`,
-    ` * Generated by @haozeke/capnpc-ts (skeleton). Do not hand-edit long-term.`,
+    ` * Generated by @haozeke/capnpc-ts (meta-only; no AST). Do not hand-edit.`,
     ` *`,
     ` * Source schema: ${schemaPath}`,
     ` * CodeGeneratorRequest: nodes=${summary.nodeCount}, requestedFiles=${summary.requestedFileCount}`,
     ` *`,
-    ` * TODO: full two-pass emit - structs, enums as const maps,`,
-    ` * unions/which, List(Text) helpers, u64 via get-u64 (not u32).`,
-    ` * Interim hand-rolled AddressBook lives at`,
-    ` * packages/runtime/src/generated/addressbook.ts until this emitter lands.`,
+    ` * Call emitFromAst with a full CGR walk for typed struct/enum emit.`,
     ` */`,
     ``,
     `// Output target: ${out}`,
-    `export const __capnpcTsSkeleton = {`,
+    `export const __capnpcTsMeta = {`,
     `  schemaPath: ${JSON.stringify(schemaPath)},`,
     `  nodeCount: ${summary.nodeCount},`,
     `  requestedFileCount: ${summary.requestedFileCount},`,
     `} as const;`,
     ``,
-  ];
-  return lines.join("\n");
+  ].join("\n");
 }
 
-/**
- * Write stub modules for each requested file under `outDir` (default cwd).
- * If the CGR listed no filenames, write `codegen-request.ts` with counts only.
- */
+/** @deprecated Prefer emitFromAst. */
 export function emitFromSummary(
   summary: CgrSummary,
   outDir: string = process.cwd(),
@@ -81,13 +492,4 @@ export function emitFromSummary(
   }
 
   return { written };
-}
-
-/**
- * Single-module string emit (tests / dry-run). Prefers first requested filename.
- */
-export function emitSourceString(summary: CgrSummary): string {
-  const schemaPath =
-    summary.requestedFilenames[0] ?? "codegen-request.capnp";
-  return emitStubModule(summary, schemaPath);
 }
