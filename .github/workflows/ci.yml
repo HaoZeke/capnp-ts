@@ -1,0 +1,59 @@
+# Bun workspace: unit tests, optional capnp fixture regen, capnpc-ts smoke.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Test
+        run: bun test
+
+      - name: Typecheck packages
+        run: bun run build
+
+      - name: Install capnproto (fixture regen + codegen smoke)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y capnproto
+          capnp --version
+
+      - name: Fixture regen smoke
+        run: |
+          bun run fixtures
+          test -s packages/runtime/test/golden/addressbook.bin
+          test -s packages/runtime/test/golden/addressbook.packed.bin
+          test -s packages/runtime/test/golden/addressbook.canonical.bin
+
+      - name: Codegen smoke
+        run: |
+          mkdir -p /tmp/capnpc-ts-smoke
+          capnp compile -o- schema/addressbook.capnp \
+            > /tmp/capnpc-ts-smoke/addressbook.cgr.bin
+          test -s /tmp/capnpc-ts-smoke/addressbook.cgr.bin
+          cd /tmp/capnpc-ts-smoke
+          "$GITHUB_WORKSPACE/packages/codegen/bin/capnpc-ts" \
+            --stdout addressbook.cgr.bin | head -c 400
+          echo
+          "$GITHUB_WORKSPACE/packages/codegen/bin/capnpc-ts" addressbook.cgr.bin
+          test -s addressbook.ts
