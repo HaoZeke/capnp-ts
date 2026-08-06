@@ -1,7 +1,10 @@
 {
-  "name": "capnp-ts-workspace",
+  "name": "@haozeke/capnp",
   "private": true,
-  "workspaces": ["packages/*", "examples/*"],
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
   "scripts": {
     "test": "bun test packages/runtime packages/codegen",
     "build": "bun run --filter @haozeke/capnp build && bun run --filter @haozeke/capnpc-ts build",
@@ -10,5 +13,15 @@
   "devDependencies": {
     "typescript": "^5.8.2",
     "@types/bun": "latest"
-  }
+  },
+  "version": "0.1.0-dev",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./packages/runtime/src/index.ts",
+      "import": "./packages/runtime/src/index.ts",
+      "default": "./packages/runtime/src/index.ts"
+    }
+  },
+  "main": "./packages/runtime/src/index.ts"
 }
