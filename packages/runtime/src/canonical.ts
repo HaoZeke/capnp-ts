@@ -10,7 +10,7 @@
  * capnp_canonical.f90 (preorder copy into one segment).
  */
 
-import { loadU64, storeU64 } from "./endian.ts";
+import { storeU64 } from "./endian.ts";
 import {
   CapnpError,
   DEFAULT_DEPTH_LIMIT,
@@ -22,46 +22,13 @@ import {
 import { Message, type Ptr } from "./message.ts";
 import { wpMakeList, wpMakeStruct } from "./pointer.ts";
 
-// --- segment access (tolerant of segs SegmentView[] vs segments Uint8Array[]) -
-
-function segmentData(msg: Message, seg: number): Uint8Array {
-  const anyMsg = msg as Message & {
-    segs?: ReadonlyArray<{ data: Uint8Array; words: number }>;
-    segments?: Uint8Array[];
-    readWord?: (seg: number, word: number) => bigint;
-  };
-  if (anyMsg.segs && anyMsg.segs[seg]) {
-    return anyMsg.segs[seg]!.data;
-  }
-  const s = anyMsg.segments?.[seg];
-  if (!s) throw new CapnpError("SEGMENT", `segment ${seg} missing`);
-  return s;
-}
-
-function readSegWord(msg: Message, seg: number, word: number): bigint {
-  const anyMsg = msg as Message & {
-    readWord?: (seg: number, word: number) => bigint;
-  };
-  if (typeof anyMsg.readWord === "function") {
-    return anyMsg.readWord(seg, word);
-  }
-  return loadU64(segmentData(msg, seg), word * WORD_BYTES);
-}
-
-function copyFromPtrBytes(dest: Uint8Array, destOff: number, src: Ptr, nbytes: number): void {
-  if (nbytes <= 0) return;
-  const data = segmentData(src.msg, src.seg);
-  const s = src.word * WORD_BYTES + (src.bodyByte || 0);
-  dest.set(data.subarray(s, s + nbytes), destOff);
-}
-
 // --- truncation --------------------------------------------------------------
 
 /** Trailing zero words dropped from a struct's data section. */
 function trimmedDwords(p: Ptr): number {
   let nd = p.dwords;
   while (nd > 0) {
-    if (readSegWord(p.msg, p.seg, p.word + nd - 1) !== 0n) break;
+    if (p.msg.readWord(p.seg, p.word + nd - 1) !== 0n) break;
     nd--;
   }
   return nd;
@@ -71,30 +38,10 @@ function trimmedDwords(p: Ptr): number {
 function trimmedPwords(p: Ptr): number {
   let np = p.pwords;
   while (np > 0) {
-    const child = typeof p.getP === "function" ? p.getP(np - 1) : p.getp(np - 1);
-    if (child.kind !== PtrKind.Null) break;
+    if (p.getP(np - 1).kind !== PtrKind.Null) break;
     np--;
   }
   return np;
-}
-
-function getChildPtr(p: Ptr, index: number): Ptr {
-  return typeof p.getP === "function" ? p.getP(index) : p.getp(index);
-}
-
-function listElemStruct(list: Ptr, index: number): Ptr {
-  if (typeof list.listGetStruct === "function") {
-    return list.listGetStruct(index);
-  }
-  return typeof list.listGetP === "function"
-    ? list.listGetP(index)
-    : list.listGetp(index);
-}
-
-function listElemPtr(list: Ptr, index: number): Ptr {
-  return typeof list.listGetP === "function"
-    ? list.listGetP(index)
-    : list.listGetp(index);
 }
 
 /**
@@ -105,7 +52,7 @@ function compositeTrim(list: Ptr): { nd: number; np: number } {
   let nd = 0;
   let np = 0;
   for (let i = 0; i < list.count; i++) {
-    const el = listElemStruct(list, i);
+    const el = list.listGetStruct(i);
     const td = trimmedDwords(el);
     const tp = trimmedPwords(el);
     if (td > nd) nd = td;
@@ -147,6 +94,13 @@ class CanonBuilder {
     storeU64(this.data, word * WORD_BYTES, v);
   }
 
+  copyBytesFrom(destWord: number, src: Ptr, nbytes: number): void {
+    if (nbytes <= 0) return;
+    const seg = src.msg.segs[src.seg]!;
+    const s = src.word * WORD_BYTES + (src.bodyByte || 0);
+    this.data.set(seg.data.subarray(s, s + nbytes), destWord * WORD_BYTES);
+  }
+
   finish(): Uint8Array {
     return this.data.subarray(0, this.words * WORD_BYTES);
   }
@@ -162,7 +116,7 @@ function writeStructBodyData(
   if (src.dataBits > 0) {
     nbytes = Math.min(nbytes, (src.dataBits + 7) >>> 3);
   }
-  copyFromPtrBytes(b.data, bodyWord * WORD_BYTES, src, nbytes);
+  b.copyBytesFrom(bodyWord, src, nbytes);
 }
 
 function copyPtrToWord(
@@ -202,7 +156,7 @@ function copyPtrToWord(
     for (let k = 0; k < np; k++) {
       const cslot = body + nd + k;
       if (k < src.pwords) {
-        copyPtrToWord(b, cslot, getChildPtr(src, k), depth + 1);
+        copyPtrToWord(b, cslot, src.getP(k), depth + 1);
       } else {
         b.storeWord(cslot, 0n);
       }
@@ -233,12 +187,12 @@ function writeListToSlot(
     b.storeWord(slotWord, wpMakeList(off, ElemSize.Composite, content));
     const first = tagWord + 1;
     for (let i = 0; i < n; i++) {
-      const el = listElemStruct(list, i);
+      const el = list.listGetStruct(i);
       writeStructBodyData(b, first + i * step, nd, el);
       for (let k = 0; k < np; k++) {
         const cslot = first + i * step + nd + k;
         if (k < el.pwords) {
-          copyPtrToWord(b, cslot, getChildPtr(el, k), depth + 1);
+          copyPtrToWord(b, cslot, el.getP(k), depth + 1);
         } else {
           b.storeWord(cslot, 0n);
         }
@@ -257,7 +211,7 @@ function writeListToSlot(
     const off = listStart - slotWord - 1;
     b.storeWord(slotWord, wpMakeList(off, ElemSize.Pointer, n));
     for (let i = 0; i < n; i++) {
-      copyPtrToWord(b, listStart + i, listElemPtr(list, i), depth + 1);
+      copyPtrToWord(b, listStart + i, list.listGetP(i), depth + 1);
     }
     return;
   }
@@ -273,7 +227,12 @@ function writeListToSlot(
   let start: number;
   if (nwords > 0) {
     start = b.alloc(nwords);
-    copyFromPtrBytes(b.data, start * WORD_BYTES, list, nbytes);
+    const seg = list.msg.segs[list.seg]!;
+    const srcOff = list.word * WORD_BYTES;
+    b.data.set(
+      seg.data.subarray(srcOff, srcOff + nbytes),
+      start * WORD_BYTES,
+    );
   } else {
     start = slotWord + 1;
   }
