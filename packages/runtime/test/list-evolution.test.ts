@@ -115,7 +115,7 @@ describe("list upgrade views (prim/pointer -> struct field @0)", () => {
   });
 });
 
-describe("list upgrade refused (Bool / Void)", () => {
+describe("list upgrade: Void allowed, Bool refused", () => {
   test("List(Bool) cannot upgrade", () => {
     const words = [
       wpMakeStruct(0, 0, 1),
@@ -139,7 +139,8 @@ describe("list upgrade refused (Bool / Void)", () => {
     }
   });
 
-  test("List(Void) cannot upgrade; length only", () => {
+  test("List(Void) upgrades to zero-size struct (encoding.html)", () => {
+    // encoding.html: any element size except bit may decode as struct list.
     const words = [
       wpMakeStruct(0, 0, 1),
       wpMakeList(0, ElemSize.Void, 42),
@@ -148,7 +149,15 @@ describe("list upgrade refused (Bool / Void)", () => {
     const list = msg.root().getP(0);
     expect(list.esize).toBe(ElemSize.Void);
     expect(list.listLen()).toBe(42);
-    expect(() => list.listGetStruct(0)).toThrow(CapnpError);
+
+    const el = list.listGetStruct(0);
+    expect(el.kind).toBe(PtrKind.Struct);
+    expect(el.dwords).toBe(0);
+    expect(el.pwords).toBe(0);
+    // Zero-size: field reads yield caller defaults.
+    expect(el.getU32(0, 99)).toBe(99);
+    expect(el.getU64(0, 7n)).toBe(7n);
+    expect(list.listGetStruct(41).kind).toBe(PtrKind.Struct);
     expect(list.listGetU32(0, 99)).toBe(99);
   });
 });

@@ -15,8 +15,10 @@
  * Upgrade views limit `dataBits` to the element width so oversize field reads
  * return the caller default and never spill into the next element.
  *
- * Explicit non-goals (KIND or default, no silent partial):
- * - List(Bool) and List(Void) do not upgrade to struct views.
+ * encoding.html: any list element size except bit (C=1) may be decoded as a
+ * struct list. List(Void) upgrades to a zero-size struct view. Explicit
+ * non-goals (KIND or default, no silent partial):
+ * - List(Bool) / bit lists do not upgrade to struct views.
  * - Cross-width primitive demotion without a composite is not supported.
  *
  * Implementation lives on {@link Ptr} in message.ts; this module re-exports

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { CapnpError } from "../src/kinds.ts";
 import { pack, unpack } from "../src/packed.ts";
 
 const golden = (name: string) =>
@@ -27,5 +28,22 @@ describe("packed codec", () => {
     const bin = golden("addressbook.bin");
     const packed = golden("addressbook.packed.bin");
     expect([...unpack(packed)]).toEqual([...bin]);
+  });
+
+  test("unpack rejects packed amplification bomb with PACKED", () => {
+    // Each 0x00 0xff expands to 256 zero words (tag word + 255 more).
+    // With a tight maxWords, a short packed stream must not allocate huge.
+    const bomb = new Uint8Array(64);
+    for (let i = 0; i < bomb.length; i += 2) {
+      bomb[i] = 0x00;
+      bomb[i + 1] = 0xff;
+    }
+    try {
+      unpack(bomb, { maxWords: 16 });
+      expect.unreachable("expected CapnpError PACKED");
+    } catch (e) {
+      expect(e).toBeInstanceOf(CapnpError);
+      expect((e as CapnpError).code).toBe("PACKED");
+    }
   });
 });

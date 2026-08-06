@@ -53,6 +53,16 @@ function asView(s: SegmentInput): SegmentView {
     assertCapnp(s.byteLength % WORD_BYTES === 0, "FRAMING", "segment not word-aligned");
     return { data: s, words: s.byteLength / WORD_BYTES };
   }
+  assertCapnp(
+    Number.isFinite(s.words) && s.words >= 0 && (s.words | 0) === s.words,
+    "FRAMING",
+    "bad segment word count",
+  );
+  assertCapnp(
+    s.data.byteLength >= s.words * WORD_BYTES,
+    "FRAMING",
+    "segment buffer shorter than words*8",
+  );
   return s;
 }
 
@@ -318,6 +328,13 @@ function resolveWord(
   }
 
   if (kind === WireKind.Cap) {
+    // encoding.html: B (30 bits after the kind) must be zero; other values
+    // are reserved for future "other" pointer forms.
+    assertCapnp(
+      ((w >> 2n) & 0x3fff_ffffn) === 0n,
+      "KIND",
+      "capability reserved bits nonzero",
+    );
     return Ptr.cap(m, seg, word, Number((w >> 32n) & 0xffff_ffffn), depth);
   }
   throw new CapnpError("KIND");
@@ -633,9 +650,10 @@ export class Ptr {
    * - Primitive byte/two/four/eight: upgrade view — field @0 is the element;
    *   `dataBits` limits oversize reads so they yield defaults (no neighbour spill).
    * - Pointer list (e.g. List(Text)): upgrade to 0-data / 1-pointer struct.
-   * - List(Bool) / List(Void): refuse with KIND (encoding.html list-upgrade rules).
+   * - List(Void): zero-size struct view (encoding.html: any esize except bit).
+   * - List(Bool) / bit: refuse with KIND (only special exception in encoding.html).
    *
-   * Parity: capnp-fortran t_list_upgrade_views, capnp-janet list_evolution.
+   * Parity: encoding.html list-upgrade rules; capnp-fortran t_list_upgrade_views.
    */
   listGetStruct(index: number): Ptr {
     assertCapnp(this.kind === PtrKind.List, "KIND");
@@ -663,11 +681,22 @@ export class Ptr {
         depth: this.depth,
       });
     }
-    if (this.esize === ElemSize.Void || this.esize === ElemSize.Bit) {
-      throw new CapnpError(
-        "KIND",
-        "List(Bool)/List(Void) cannot upgrade to struct",
-      );
+    // encoding.html: "any element size (except C = 1, i.e. 1-bit) may be
+    // decoded as a struct list". List(Void) upgrades to a zero-size struct.
+    if (this.esize === ElemSize.Bit) {
+      throw new CapnpError("KIND", "List(Bool) cannot upgrade to struct");
+    }
+    if (this.esize === ElemSize.Void) {
+      return new Ptr({
+        msg: this.msg,
+        seg: this.seg,
+        word: this.word,
+        kind: PtrKind.Struct,
+        dwords: 0,
+        pwords: 0,
+        dataBits: 0,
+        depth: this.depth,
+      });
     }
 
     // Primitive data list → synthetic struct with field @0 = the element.

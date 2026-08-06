@@ -3,11 +3,15 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  CapnpError,
   ElemSize,
+  MAX_SEGMENTS,
   Message,
   PtrKind,
+  frameSegments,
   serializeToFlat,
   storeU64,
+  wpMakeCap,
   wpMakeFar,
   wpMakeList,
   wpMakeStruct,
@@ -152,5 +156,79 @@ describe("Message reader", () => {
     expect(again.segmentCount).toBe(4);
     expect(again.root().getP(0).getU64(0)).toBe(0xbeefn);
     expect(again.root().getP(1).listGetText(1)).toBe("far");
+  });
+});
+
+describe("frameSegments / fromSegments guards", () => {
+  test("frameSegments advances body by words*8 for {data,words}", () => {
+    // Oversized data buffer: only first words*8 bytes are framed, and the
+    // body cursor must still advance by the declared size (no overlap).
+    const data0 = new Uint8Array(32);
+    data0[0] = 0xaa;
+    const data1 = new Uint8Array(16);
+    data1[0] = 0xbb;
+    const framed = frameSegments([
+      { data: data0, words: 1 },
+      { data: data1, words: 1 },
+    ]);
+    // table: nsegs-1=1, sizes=[1,1], pad 4 → 12+4=16 table bytes
+    expect(framed.byteLength).toBe(16 + 16);
+    expect(framed[16]).toBe(0xaa);
+    expect(framed[24]).toBe(0xbb);
+  });
+
+  test("frameSegments rejects short segment buffer", () => {
+    try {
+      frameSegments([{ data: new Uint8Array(4), words: 1 }]);
+      expect.unreachable("expected CapnpError FRAMING");
+    } catch (e) {
+      expect(e).toBeInstanceOf(CapnpError);
+      expect((e as CapnpError).code).toBe("FRAMING");
+    }
+  });
+
+  test("frameSegments enforces MAX_SEGMENTS", () => {
+    const segs = Array.from({ length: MAX_SEGMENTS + 1 }, () => new Uint8Array(8));
+    try {
+      frameSegments(segs);
+      expect.unreachable("expected CapnpError FRAMING");
+    } catch (e) {
+      expect(e).toBeInstanceOf(CapnpError);
+      expect((e as CapnpError).code).toBe("FRAMING");
+    }
+  });
+
+  test("fromSegments/asView requires byteLength >= words*8", () => {
+    try {
+      Message.fromSegments([{ data: new Uint8Array(4), words: 1 }]);
+      expect.unreachable("expected CapnpError FRAMING");
+    } catch (e) {
+      expect(e).toBeInstanceOf(CapnpError);
+      expect((e as CapnpError).code).toBe("FRAMING");
+    }
+  });
+});
+
+describe("capability pointer reserved bits", () => {
+  test("nonzero B field is KIND", () => {
+    // A=3 (cap), B (bits 2..31) nonzero, C=index.
+    const bad = 3n | (1n << 2n) | (5n << 32n);
+    const buf = new Uint8Array(8);
+    storeU64(buf, 0, bad);
+    try {
+      Message.fromSegments([buf]).root();
+      expect.unreachable("expected CapnpError KIND");
+    } catch (e) {
+      expect(e).toBeInstanceOf(CapnpError);
+      expect((e as CapnpError).code).toBe("KIND");
+    }
+  });
+
+  test("well-formed cap pointer resolves", () => {
+    const buf = new Uint8Array(8);
+    storeU64(buf, 0, wpMakeCap(42));
+    const p = Message.fromSegments([buf]).root();
+    expect(p.kind).toBe(PtrKind.Cap);
+    expect(p.count).toBe(42);
   });
 });

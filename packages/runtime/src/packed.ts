@@ -4,7 +4,17 @@
  * words with fewer than two zero bytes stay in the verbatim run.
  */
 
-import { CapnpError, WORD_BYTES } from "./kinds.ts";
+import {
+  CapnpError,
+  DEFAULT_TRAVERSAL_WORDS,
+  WORD_BYTES,
+} from "./kinds.ts";
+
+/**
+ * Max words `unpack` may expand into (default matches reader traversal budget).
+ * Blocks packed amplification bombs (e.g. repeated 0x00 0xff zero runs).
+ */
+export const MAX_UNPACKED_WORDS = DEFAULT_TRAVERSAL_WORDS;
 
 function wordAllZero(w: Uint8Array, off: number): boolean {
   for (let i = 0; i < 8; i++) if (w[off + i] !== 0) return false;
@@ -72,11 +82,29 @@ export function pack(input: Uint8Array): Uint8Array {
   return Uint8Array.from(out);
 }
 
-export function unpack(input: Uint8Array): Uint8Array {
+/**
+ * Unpack a packed Cap'n Proto buffer.
+ * @param opts.maxWords Cap on expanded words (default {@link MAX_UNPACKED_WORDS}).
+ *   Exceeding the cap throws `CapnpError("PACKED")` before unbounded allocation.
+ */
+export function unpack(
+  input: Uint8Array,
+  opts?: { maxWords?: number },
+): Uint8Array {
+  const maxWords = opts?.maxWords ?? MAX_UNPACKED_WORDS;
+  const maxBytes = maxWords * WORD_BYTES;
   const out: number[] = [];
   let ipos = 0;
+
+  const ensure = (extraBytes: number): void => {
+    if (out.length + extraBytes > maxBytes) {
+      throw new CapnpError("PACKED", "expanded size exceeds word cap");
+    }
+  };
+
   while (ipos < input.length) {
     const tag = input[ipos++]!;
+    ensure(WORD_BYTES);
     for (let k = 0; k < 8; k++) {
       if (tag & (1 << k)) {
         if (ipos >= input.length) throw new CapnpError("PACKED", "truncated tag payload");
@@ -88,14 +116,16 @@ export function unpack(input: Uint8Array): Uint8Array {
     if (tag === 0) {
       if (ipos >= input.length) throw new CapnpError("PACKED", "truncated zero run");
       const cnt = input[ipos++]!;
+      ensure(cnt * WORD_BYTES);
       for (let i = 0; i < cnt; i++) {
         for (let k = 0; k < 8; k++) out.push(0);
       }
     } else if (tag === 0xff) {
       if (ipos >= input.length) throw new CapnpError("PACKED", "truncated verbatim count");
       const cnt = input[ipos++]!;
-      const need = cnt * 8;
+      const need = cnt * WORD_BYTES;
       if (ipos + need > input.length) throw new CapnpError("PACKED", "truncated verbatim run");
+      ensure(need);
       for (let i = 0; i < need; i++) out.push(input[ipos++]!);
     }
   }

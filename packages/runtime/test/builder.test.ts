@@ -507,6 +507,24 @@ describe("MessageBuilder", () => {
     expect(msg2.root().getF64(0, 0)).not.toBe(2.5);
   });
 
+  test("setU32 + getU32 round-trip with non-zero schema default XOR", () => {
+    const b = new MessageBuilder();
+    const root = b.initRoot(1, 0);
+    const dflt = 0x12345678;
+    const v = 0xabcdef01;
+    root.setU32(0, v, dflt);
+    const msg = Message.fromFlat(b.toFlat());
+    expect(msg.root().getU32(0, dflt)).toBe(v >>> 0);
+    // Wire stores value XOR dflt; reading without dflt yields the XOR mask.
+    expect(msg.root().getU32(0, 0)).toBe((v ^ dflt) >>> 0);
+
+    // Zeroed data section + non-zero schema default → default (not zero).
+    const b2 = new MessageBuilder();
+    b2.initRoot(1, 0);
+    const msg2 = Message.fromFlat(b2.toFlat());
+    expect(msg2.root().getU32(0, dflt)).toBe(dflt >>> 0);
+  });
+
   test("initRoot(0,0) empty struct encodes offset -1 not null", () => {
     const b = new MessageBuilder();
     const root = b.initRoot(0, 0);
