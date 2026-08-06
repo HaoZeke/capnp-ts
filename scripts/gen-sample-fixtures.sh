@@ -32,6 +32,7 @@ capnp convert binary:packed <"$FIX/addressbook.bin" >"$FIX/addressbook.packed.bi
 capnp convert binary:canonical <"$FIX/addressbook.bin" >"$FIX/addressbook.canonical.bin"
 
 if [[ -f "$ROOT/schema/calculator.capnp" ]]; then
+  # 2 + 3
   capnp encode "$ROOT/schema/calculator.capnp" EvaluateRequest \
     >"$FIX/calculator_add_2_3.bin" <<'MSG'
 ( expression = (
@@ -40,6 +41,32 @@ if [[ -f "$ROOT/schema/calculator.capnp" ]]; then
       params = [
         (literal = 2.0),
         (literal = 3.0)
+      ]
+    )
+  )
+)
+MSG
+
+  capnp encode "$ROOT/schema/calculator.capnp" EvaluateResponse \
+    >"$FIX/calculator_value_5.bin" <<'MSG'
+( value = 5.0 )
+MSG
+
+  # Nested: (2 + 3) * 4
+  capnp encode "$ROOT/schema/calculator.capnp" EvaluateRequest \
+    >"$FIX/calculator_mul_add.bin" <<'MSG'
+( expression = (
+    call = (
+      op = multiply,
+      params = [
+        (call = (
+          op = add,
+          params = [
+            (literal = 2.0),
+            (literal = 3.0)
+          ]
+        )),
+        (literal = 4.0)
       ]
     )
   )
