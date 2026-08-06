@@ -9,6 +9,7 @@ import {
   serializeToFlat,
   storeU64,
   wpMakeFar,
+  wpMakeList,
   wpMakeStruct,
 } from "../src/index.ts";
 
@@ -88,5 +89,68 @@ describe("Message reader", () => {
     const again = Message.fromFlat(framed);
     expect(again.segmentCount).toBe(3);
     expect(again.root().getU64(0)).toBe(4242n);
+  });
+
+  test("double-far nested struct and List(Text) fixture", () => {
+    // seg0: double-far → pad in seg1
+    // seg1 pad: far → body in seg2; tag struct 0d 2p
+    // seg2: body [p0 far→nested in seg3][p1 far→List(Text) in seg3]
+    // seg3: nested struct 1d0p = 0xbeef; List(Text) landing + content; texts
+    const seg0 = new Uint8Array(8);
+    const seg1 = new Uint8Array(16);
+    const seg2 = new Uint8Array(16);
+    const seg3 = new Uint8Array(8 * 10);
+
+    storeU64(seg0, 0, wpMakeFar(true, 0, 1));
+    storeU64(seg1, 0, wpMakeFar(false, 0, 2));
+    storeU64(seg1, 8, wpMakeStruct(0, 0, 2));
+
+    // Root body in seg2: two far single pads into seg3.
+    storeU64(seg2, 0, wpMakeFar(false, 1, 3)); // pad at seg3 word 1 → nested
+    storeU64(seg2, 8, wpMakeFar(false, 3, 3)); // pad at seg3 word 3 → List(Text)
+
+    // seg3 layout:
+    // 0: nested data word 0xbeef
+    // 1: landing pad struct(0, 1, 0) offset -2 → word 0
+    // 2: reserved / list content starts later
+    // 3: landing pad list(pointer, 2) offset 0 → word 4
+    // 4-5: List(Text) elements → text at 6 and 8
+    // 6-7: "hi\0"
+    // 8-9: "far\0"
+    storeU64(seg3, 0, 0xbeefn);
+    storeU64(seg3, 8, wpMakeStruct(-2, 1, 0));
+    storeU64(seg3, 24, wpMakeList(0, ElemSize.Pointer, 2));
+    storeU64(seg3, 32, wpMakeList(1, ElemSize.Byte, 3)); // word 4 → word 6, "hi\0"
+    storeU64(seg3, 40, wpMakeList(2, ElemSize.Byte, 4)); // word 5 → word 8, "far\0"
+    // text bytes
+    seg3[48] = 0x68; // h
+    seg3[49] = 0x69; // i
+    seg3[50] = 0;
+    seg3[64] = 0x66; // f
+    seg3[65] = 0x61; // a
+    seg3[66] = 0x72; // r
+    seg3[67] = 0;
+
+    const msg = Message.fromSegments([
+      { data: seg0, words: 1 },
+      { data: seg1, words: 2 },
+      { data: seg2, words: 2 },
+      { data: seg3, words: 10 },
+    ]);
+    const root = msg.root();
+    expect(root.kind).toBe(PtrKind.Struct);
+    expect(root.pwords).toBe(2);
+    expect(root.getP(0).getU64(0)).toBe(0xbeefn);
+    const texts = root.getP(1);
+    expect(texts.kind).toBe(PtrKind.List);
+    expect(texts.esize).toBe(ElemSize.Pointer);
+    expect(texts.listLen()).toBe(2);
+    expect(texts.listGetText(0)).toBe("hi");
+    expect(texts.listGetText(1)).toBe("far");
+
+    const again = Message.fromFlat(serializeToFlat(msg));
+    expect(again.segmentCount).toBe(4);
+    expect(again.root().getP(0).getU64(0)).toBe(0xbeefn);
+    expect(again.root().getP(1).listGetText(1)).toBe("far");
   });
 });
