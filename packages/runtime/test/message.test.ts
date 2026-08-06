@@ -3,12 +3,13 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  ElementSize,
+  ElemSize,
   Message,
   PtrKind,
-  makeFar,
-  makeStruct,
+  serializeToFlat,
   storeU64,
+  wpMakeFar,
+  wpMakeStruct,
 } from "../src/index.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -22,34 +23,34 @@ const PHONE_WORK = 2;
 
 function verifyAliceBob(book: ReturnType<Message["root"]>): void {
   expect(book.kind).toBe(PtrKind.Struct);
-  const people = book.getp(0);
+  const people = book.getP(0);
   expect(people.kind).toBe(PtrKind.List);
-  expect(people.esize).toBe(ElementSize.Composite);
+  expect(people.esize).toBe(ElemSize.Composite);
   expect(people.listLen()).toBe(2);
 
-  const alice = people.listGetp(0);
+  const alice = people.listGetP(0);
   expect(alice.getU32(0)).toBe(123);
   expect(alice.getU16(4)).toBe(EMP_SCHOOL);
   expect(alice.getText(0)).toBe("Alice");
   expect(alice.getText(1)).toBe("alice@example.com");
   expect(alice.getText(3)).toBe("MIT");
-  const aPhones = alice.getp(2);
+  const aPhones = alice.getP(2);
   expect(aPhones.listLen()).toBe(1);
-  const ap0 = aPhones.listGetp(0);
+  const ap0 = aPhones.listGetP(0);
   expect(ap0.getU16(0)).toBe(PHONE_MOBILE);
   expect(ap0.getText(0)).toBe("555-1212");
 
-  const bob = people.listGetp(1);
+  const bob = people.listGetP(1);
   expect(bob.getU32(0)).toBe(456);
   expect(bob.getU16(4)).toBe(EMP_UNEMPLOYED);
   expect(bob.getText(0)).toBe("Bob");
   expect(bob.getText(1)).toBe("bob@example.com");
-  const bPhones = bob.getp(2);
+  const bPhones = bob.getP(2);
   expect(bPhones.listLen()).toBe(2);
-  expect(bPhones.listGetp(0).getU16(0)).toBe(PHONE_HOME);
-  expect(bPhones.listGetp(0).getText(0)).toBe("555-4567");
-  expect(bPhones.listGetp(1).getU16(0)).toBe(PHONE_WORK);
-  expect(bPhones.listGetp(1).getText(0)).toBe("555-7654");
+  expect(bPhones.listGetP(0).getU16(0)).toBe(PHONE_HOME);
+  expect(bPhones.listGetP(0).getText(0)).toBe("555-4567");
+  expect(bPhones.listGetP(1).getU16(0)).toBe(PHONE_WORK);
+  expect(bPhones.listGetP(1).getText(0)).toBe("555-7654");
 }
 
 describe("Message reader", () => {
@@ -69,9 +70,9 @@ describe("Message reader", () => {
     const seg0 = new Uint8Array(8);
     const seg1 = new Uint8Array(16);
     const seg2 = new Uint8Array(8);
-    storeU64(seg0, 0, makeFar(true, 0, 1));
-    storeU64(seg1, 0, makeFar(false, 0, 2));
-    storeU64(seg1, 8, makeStruct(0, 1, 0));
+    storeU64(seg0, 0, wpMakeFar(true, 0, 1));
+    storeU64(seg1, 0, wpMakeFar(false, 0, 2));
+    storeU64(seg1, 8, wpMakeStruct(0, 1, 0));
     storeU64(seg2, 0, 4242n);
 
     const msg = Message.fromSegments([
@@ -83,7 +84,7 @@ describe("Message reader", () => {
     expect(r.kind).toBe(PtrKind.Struct);
     expect(r.getU64(0)).toBe(4242n);
 
-    const framed = msg.copyFlat();
+    const framed = serializeToFlat(msg);
     const again = Message.fromFlat(framed);
     expect(again.segmentCount).toBe(3);
     expect(again.root().getU64(0)).toBe(4242n);

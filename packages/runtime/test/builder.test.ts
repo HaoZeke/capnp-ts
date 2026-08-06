@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  ElementSize,
+  ElemSize,
   Message,
   MessageBuilder,
   PtrKind,
@@ -26,7 +26,6 @@ function buildAliceBob(): Uint8Array {
   const book = b.initRoot(0, 1);
   const people0 = book.initList(0, 2, PERSON_D, PERSON_P);
 
-  // Alice
   people0.setU32(0, 123);
   people0.setU16(4, EMP_SCHOOL);
   people0.setText(0, "Alice");
@@ -36,7 +35,6 @@ function buildAliceBob(): Uint8Array {
   phones0.setU16(0, PHONE_MOBILE);
   phones0.setText(0, "555-1212");
 
-  // Bob
   const bob = people0.nextElement();
   bob.setU32(0, 456);
   bob.setU16(4, EMP_UNEMPLOYED);
@@ -54,33 +52,33 @@ function buildAliceBob(): Uint8Array {
 
 function verifyAliceBob(book: ReturnType<Message["root"]>): void {
   expect(book.kind).toBe(PtrKind.Struct);
-  const people = book.getp(0);
+  const people = book.getP(0);
   expect(people.kind).toBe(PtrKind.List);
-  expect(people.esize).toBe(ElementSize.Composite);
+  expect(people.esize).toBe(ElemSize.Composite);
   expect(people.listLen()).toBe(2);
 
-  const alice = people.listGetp(0);
+  const alice = people.listGetP(0);
   expect(alice.getU32(0)).toBe(123);
   expect(alice.getU16(4)).toBe(EMP_SCHOOL);
   expect(alice.getText(0)).toBe("Alice");
   expect(alice.getText(1)).toBe("alice@example.com");
   expect(alice.getText(3)).toBe("MIT");
-  const aPhones = alice.getp(2);
+  const aPhones = alice.getP(2);
   expect(aPhones.listLen()).toBe(1);
-  expect(aPhones.listGetp(0).getU16(0)).toBe(PHONE_MOBILE);
-  expect(aPhones.listGetp(0).getText(0)).toBe("555-1212");
+  expect(aPhones.listGetP(0).getU16(0)).toBe(PHONE_MOBILE);
+  expect(aPhones.listGetP(0).getText(0)).toBe("555-1212");
 
-  const bob = people.listGetp(1);
+  const bob = people.listGetP(1);
   expect(bob.getU32(0)).toBe(456);
   expect(bob.getU16(4)).toBe(EMP_UNEMPLOYED);
   expect(bob.getText(0)).toBe("Bob");
   expect(bob.getText(1)).toBe("bob@example.com");
-  const bPhones = bob.getp(2);
+  const bPhones = bob.getP(2);
   expect(bPhones.listLen()).toBe(2);
-  expect(bPhones.listGetp(0).getText(0)).toBe("555-4567");
-  expect(bPhones.listGetp(1).getText(0)).toBe("555-7654");
-  expect(bPhones.listGetp(0).getU16(0)).toBe(PHONE_HOME);
-  expect(bPhones.listGetp(1).getU16(0)).toBe(PHONE_WORK);
+  expect(bPhones.listGetP(0).getText(0)).toBe("555-4567");
+  expect(bPhones.listGetP(1).getText(0)).toBe("555-7654");
+  expect(bPhones.listGetP(0).getU16(0)).toBe(PHONE_HOME);
+  expect(bPhones.listGetP(1).getU16(0)).toBe(PHONE_WORK);
 }
 
 describe("MessageBuilder", () => {
@@ -91,7 +89,6 @@ describe("MessageBuilder", () => {
   });
 
   test("far pointer when object spills to next segment", () => {
-    // root(1)+outer(1) fill 2 of 3; kid(2) spills to segment 1.
     const b = new MessageBuilder({ firstWords: 3 });
     const body = b.initRoot(0, 1);
     const kidSlot = body.slot(0);
@@ -101,15 +98,13 @@ describe("MessageBuilder", () => {
     kid.setU64(0, 111n);
     kid.setU64(8, 222n);
 
-    const slotBytes = b.segmentData(kidSlot.seg);
-    const slotW = loadU64(slotBytes, kidSlot.word * 8);
+    const slotW = loadU64(b.segmentData(kidSlot.seg), kidSlot.word * 8);
     expect(wpKind(slotW)).toBe(WireKind.Far);
     expect(wpFarTwo(slotW)).toBe(false);
 
-    const flat = b.toFlat();
-    const msg = Message.fromFlat(flat);
+    const msg = Message.fromFlat(b.toFlat());
     expect(msg.segmentCount).toBeGreaterThanOrEqual(2);
-    const k = msg.root().getp(0);
+    const k = msg.root().getP(0);
     expect(k.kind).toBe(PtrKind.Struct);
     expect(k.getU64(0)).toBe(111n);
     expect(k.getU64(8)).toBe(222n);
@@ -130,12 +125,9 @@ describe("MessageBuilder", () => {
     const body = b.initRoot(0, 1);
     const slot = body.slot(0);
 
-    // First spill to create multi-seg awareness.
     const spill = b.initStructAt(slot, 2, 0);
     expect(spill.seg).not.toBe(slot.seg);
 
-    // Clear slot and freeze max seg to 1 word so object fills new seg;
-    // pad cannot alloc_in → double-far.
     b.segBytes(slot.seg).fill(0, slot.word * 8, slot.word * 8 + 8);
     b.maxSegWords = 1;
     const obj = b.initStructAt(slot, 1, 0);
@@ -147,7 +139,7 @@ describe("MessageBuilder", () => {
     expect(wpFarTwo(w)).toBe(true);
 
     const msg = Message.fromFlat(b.toFlat());
-    expect(msg.root().getp(0).getU64(0)).toBe(4242n);
+    expect(msg.root().getP(0).getU64(0)).toBe(4242n);
   });
 
   test("setData round-trip", () => {

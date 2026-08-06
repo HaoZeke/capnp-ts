@@ -13,13 +13,13 @@
 import { storeF64, storeU16, storeU32, storeU64 } from "./endian.ts";
 import {
   CapnpError,
-  ElementSize,
+  ElemSize,
   WORD_BYTES,
   assertCapnp,
 } from "./kinds.ts";
-import { frameSegments } from "./serialize.ts";
-import type { Message } from "./message.ts";
-import { makeFar, makeList, makeStruct } from "./pointer.ts";
+import { serializeToFlat } from "./serialize.ts";
+import { Message } from "./message.ts";
+import { wpMakeFar, wpMakeList, wpMakeStruct } from "./pointer.ts";
 
 export const DEFAULT_FIRST_WORDS = 1024;
 export const MAX_SEGMENT_WORDS = 1 << 29;
@@ -39,10 +39,7 @@ export interface BuilderOptions {
   forceSingle?: boolean;
 }
 
-/**
- * Pointer slot or object body location inside a MessageBuilder.
- * Methods that need a body pass `this` as the struct body word.
- */
+/** Pointer slot or object body location inside a MessageBuilder. */
 export class BuilderPointer {
   constructor(
     readonly builder: MessageBuilder,
@@ -86,6 +83,11 @@ export class MessageBuilder {
     const s = this.segs[seg];
     assertCapnp(s, "SEGMENT");
     return s.data.subarray(0, s.words * WORD_BYTES);
+  }
+
+  /** Mutable segment buffer (full capacity). */
+  segBytes(seg: number): Uint8Array {
+    return this.segs[seg]!.data;
   }
 
   private appendSegment(capWords: number): void {
@@ -159,7 +161,7 @@ export class MessageBuilder {
     return word;
   }
 
-  /** Fresh segment for far pad (never reuse capacity of avoid target). */
+  /** Fresh segment for far pad. */
   private allocPadSegment(n: number): { seg: number; word: number } {
     const need = n < 1 ? 1 : n;
     const saved = this.maxSegWords;
@@ -175,13 +177,7 @@ export class MessageBuilder {
   }
 
   storeW(seg: number, word: number, w: bigint): void {
-    const s = this.segs[seg]!;
-    storeU64(s.data, word * WORD_BYTES, w);
-  }
-
-  /** Mutable segment buffer (full capacity). */
-  segBytes(seg: number): Uint8Array {
-    return this.segs[seg]!.data;
+    storeU64(this.segs[seg]!.data, word * WORD_BYTES, w);
   }
 
   writeStructPtr(
@@ -194,20 +190,20 @@ export class MessageBuilder {
   ): void {
     if (slotSeg === bodySeg) {
       const off = bodyWord - slotWord - 1;
-      this.storeW(slotSeg, slotWord, makeStruct(off, dwords, pwords));
+      this.storeW(slotSeg, slotWord, wpMakeStruct(off, dwords, pwords));
       return;
     }
     const pad = this.allocIn(bodySeg, 1);
     if (pad !== null) {
       const off = bodyWord - pad - 1;
-      this.storeW(bodySeg, pad, makeStruct(off, dwords, pwords));
-      this.storeW(slotSeg, slotWord, makeFar(false, pad, bodySeg));
+      this.storeW(bodySeg, pad, wpMakeStruct(off, dwords, pwords));
+      this.storeW(slotSeg, slotWord, wpMakeFar(false, pad, bodySeg));
       return;
     }
     const { seg: padSeg, word: padWord } = this.allocPadSegment(2);
-    this.storeW(padSeg, padWord, makeFar(false, bodyWord, bodySeg));
-    this.storeW(padSeg, padWord + 1, makeStruct(0, dwords, pwords));
-    this.storeW(slotSeg, slotWord, makeFar(true, padWord, padSeg));
+    this.storeW(padSeg, padWord, wpMakeFar(false, bodyWord, bodySeg));
+    this.storeW(padSeg, padWord + 1, wpMakeStruct(0, dwords, pwords));
+    this.storeW(slotSeg, slotWord, wpMakeFar(true, padWord, padSeg));
   }
 
   writeListPtr(
@@ -220,25 +216,24 @@ export class MessageBuilder {
   ): void {
     if (slotSeg === contentSeg) {
       const off = contentWord - slotWord - 1;
-      this.storeW(slotSeg, slotWord, makeList(off, esize, count));
+      this.storeW(slotSeg, slotWord, wpMakeList(off, esize, count));
       return;
     }
     const pad = this.allocIn(contentSeg, 1);
     if (pad !== null) {
       const off = contentWord - pad - 1;
-      this.storeW(contentSeg, pad, makeList(off, esize, count));
-      this.storeW(slotSeg, slotWord, makeFar(false, pad, contentSeg));
+      this.storeW(contentSeg, pad, wpMakeList(off, esize, count));
+      this.storeW(slotSeg, slotWord, wpMakeFar(false, pad, contentSeg));
       return;
     }
     const { seg: padSeg, word: padWord } = this.allocPadSegment(2);
-    this.storeW(padSeg, padWord, makeFar(false, contentWord, contentSeg));
-    this.storeW(padSeg, padWord + 1, makeList(0, esize, count));
-    this.storeW(slotSeg, slotWord, makeFar(true, padWord, padSeg));
+    this.storeW(padSeg, padWord, wpMakeFar(false, contentWord, contentSeg));
+    this.storeW(padSeg, padWord + 1, wpMakeList(0, esize, count));
+    this.storeW(slotSeg, slotWord, wpMakeFar(true, padWord, padSeg));
   }
 
   /**
-   * Reserve the root pointer word (seg 0 word 0) and return a slot pointer.
-   * Call once on a fresh builder before initRoot/struct at root.
+   * Reserve the root pointer word (seg 0 word 0). Call once on a fresh builder.
    */
   rootSlot(): BuilderPointer {
     assertCapnp(this.segs.length > 0 && this.segs[0]!.words === 0, "ARG");
@@ -248,7 +243,7 @@ export class MessageBuilder {
   }
 
   /**
-   * Allocate root struct and return its body pointer.
+   * Allocate root struct and return its body.
    * Equivalent to rootSlot + initStruct(dwords, pwords).
    */
   initRoot(dwords: number, pwords: number): StructBuilder {
@@ -276,11 +271,13 @@ export class MessageBuilder {
   /** Stream-framed multi-segment message. */
   toFlat(): Uint8Array {
     assertCapnp(this.segs.length > 0 && this.segs[0]!.words > 0, "ARG");
-    const views = this.segs.map((s) => ({
-      data: s.data.subarray(0, s.words * WORD_BYTES),
-      words: s.words,
-    }));
-    return frameSegments(views);
+    const msg = Message.fromSegments(
+      this.segs.map((s) => ({
+        data: s.data.subarray(0, s.words * WORD_BYTES),
+        words: s.words,
+      })),
+    );
+    return serializeToFlat(msg);
   }
 
   /** Optional orphan hooks (stubs for M4 deep-copy / adopt). */
@@ -308,8 +305,10 @@ export class StructBuilder {
   }
 
   private bodyOk(absEnd: number): void {
-    const s = this.builder.segmentWords(this.seg);
-    assertCapnp(absEnd <= s * WORD_BYTES, "BOUNDS");
+    assertCapnp(
+      absEnd <= this.builder.segmentWords(this.seg) * WORD_BYTES,
+      "BOUNDS",
+    );
   }
 
   private data(): Uint8Array {
@@ -355,7 +354,7 @@ export class StructBuilder {
     else d[abs] = d[abs]! & ~bit;
   }
 
-  /** Pointer slot at index (absolute word pointer). */
+  /** Pointer slot at index. */
   slot(ptrIndex: number): BuilderPointer {
     const pw = this.word + this.dwords + ptrIndex;
     assertCapnp(pw < this.builder.segmentWords(this.seg), "BOUNDS");
@@ -363,8 +362,7 @@ export class StructBuilder {
   }
 
   initStruct(ptrIndex: number, dwords: number, pwords: number): StructBuilder {
-    const slot = this.slot(ptrIndex);
-    return this.builder.initStructAt(slot, dwords, pwords);
+    return this.builder.initStructAt(this.slot(ptrIndex), dwords, pwords);
   }
 
   setText(ptrIndex: number, text: string): void {
@@ -382,7 +380,7 @@ export class StructBuilder {
       slot.word,
       startSeg,
       startWord,
-      ElementSize.Byte,
+      ElemSize.Byte,
       nbytes,
     );
   }
@@ -407,14 +405,14 @@ export class StructBuilder {
       slot.word,
       startSeg,
       startWord,
-      ElementSize.Byte,
+      ElemSize.Byte,
       bytes.length,
     );
   }
 
   /**
-   * Init a composite List(Struct) of `count` elements with given element sizes.
-   * Returns the first element body as StructBuilder; use `.add(step)` for next.
+   * Init composite List(Struct) of `count` elements.
+   * Returns the first element body; use `.nextElement()` for subsequent ones.
    */
   initCompositeList(
     ptrIndex: number,
@@ -427,18 +425,17 @@ export class StructBuilder {
     const contentWords = count * step;
     const need = 1 + contentWords;
     const { seg: tagSeg, word: tagWord } = this.builder.allocWords(need);
-    // Composite tag: offset field = element count; upper = sizes.
     this.builder.storeW(
       tagSeg,
       tagWord,
-      makeStruct(count | 0, elemDwords, elemPwords),
+      wpMakeStruct(count | 0, elemDwords, elemPwords),
     );
     this.builder.writeListPtr(
       slot.seg,
       slot.word,
       tagSeg,
       tagWord,
-      ElementSize.Composite,
+      ElemSize.Composite,
       contentWords,
     );
     return new StructBuilder(
@@ -450,7 +447,7 @@ export class StructBuilder {
     );
   }
 
-  /** Alias used in API sketch: initList for composite structs. */
+  /** Alias: initList for composite structs. */
   initList(
     ptrIndex: number,
     count: number,
@@ -460,7 +457,7 @@ export class StructBuilder {
     return this.initCompositeList(ptrIndex, count, elemDwords, elemPwords);
   }
 
-  /** Init List(T) of pointer-sized elements (e.g. List(Text) slots). */
+  /** Init List of pointer-sized elements (e.g. List(Text) slots). */
   initPointerList(ptrIndex: number, count: number): BuilderPointer {
     const slot = this.slot(ptrIndex);
     let listSeg: number;
@@ -476,16 +473,16 @@ export class StructBuilder {
       slot.word,
       listSeg,
       listStart,
-      ElementSize.Pointer,
+      ElemSize.Pointer,
       count,
     );
     return new BuilderPointer(this.builder, listSeg, listStart);
   }
 
-  /** Init primitive list and optionally copy little-endian items. */
+  /** Init primitive list and optionally copy little-endian payload. */
   initPrimList(
     ptrIndex: number,
-    esize: ElementSize,
+    esize: number,
     count: number,
     itemBytes: number,
     items?: Uint8Array,
@@ -516,7 +513,7 @@ export class StructBuilder {
     return new BuilderPointer(this.builder, startSeg, startWord);
   }
 
-  /** Next composite element: step = dwords + pwords of this element type. */
+  /** Next composite element: step = dwords + pwords. */
   nextElement(): StructBuilder {
     return new StructBuilder(
       this.builder,
