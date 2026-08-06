@@ -10,16 +10,33 @@
  *   - Hard ceiling: MAX_SEGMENT_WORDS (1<<29).
  */
 
-import { storeF64, storeU16, storeU32, storeU64 } from "./endian.ts";
+import { loadU64, storeF64, storeU16, storeU32, storeU64 } from "./endian.ts";
 import {
   CapnpError,
   ElemSize,
+  PtrKind,
   WORD_BYTES,
+  WireKind,
   assertCapnp,
 } from "./kinds.ts";
 import { serializeToFlat } from "./serialize.ts";
 import { Message } from "./message.ts";
-import { wpMakeFar, wpMakeList, wpMakeStruct } from "./pointer.ts";
+import {
+  wpCapIndex,
+  wpFarOff,
+  wpFarSeg,
+  wpFarTwo,
+  wpKind,
+  wpListCount,
+  wpListEsize,
+  wpMakeCap,
+  wpMakeFar,
+  wpMakeList,
+  wpMakeStruct,
+  wpOffset,
+  wpStructDwords,
+  wpStructPwords,
+} from "./pointer.ts";
 
 export const DEFAULT_FIRST_WORDS = 1024;
 export const MAX_SEGMENT_WORDS = 1 << 29;
@@ -49,6 +66,71 @@ export class BuilderPointer {
 
   add(wordDelta: number): BuilderPointer {
     return new BuilderPointer(this.builder, this.seg, this.word + wordDelta);
+  }
+}
+
+/**
+ * Detached pointer object: storage stays in the arena, the original slot is
+ * zeroed (disown). Re-link with adopt / MessageBuilder.adopt within the same
+ * builder. Mirrors capnp-fortran capnp_disown + capnp_setp.
+ */
+export class Orphan {
+  private constructor(
+    /** Owning builder; null only for a null orphan. */
+    readonly builder: MessageBuilder | null,
+    readonly kind: number,
+    /** Object body start (struct) or list content/tag start (list). */
+    readonly seg: number,
+    readonly word: number,
+    readonly dwords: number,
+    readonly pwords: number,
+    readonly esize: number,
+    /**
+     * List pointer element count (for composite: word-count of elements, as
+     * on the wire). Cap table index when kind is Cap.
+     */
+    readonly count: number,
+  ) {}
+
+  static null(): Orphan {
+    return new Orphan(null, PtrKind.Null, 0, 0, 0, 0, 0, 0);
+  }
+
+  static struct(
+    builder: MessageBuilder,
+    seg: number,
+    word: number,
+    dwords: number,
+    pwords: number,
+  ): Orphan {
+    return new Orphan(
+      builder,
+      PtrKind.Struct,
+      seg,
+      word,
+      dwords,
+      pwords,
+      0,
+      0,
+    );
+  }
+
+  static list(
+    builder: MessageBuilder,
+    seg: number,
+    word: number,
+    esize: number,
+    count: number,
+  ): Orphan {
+    return new Orphan(builder, PtrKind.List, seg, word, 0, 0, esize, count);
+  }
+
+  static cap(builder: MessageBuilder, index: number): Orphan {
+    return new Orphan(builder, PtrKind.Cap, 0, 0, 0, 0, 0, index);
+  }
+
+  get isNull(): boolean {
+    return this.kind === PtrKind.Null;
   }
 }
 
@@ -180,6 +262,85 @@ export class MessageBuilder {
     storeU64(this.segs[seg]!.data, word * WORD_BYTES, w);
   }
 
+  loadW(seg: number, word: number): bigint {
+    return loadU64(this.segs[seg]!.data, word * WORD_BYTES);
+  }
+
+  /**
+   * Resolve a pointer word into an Orphan handle (object location + metadata).
+   * Does not modify the arena. Far pads are followed; the orphan points at the
+   * target object so adopt can re-link from a new slot.
+   */
+  resolveSlot(slot: BuilderPointer): Orphan {
+    assertCapnp(slot.builder === this, "ARG");
+    return this.resolveWord(
+      slot.seg,
+      slot.word,
+      this.loadW(slot.seg, slot.word),
+      64,
+    );
+  }
+
+  private resolveWord(
+    seg: number,
+    word: number,
+    w: bigint,
+    depth: number,
+  ): Orphan {
+    if (w === 0n) return Orphan.null();
+    assertCapnp(depth > 0, "DEPTH");
+    const kind = wpKind(w);
+    if (kind === WireKind.Far) {
+      const tseg = wpFarSeg(w);
+      const toff = wpFarOff(w);
+      if (wpFarTwo(w)) {
+        const pad = this.loadW(tseg, toff);
+        const tag = this.loadW(tseg, toff + 1);
+        assertCapnp(wpKind(pad) === WireKind.Far && !wpFarTwo(pad), "KIND");
+        const cseg = wpFarSeg(pad);
+        const coff = wpFarOff(pad);
+        if (wpKind(tag) === WireKind.Struct) {
+          return Orphan.struct(
+            this,
+            cseg,
+            coff,
+            wpStructDwords(tag),
+            wpStructPwords(tag),
+          );
+        }
+        if (wpKind(tag) === WireKind.List) {
+          return Orphan.list(
+            this,
+            cseg,
+            coff,
+            wpListEsize(tag),
+            wpListCount(tag),
+          );
+        }
+        throw new CapnpError("KIND");
+      }
+      return this.resolveWord(tseg, toff, this.loadW(tseg, toff), depth - 1);
+    }
+    if (kind === WireKind.Struct) {
+      const body = word + 1 + wpOffset(w);
+      return Orphan.struct(
+        this,
+        seg,
+        body,
+        wpStructDwords(w),
+        wpStructPwords(w),
+      );
+    }
+    if (kind === WireKind.List) {
+      const start = word + 1 + wpOffset(w);
+      return Orphan.list(this, seg, start, wpListEsize(w), wpListCount(w));
+    }
+    if (kind === WireKind.Cap) {
+      return Orphan.cap(this, wpCapIndex(w));
+    }
+    throw new CapnpError("KIND");
+  }
+
   writeStructPtr(
     slotSeg: number,
     slotWord: number,
@@ -280,13 +441,59 @@ export class MessageBuilder {
     return serializeToFlat(msg);
   }
 
-  /** Optional orphan hooks (stubs for M4 deep-copy / adopt). */
-  adopt(_orphan: never): never {
-    throw new CapnpError("ARG", "adopt not implemented");
+  /**
+   * Detach the object at `slot`: zero the pointer word, return an Orphan that
+   * still names the object storage in this arena (no copy).
+   */
+  disown(slot: BuilderPointer): Orphan {
+    assertCapnp(slot.builder === this, "ARG");
+    const orphan = this.resolveSlot(slot);
+    this.storeW(slot.seg, slot.word, 0n);
+    return orphan;
   }
 
-  disown(_slot: BuilderPointer): never {
-    throw new CapnpError("ARG", "disown not implemented");
+  /**
+   * Link `orphan` into `slot` within this same builder. Null orphan clears the
+   * slot. Cross-builder orphans are rejected (use deep-copy setp for that).
+   */
+  adopt(slot: BuilderPointer, orphan: Orphan): void {
+    assertCapnp(slot.builder === this, "ARG");
+    if (orphan.isNull || orphan.builder === null) {
+      this.storeW(slot.seg, slot.word, 0n);
+      return;
+    }
+    assertCapnp(
+      orphan.builder === this,
+      "ARG",
+      "orphan from a different MessageBuilder",
+    );
+    if (orphan.kind === PtrKind.Struct) {
+      this.writeStructPtr(
+        slot.seg,
+        slot.word,
+        orphan.seg,
+        orphan.word,
+        orphan.dwords,
+        orphan.pwords,
+      );
+      return;
+    }
+    if (orphan.kind === PtrKind.List) {
+      this.writeListPtr(
+        slot.seg,
+        slot.word,
+        orphan.seg,
+        orphan.word,
+        orphan.esize,
+        orphan.count,
+      );
+      return;
+    }
+    if (orphan.kind === PtrKind.Cap) {
+      this.storeW(slot.seg, slot.word, wpMakeCap(orphan.count));
+      return;
+    }
+    this.storeW(slot.seg, slot.word, 0n);
   }
 }
 
@@ -315,50 +522,69 @@ export class StructBuilder {
     return this.builder.segBytes(this.seg);
   }
 
-  setU8(byteOffset: number, value: number): void {
+  /**
+   * Scalar data-section writes. Wire stores `value XOR dflt` (schema default),
+   * matching getU* / getBool / getF64 on the reader.
+   */
+  setU8(byteOffset: number, value: number, dflt = 0): void {
     const abs = this.word * WORD_BYTES + byteOffset;
     this.bodyOk(abs + 1);
-    this.data()[abs] = value & 0xff;
+    this.data()[abs] = (value ^ dflt) & 0xff;
   }
 
-  setU16(byteOffset: number, value: number): void {
+  setU16(byteOffset: number, value: number, dflt = 0): void {
     const abs = this.word * WORD_BYTES + byteOffset;
     this.bodyOk(abs + 2);
-    storeU16(this.data(), abs, value);
+    storeU16(this.data(), abs, (value ^ dflt) & 0xffff);
   }
 
-  setU32(byteOffset: number, value: number): void {
+  setU32(byteOffset: number, value: number, dflt = 0): void {
     const abs = this.word * WORD_BYTES + byteOffset;
     this.bodyOk(abs + 4);
-    storeU32(this.data(), abs, value);
+    storeU32(this.data(), abs, (value ^ dflt) >>> 0);
   }
 
-  setU64(byteOffset: number, value: bigint): void {
+  setU64(byteOffset: number, value: bigint, dflt = 0n): void {
     const abs = this.word * WORD_BYTES + byteOffset;
     this.bodyOk(abs + 8);
-    storeU64(this.data(), abs, value);
+    storeU64(this.data(), abs, value ^ dflt);
   }
 
-  setF64(byteOffset: number, value: number): void {
+  setF64(byteOffset: number, value: number, dflt = 0): void {
     const abs = this.word * WORD_BYTES + byteOffset;
     this.bodyOk(abs + 8);
-    storeF64(this.data(), abs, value);
+    storeU64(this.data(), abs, f64ToBits(value) ^ f64ToBits(dflt));
   }
 
-  setBool(bitOffset: number, value: boolean): void {
+  setBool(bitOffset: number, value: boolean, dflt = false): void {
     const abs = this.word * WORD_BYTES + ((bitOffset / 8) | 0);
     this.bodyOk(abs + 1);
     const bit = 1 << (bitOffset % 8);
     const d = this.data();
-    if (value) d[abs] = d[abs]! | bit;
+    const wire = value !== dflt;
+    if (wire) d[abs] = d[abs]! | bit;
     else d[abs] = d[abs]! & ~bit;
   }
 
   /** Pointer slot at index. */
   slot(ptrIndex: number): BuilderPointer {
+    assertCapnp(ptrIndex >= 0 && ptrIndex < this.pwords, "BOUNDS");
     const pw = this.word + this.dwords + ptrIndex;
     assertCapnp(pw < this.builder.segmentWords(this.seg), "BOUNDS");
     return new BuilderPointer(this.builder, this.seg, pw);
+  }
+
+  /**
+   * Detach pointer field `ptrIndex` (slot zeroed; object storage intact).
+   * Re-link with adopt on any slot of the same MessageBuilder.
+   */
+  disown(ptrIndex: number): Orphan {
+    return this.builder.disown(this.slot(ptrIndex));
+  }
+
+  /** Adopt an orphan into pointer field `ptrIndex` (same-message re-link). */
+  adopt(ptrIndex: number, orphan: Orphan): void {
+    this.builder.adopt(this.slot(ptrIndex), orphan);
   }
 
   initStruct(ptrIndex: number, dwords: number, pwords: number): StructBuilder {

@@ -8,7 +8,15 @@
  *   segment0 bytes ...
  */
 
-import { loadF64, loadU16, loadU32, loadU64, storeU32 } from "./endian.ts";
+import {
+  bitsToF64,
+  f64ToBits,
+  loadF64,
+  loadU16,
+  loadU32,
+  loadU64,
+  storeU32,
+} from "./endian.ts";
 import {
   CapnpError,
   DEFAULT_DEPTH_LIMIT,
@@ -404,34 +412,44 @@ export class Ptr {
     return s.data.subarray(this.word * WORD_BYTES + this.bodyByte);
   }
 
+  /**
+   * Scalar data-section reads.
+   *
+   * Cap'n Proto stores each scalar as `wire = logical XOR default` so a zeroed
+   * data section yields schema defaults without per-field writes. Pass the
+   * field's schema default as `dflt` (codegen does this); omit when default is
+   * zero. Past-end / non-struct reads return `dflt` (older-schema evolution).
+   * Float defaults XOR the IEEE bit pattern; bool defaults XOR the bit.
+   */
   getU8(byteOffset: number, dflt = 0): number {
     if (this.kind !== PtrKind.Struct) return dflt;
     if ((byteOffset + 1) * 8 > this.dataBitCount()) return dflt;
-    return this.dataBytes()[byteOffset]!;
+    return (this.dataBytes()[byteOffset]! ^ dflt) & 0xff;
   }
 
   getU16(byteOffset: number, dflt = 0): number {
     if (this.kind !== PtrKind.Struct) return dflt;
     if ((byteOffset + 2) * 8 > this.dataBitCount()) return dflt;
-    return loadU16(this.dataBytes(), byteOffset);
+    return (loadU16(this.dataBytes(), byteOffset) ^ dflt) & 0xffff;
   }
 
   getU32(byteOffset: number, dflt = 0): number {
     if (this.kind !== PtrKind.Struct) return dflt;
     if ((byteOffset + 4) * 8 > this.dataBitCount()) return dflt;
-    return loadU32(this.dataBytes(), byteOffset);
+    return (loadU32(this.dataBytes(), byteOffset) ^ dflt) >>> 0;
   }
 
   getU64(byteOffset: number, dflt = 0n): bigint {
     if (this.kind !== PtrKind.Struct) return dflt;
     if ((byteOffset + 8) * 8 > this.dataBitCount()) return dflt;
-    return loadU64(this.dataBytes(), byteOffset);
+    return loadU64(this.dataBytes(), byteOffset) ^ dflt;
   }
 
   getF64(byteOffset: number, dflt = 0): number {
     if (this.kind !== PtrKind.Struct) return dflt;
     if ((byteOffset + 8) * 8 > this.dataBitCount()) return dflt;
-    return loadF64(this.dataBytes(), byteOffset);
+    const wire = loadU64(this.dataBytes(), byteOffset);
+    return bitsToF64(wire ^ f64ToBits(dflt));
   }
 
   getBool(bitOffset: number, dflt = false): boolean {
@@ -439,7 +457,8 @@ export class Ptr {
     if (bitOffset >= this.dataBitCount()) return dflt;
     const byteOffset = (bitOffset / 8) | 0;
     const bit = 1 << (bitOffset % 8);
-    return (this.dataBytes()[byteOffset]! & bit) !== 0;
+    const wire = (this.dataBytes()[byteOffset]! & bit) !== 0;
+    return wire !== dflt;
   }
 
   /** Resolve struct pointer slot. Out-of-range → null. */

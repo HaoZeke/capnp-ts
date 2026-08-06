@@ -14,3 +14,4 @@ export * from "./serialize.ts";
 export * from "./packed.ts";
 export * from "./canonical.ts";
 export * from "./builder.ts";
+export * from "./copy.ts";

@@ -36,14 +36,16 @@ function loadGolden(name: string): Uint8Array {
 
 /** In-process eval of Expression trees (mirrors janet/fortran sample tests). */
 function evalExpr(e: Ptr): number {
-  const tag = e.getU16(8, 0xffff);
+  // Union tag / Operator defaults are 0 (literal / add). Pass schema defaults
+  // only — getU* XORs wire with dflt; 0xffff is not a schema default here.
+  const tag = e.getU16(8);
   if (tag === EXPR_LITERAL) return e.getF64(0);
   if (tag === EXPR_PARAMETER) {
     throw new Error("parameter not valid in free eval");
   }
   if (tag !== EXPR_CALL) throw new Error(`bad Expression tag ${tag}`);
 
-  const op = e.getU16(0, 0xffff);
+  const op = e.getU16(0);
   const params = e.getP(0);
   expect(params.kind).toBe(PtrKind.List);
   const n = params.listLen();

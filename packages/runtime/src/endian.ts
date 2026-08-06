@@ -92,25 +92,41 @@ export function storeI64(buf: Uint8Array, off: number, v: bigint): void {
 }
 
 export function loadF32(buf: Uint8Array, off: number): number {
-  const bits = loadU32(buf, off);
-  const u = new Uint32Array([bits]);
-  return new Float32Array(u.buffer)[0]!;
+  return bitsToF32(loadU32(buf, off));
 }
 
 export function storeF32(buf: Uint8Array, off: number, v: number): void {
-  const f = new Float32Array([v]);
-  const u = new Uint32Array(f.buffer);
-  storeU32(buf, off, u[0]!);
+  storeU32(buf, off, f32ToBits(v));
 }
 
 export function loadF64(buf: Uint8Array, off: number): number {
-  const bits = loadU64(buf, off);
+  return bitsToF64(loadU64(buf, off));
+}
+
+export function storeF64(buf: Uint8Array, off: number, v: number): void {
+  storeU64(buf, off, f64ToBits(v));
+}
+
+/** IEEE-754 bit pattern of an f64 (for default XOR on the wire). */
+export function f64ToBits(v: number): bigint {
+  const f = new Float64Array([v]);
+  return new BigUint64Array(f.buffer)[0]!;
+}
+
+/** Reconstruct f64 from IEEE-754 bit pattern. */
+export function bitsToF64(bits: bigint): number {
   const u = new BigUint64Array([bits]);
   return new Float64Array(u.buffer)[0]!;
 }
 
-export function storeF64(buf: Uint8Array, off: number, v: number): void {
-  const f = new Float64Array([v]);
-  const u = new BigUint64Array(f.buffer);
-  storeU64(buf, off, u[0]!);
+/** IEEE-754 bit pattern of an f32. */
+export function f32ToBits(v: number): number {
+  const f = new Float32Array([v]);
+  return new Uint32Array(f.buffer)[0]!;
+}
+
+/** Reconstruct f32 from IEEE-754 bit pattern. */
+export function bitsToF32(bits: number): number {
+  const u = new Uint32Array([bits >>> 0]);
+  return new Float32Array(u.buffer)[0]!;
 }
