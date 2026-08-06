@@ -57,7 +57,7 @@ async function openCgr(bytes: Uint8Array): Promise<CgrSummary> {
   }
 
   try {
-    return summarizeCgr(bytes);
+    return await summarizeCgr(bytes);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(

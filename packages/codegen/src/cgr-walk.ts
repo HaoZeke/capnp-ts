@@ -12,8 +12,7 @@
  *   ptr0 filename : Text
  */
 
-// Concrete module paths so the plugin survives package-index churn.
-import { Message } from "../../runtime/src/message.ts";
+// Stable codecs (always present). Message is loaded dynamically when available.
 import {
   PtrKind,
   ElemSize,
@@ -37,10 +36,13 @@ export type CgrSummary = {
   requestedFilenames: string[];
 };
 
-/** Prefer Message.fromFlat when the wire reader is present. */
-export function summarizeCgr(bytes: Uint8Array): CgrSummary {
+/**
+ * Prefer Message.fromFlat when the wire reader module is present;
+ * otherwise hand-offset walk of the same CGR layout.
+ */
+export async function summarizeCgr(bytes: Uint8Array): Promise<CgrSummary> {
   try {
-    return summarizeViaMessage(bytes);
+    return await summarizeViaMessage(bytes);
   } catch (primary) {
     try {
       return summarizeViaHandWalk(bytes);
@@ -50,7 +52,8 @@ export function summarizeCgr(bytes: Uint8Array): CgrSummary {
   }
 }
 
-function summarizeViaMessage(bytes: Uint8Array): CgrSummary {
+async function summarizeViaMessage(bytes: Uint8Array): Promise<CgrSummary> {
+  const { Message } = await import("../../runtime/src/message.ts");
   const msg = Message.fromFlat(bytes);
   // Schema graphs are deep; raise traversal budget after open.
   msg.traversalLeft = 1_073_741_824;
@@ -78,7 +81,7 @@ function summarizeViaMessage(bytes: Uint8Array): CgrSummary {
   return { nodeCount, requestedFileCount, requestedFilenames };
 }
 
-// --- Hand-offset fallback (no Message API / parse failure) ---------------
+// --- Hand-offset walk (schema.capnp CodeGeneratorRequest layout) ---------
 
 /** Parse stream framing; return segment byte slices (views into `bytes`). */
 export function parseFramedSegments(bytes: Uint8Array): Uint8Array[] {
@@ -157,7 +160,7 @@ function readTextHand(seg: Uint8Array, ptrByteOff: number, word: bigint): string
   return new TextDecoder().decode(seg.subarray(body, body + n));
 }
 
-/** Single-segment near-pointer hand walk of CGR (same offsets as Message path). */
+/** Single-segment near-pointer hand walk of CGR. */
 export function summarizeViaHandWalk(bytes: Uint8Array): CgrSummary {
   const segs = parseFramedSegments(bytes);
   const seg0 = segs[0];
