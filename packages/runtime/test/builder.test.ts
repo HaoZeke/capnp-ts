@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   BuilderPointer,
+  deepCopyPtrToSlot,
   ElemSize,
   Message,
   MessageBuilder,
@@ -373,6 +374,29 @@ describe("MessageBuilder", () => {
     root.setData(0, payload);
     const msg = Message.fromFlat(b.toFlat());
     expect([...msg.root().getData(0)]).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  test("deep-copy setP: nested AddressBook across messages", () => {
+    const src = Message.fromFlat(buildAliceBob());
+    verifyAliceBob(src.root());
+
+    // New message; deep-copy people list into AddressBook-shaped root.
+    const dest = new MessageBuilder();
+    const book = dest.initRoot(0, 1);
+    book.setP(0, src.root().getP(0));
+
+    const copied = Message.fromFlat(dest.toFlat());
+    verifyAliceBob(copied.root());
+    // Source message is independent and still intact.
+    verifyAliceBob(src.root());
+  });
+
+  test("deep-copy deepCopyPtrToSlot: whole AddressBook root into empty builder", () => {
+    const src = Message.fromFlat(buildAliceBob());
+    const dest = new MessageBuilder();
+    deepCopyPtrToSlot(dest, dest.rootSlot(), src.root());
+    const msg = Message.fromFlat(dest.toFlat());
+    verifyAliceBob(msg.root());
   });
 
   test("orphan: disown text, null after disown, re-adopt elsewhere", () => {

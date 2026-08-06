@@ -20,7 +20,7 @@ import {
   assertCapnp,
 } from "./kinds.ts";
 import { serializeToFlat } from "./serialize.ts";
-import { Message } from "./message.ts";
+import { Message, type Ptr } from "./message.ts";
 import {
   wpCapIndex,
   wpFarOff,
@@ -37,6 +37,7 @@ import {
   wpStructDwords,
   wpStructPwords,
 } from "./pointer.ts";
+import { deepCopyPtrToSlot } from "./copy.ts";
 
 export const DEFAULT_FIRST_WORDS = 1024;
 export const MAX_SEGMENT_WORDS = 1 << 29;
@@ -585,6 +586,15 @@ export class StructBuilder {
   /** Adopt an orphan into pointer field `ptrIndex` (same-message re-link). */
   adopt(ptrIndex: number, orphan: Orphan): void {
     this.builder.adopt(this.slot(ptrIndex), orphan);
+  }
+
+  /**
+   * Deep-copy `src` into pointer field `ptrIndex`.
+   * Works across messages: allocates new objects in this builder's arena.
+   * Same-message pointer moves use disown/adopt instead.
+   */
+  setP(ptrIndex: number, src: Ptr): void {
+    deepCopyPtrToSlot(this.builder, this.slot(ptrIndex), src, 0);
   }
 
   initStruct(ptrIndex: number, dwords: number, pwords: number): StructBuilder {

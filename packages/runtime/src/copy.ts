@@ -212,5 +212,5 @@ export function structSetP(
   ptrIndex: number,
   src: Ptr,
 ): void {
-  deepCopyPtrToSlot(sb.builder, sb.slot(ptrIndex), src, 0);
+  sb.setP(ptrIndex, src);
 }
