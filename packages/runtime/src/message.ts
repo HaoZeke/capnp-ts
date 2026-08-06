@@ -57,11 +57,16 @@ export class Message {
 
   private constructor(
     segs: SegmentView[],
-    opts?: { traversalWords?: number; depthLimit?: number },
+    opts?: {
+      traversalWords?: number;
+      depthLimit?: number;
+      owned?: Uint8Array;
+    },
   ) {
     this.segs = segs;
     this.traversalLeft = opts?.traversalWords ?? DEFAULT_TRAVERSAL_WORDS;
     this.depthLimit = opts?.depthLimit ?? DEFAULT_DEPTH_LIMIT;
+    this.owned = opts?.owned;
   }
 
   get segmentCount(): number {
@@ -192,37 +197,6 @@ function parseFlat(
     off += nbytes;
   }
   return new Message(segs, { ...opts, owned });
-}
-
-/**
- * Encode segments as a stream-framed Cap'n Proto buffer
- * (segment table + concatenated segment bodies).
- */
-export function frameSegments(segs: readonly SegmentView[]): Uint8Array {
-  assertCapnp(segs.length > 0, "ARG");
-  let bodyWords = 0;
-  for (const s of segs) bodyWords += s.words;
-  let tableBytes = 4 + 4 * segs.length;
-  if (tableBytes % 8 !== 0) tableBytes += 4;
-  const total = tableBytes + bodyWords * WORD_BYTES;
-  const buf = new Uint8Array(total);
-  const store32 = (off: number, v: number) => {
-    buf[off] = v & 0xff;
-    buf[off + 1] = (v >>> 8) & 0xff;
-    buf[off + 2] = (v >>> 16) & 0xff;
-    buf[off + 3] = (v >>> 24) & 0xff;
-  };
-  store32(0, segs.length - 1);
-  for (let i = 0; i < segs.length; i++) {
-    store32(4 + 4 * i, segs[i]!.words);
-  }
-  let off = tableBytes;
-  for (const s of segs) {
-    const nbytes = s.words * WORD_BYTES;
-    if (nbytes) buf.set(s.data.subarray(0, nbytes), off);
-    off += nbytes;
-  }
-  return buf;
 }
 
 function boundsWord(m: Message, seg: number, word: number): void {
@@ -547,13 +521,19 @@ export class Ptr {
   }
 
   /**
-   * Schema-evolution upgrade: list element as struct.
-   * Prim data → synthetic 1-dword struct with dataBits/bodyByte.
-   * Pointer list → 0-data 1-pointer struct. Bit/void refuse.
+   * Element i as a struct (schema-evolution list upgrade / composite access).
+   *
+   * - Composite: real element struct.
+   * - Primitive byte/two/four/eight: upgrade view — field @0 is the element;
+   *   `dataBits` limits oversize reads so they yield defaults (no neighbour spill).
+   * - Pointer list (e.g. List(Text)): upgrade to 0-data / 1-pointer struct.
+   * - List(Bool) / List(Void): refuse with KIND (encoding.html list-upgrade rules).
+   *
+   * Parity: capnp-fortran t_list_upgrade_views, capnp-janet list_evolution.
    */
   listGetStruct(index: number): Ptr {
     assertCapnp(this.kind === PtrKind.List, "KIND");
-    assertCapnp(index < this.count, "BOUNDS");
+    assertCapnp(index >= 0 && index < this.count, "BOUNDS");
 
     if (this.esize === ElemSize.Composite) {
       return Ptr.struct(
@@ -565,6 +545,7 @@ export class Ptr {
       );
     }
     if (this.esize === ElemSize.Pointer) {
+      // Upgrade: pointer list element is a 0-data / 1-pointer struct.
       return new Ptr({
         msg: this.msg,
         seg: this.seg,
@@ -575,9 +556,13 @@ export class Ptr {
       });
     }
     if (this.esize === ElemSize.Void || this.esize === ElemSize.Bit) {
-      throw new CapnpError("KIND", "void/bit lists cannot upgrade to struct");
+      throw new CapnpError(
+        "KIND",
+        "List(Bool)/List(Void) cannot upgrade to struct",
+      );
     }
 
+    // Primitive data list → synthetic struct with field @0 = the element.
     let elemBytes: number;
     switch (this.esize) {
       case ElemSize.Byte:
