@@ -10,10 +10,17 @@
  *   - Hard ceiling: MAX_SEGMENT_WORDS (1<<29).
  */
 
-import { loadU64, storeF64, storeU16, storeU32, storeU64 } from "./endian.ts";
+import {
+  f64ToBits,
+  loadU64,
+  storeU16,
+  storeU32,
+  storeU64,
+} from "./endian.ts";
 import {
   CapnpError,
   ElemSize,
+  MAX_SEGMENTS,
   PtrKind,
   WORD_BYTES,
   WireKind,
@@ -74,12 +81,21 @@ export class BuilderPointer {
  * Detached pointer object: storage stays in the arena, the original slot is
  * zeroed (disown). Re-link with adopt / MessageBuilder.adopt within the same
  * builder. Mirrors capnp-fortran capnp_disown + capnp_setp.
+ *
+ * After a successful adopt the orphan is consumed (null) so a second adopt
+ * fails rather than double-linking the same object.
  */
 export class Orphan {
+  /**
+   * False after adopt consumes this handle. Distinct from a null orphan:
+   * re-adopting a consumed handle throws.
+   */
+  private _alive = true;
+
   private constructor(
     /** Owning builder; null only for a null orphan. */
-    readonly builder: MessageBuilder | null,
-    readonly kind: number,
+    private _builder: MessageBuilder | null,
+    private _kind: number,
     /** Object body start (struct) or list content/tag start (list). */
     readonly seg: number,
     readonly word: number,
@@ -92,6 +108,14 @@ export class Orphan {
      */
     readonly count: number,
   ) {}
+
+  get builder(): MessageBuilder | null {
+    return this._builder;
+  }
+
+  get kind(): number {
+    return this._kind;
+  }
 
   static null(): Orphan {
     return new Orphan(null, PtrKind.Null, 0, 0, 0, 0, 0, 0);
@@ -131,7 +155,22 @@ export class Orphan {
   }
 
   get isNull(): boolean {
-    return this.kind === PtrKind.Null;
+    return this._kind === PtrKind.Null;
+  }
+
+  /** Whether this handle may still be adopted (not yet consumed). */
+  get isAlive(): boolean {
+    return this._alive;
+  }
+
+  /**
+   * Mark this orphan consumed after adopt. Subsequent adopt throws.
+   * @internal
+   */
+  consume(): void {
+    this._alive = false;
+    this._builder = null;
+    this._kind = PtrKind.Null;
   }
 }
 
@@ -174,6 +213,11 @@ export class MessageBuilder {
   }
 
   private appendSegment(capWords: number): void {
+    assertCapnp(
+      this.segs.length < MAX_SEGMENTS,
+      "ALLOC",
+      `segment count exceeds MAX_SEGMENTS (${MAX_SEGMENTS})`,
+    );
     const lim = this.limWords();
     if (capWords < 1) capWords = 1;
     if (capWords > lim) capWords = lim;
@@ -350,6 +394,12 @@ export class MessageBuilder {
     dwords: number,
     pwords: number,
   ): void {
+    // Empty structs (0 data / 0 pointers) always use offset -1. Offset 0 with
+    // zero size is the null pointer (encoding.html).
+    if (dwords === 0 && pwords === 0) {
+      this.storeW(slotSeg, slotWord, wpMakeStruct(-1, 0, 0));
+      return;
+    }
     if (slotSeg === bodySeg) {
       const off = bodyWord - slotWord - 1;
       this.storeW(slotSeg, slotWord, wpMakeStruct(off, dwords, pwords));
@@ -420,10 +470,10 @@ export class MessageBuilder {
   ): StructBuilder {
     const n = dwords + pwords;
     if (n === 0) {
-      const bodySeg = slot.seg;
-      const bodyWord = slot.word + 1;
-      this.writeStructPtr(slot.seg, slot.word, bodySeg, bodyWord, 0, 0);
-      return new StructBuilder(this, bodySeg, bodyWord, dwords, pwords);
+      // No body words; wire pointer is wpMakeStruct(-1, 0, 0) (not offset 0).
+      // Resolved body location is the pointer word itself (word + 1 + (-1)).
+      this.writeStructPtr(slot.seg, slot.word, slot.seg, slot.word, 0, 0);
+      return new StructBuilder(this, slot.seg, slot.word, dwords, pwords);
     }
     const { seg: bodySeg, word: bodyWord } = this.allocWords(n);
     this.writeStructPtr(slot.seg, slot.word, bodySeg, bodyWord, dwords, pwords);
@@ -456,11 +506,14 @@ export class MessageBuilder {
   /**
    * Link `orphan` into `slot` within this same builder. Null orphan clears the
    * slot. Cross-builder orphans are rejected (use deep-copy setp for that).
+   * Consumes the orphan on success so a second adopt of the same handle fails.
    */
   adopt(slot: BuilderPointer, orphan: Orphan): void {
     assertCapnp(slot.builder === this, "ARG");
+    assertCapnp(orphan.isAlive, "ARG", "orphan already adopted");
     if (orphan.isNull || orphan.builder === null) {
       this.storeW(slot.seg, slot.word, 0n);
+      orphan.consume();
       return;
     }
     assertCapnp(
@@ -477,6 +530,7 @@ export class MessageBuilder {
         orphan.dwords,
         orphan.pwords,
       );
+      orphan.consume();
       return;
     }
     if (orphan.kind === PtrKind.List) {
@@ -488,13 +542,16 @@ export class MessageBuilder {
         orphan.esize,
         orphan.count,
       );
+      orphan.consume();
       return;
     }
     if (orphan.kind === PtrKind.Cap) {
       this.storeW(slot.seg, slot.word, wpMakeCap(orphan.count));
+      orphan.consume();
       return;
     }
     this.storeW(slot.seg, slot.word, 0n);
+    orphan.consume();
   }
 }
 

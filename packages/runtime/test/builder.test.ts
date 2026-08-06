@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   BuilderPointer,
+  CapnpError,
   deepCopyPtrToSlot,
   ElemSize,
+  MAX_SEGMENTS,
   Message,
   MessageBuilder,
   PtrKind,
@@ -11,6 +13,10 @@ import {
   loadU64,
   wpFarTwo,
   wpKind,
+  wpMakeStruct,
+  wpOffset,
+  wpStructDwords,
+  wpStructPwords,
 } from "../src/index.ts";
 
 const PERSON_D = 1;
@@ -449,5 +455,100 @@ describe("MessageBuilder", () => {
     expect(orphan.isNull).toBe(true);
     root.adopt(0, orphan);
     expect(Message.fromFlat(b.toFlat()).root().getP(0).kind).toBe(PtrKind.Null);
+  });
+
+  test("orphan: double-adopt rejected after consume", () => {
+    const b = new MessageBuilder();
+    const root = b.initRoot(0, 2);
+    root.setText(0, "once-only");
+    const orphan = root.disown(0);
+    expect(orphan.isAlive).toBe(true);
+    root.adopt(1, orphan);
+    expect(orphan.isAlive).toBe(false);
+    expect(orphan.isNull).toBe(true);
+    expect(() => root.adopt(0, orphan)).toThrow(CapnpError);
+    try {
+      root.adopt(0, orphan);
+    } catch (e) {
+      expect(e).toBeInstanceOf(CapnpError);
+      expect((e as CapnpError).code).toBe("ARG");
+    }
+    // First adopt still holds the text; failed second adopt did not clear slot 1.
+    const msg = Message.fromFlat(b.toFlat());
+    expect(msg.root().getP(0).kind).toBe(PtrKind.Null);
+    expect(msg.root().getText(1)).toBe("once-only");
+  });
+
+  test("orphan: double-adopt of struct rejected", () => {
+    const b = new MessageBuilder();
+    const root = b.initRoot(0, 2);
+    const kid = root.initStruct(0, 1, 0);
+    kid.setU64(0, 99n);
+    const orphan = root.disown(0);
+    root.adopt(1, orphan);
+    expect(() => root.adopt(0, orphan)).toThrow(CapnpError);
+    expect(Message.fromFlat(b.toFlat()).root().getP(1).getU64(0)).toBe(99n);
+  });
+
+  test("setF64 + getF64 round-trip with default XOR", () => {
+    const b = new MessageBuilder();
+    const root = b.initRoot(1, 0);
+    root.setF64(0, Math.PI);
+    const msg = Message.fromFlat(b.toFlat());
+    expect(msg.root().getF64(0)).toBe(Math.PI);
+
+    const b2 = new MessageBuilder();
+    const root2 = b2.initRoot(1, 0);
+    const dflt = 1.5;
+    root2.setF64(0, 2.5, dflt);
+    const msg2 = Message.fromFlat(b2.toFlat());
+    expect(msg2.root().getF64(0, dflt)).toBe(2.5);
+    // Without the schema default, the XOR'd wire value is not 2.5.
+    expect(msg2.root().getF64(0, 0)).not.toBe(2.5);
+  });
+
+  test("initRoot(0,0) empty struct encodes offset -1 not null", () => {
+    const b = new MessageBuilder();
+    const root = b.initRoot(0, 0);
+    const w = loadU64(b.segmentData(0), 0);
+    expect(w).not.toBe(0n);
+    expect(w).toBe(wpMakeStruct(-1, 0, 0));
+    expect(wpOffset(w)).toBe(-1);
+    expect(wpStructDwords(w)).toBe(0);
+    expect(wpStructPwords(w)).toBe(0);
+    expect(root.dwords).toBe(0);
+    expect(root.pwords).toBe(0);
+
+    const msg = Message.fromFlat(b.toFlat());
+    expect(msg.root().kind).toBe(PtrKind.Struct);
+    expect(msg.root().dwords).toBe(0);
+    expect(msg.root().pwords).toBe(0);
+  });
+
+  test("initStructAt(0,0) nested empty struct is non-null", () => {
+    const b = new MessageBuilder();
+    const root = b.initRoot(0, 1);
+    root.initStruct(0, 0, 0);
+    const slotW = loadU64(b.segmentData(root.seg), root.slot(0).word * 8);
+    expect(slotW).toBe(wpMakeStruct(-1, 0, 0));
+    const msg = Message.fromFlat(b.toFlat());
+    expect(msg.root().getP(0).kind).toBe(PtrKind.Struct);
+  });
+
+  test("appendSegment enforces MAX_SEGMENTS", () => {
+    // Cap each segment at 1 word so every allocWords(1) after the first
+    // fills its segment forces appendSegment (doubling would otherwise grow).
+    const b = new MessageBuilder({ firstWords: 1, maxSegWords: 1 });
+    for (let i = 0; i < MAX_SEGMENTS; i++) {
+      b.allocWords(1);
+    }
+    expect(b.segmentCount).toBe(MAX_SEGMENTS);
+    expect(() => b.allocWords(1)).toThrow(CapnpError);
+    try {
+      b.allocWords(1);
+    } catch (e) {
+      expect(e).toBeInstanceOf(CapnpError);
+      expect((e as CapnpError).code).toBe("ALLOC");
+    }
   });
 });
