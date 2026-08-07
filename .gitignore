@@ -213,3 +213,6 @@ coverage/
 # Grok Build local workflows (session-local; user copy in ~/.grok/workflows)
 .grok/
 
+
+.venv-pycapnp/
+

@@ -81,6 +81,7 @@ present. Do not treat this table as a green checklist for unbuilt work.
 | Canonical form | no | yes | yes | yes | **yes** (AddressBook golden byte-identical to CLI) |
 | Code generator (`capnp compile -o`) | yes | yes | yes | yes | **yes** (v1: structs/enums/unions/getters/List helpers; schema defaults in emit still zero-only) |
 | RPC | no | yes | yes | out of scope for v0.x | **no** (Phase 2 package) |
+| Interop with pycapnp (decode/encode same schema frames) | n/a | wraps C++ | n/a | n/a | **yes** (AddressBook + calculator; `packages/runtime/test/pycapnp-interop.test.ts`) |
 
 The serialization bar is Cap'n C++ 1.4.0 (`capnp encode` /
 `convert binary:packed` / `binary:canonical`) plus the same AddressBook and
@@ -257,3 +258,14 @@ See [CHANGELOG.md](CHANGELOG.md).
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Ready when
+
+Tier A for this package means:
+
+1. Cap'n CLI goldens (AddressBook packed/canonical) byte-identical
+2. Calculator Expression serialization decode/eval (add, nested mul)
+3. Bidirectional interop with **pycapnp** (decode their frames; they decode our builder frames)
+4. Adversarial security fixes on reader/builder (depth, list charge, composite tag)
+
+Still not “full Cap'n C++”: no RPC L1, not every schema evolution edge, codegen defaults incomplete.
