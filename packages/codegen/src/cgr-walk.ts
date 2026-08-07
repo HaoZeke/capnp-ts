@@ -19,7 +19,7 @@
  *   codeOrder u16 @0; discriminantValue u16 @2 (default 0xffff, wire XOR);
  *   which u16 @8 (slot=0/group=1); slot.offset u32 @4; group.typeId u64 @16
  *   name Text ptr0; annotations ptr1; slot.type ptr2; slot.defaultValue ptr3
- *   slot.hadExplicitDefault :Bool bit 80 (data)
+ *   slot.hadExplicitDefault :Bool bit 128 (data; schema.capnp Field.slot @10)
  *
  * Type: which u16 @0; list.elementType ptr0; enum/struct/interface typeId u64 @8
  *
@@ -401,7 +401,8 @@ function decodeValue(v: Ptr): ValueAst {
     case TYPE_UINT64:
       return { which: "uint64", value: v.getU64(8) };
     case TYPE_FLOAT32:
-      return { which: "float32", value: v.getU32(4) >>> 0 };
+      // Value.float32 is IEEE bits at byte 4; return the float, not the bits.
+      return { which: "float32", value: v.getF32(4) };
     case TYPE_FLOAT64:
       return { which: "float64", value: v.getF64(8) };
     case TYPE_TEXT:
@@ -437,7 +438,7 @@ function decodeField(f: Ptr): FieldAst {
       group: { typeId: f.getU64(16) },
     };
   }
-  // slot (default). type = ptr2, defaultValue = ptr3; hadExplicitDefault @ bit 80.
+  // slot (default). type = ptr2, defaultValue = ptr3; hadExplicitDefault @ bit 128.
   return {
     name,
     codeOrder,
@@ -446,7 +447,7 @@ function decodeField(f: Ptr): FieldAst {
       offset: f.getU32(4) >>> 0,
       type: decodeType(f.getp(2)),
       defaultValue: decodeValue(f.getp(3)),
-      hadExplicitDefault: f.getBool(80),
+      hadExplicitDefault: f.getBool(128),
     },
   };
 }

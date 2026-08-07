@@ -9,7 +9,9 @@
  */
 
 import {
+  bitsToF32,
   bitsToF64,
+  f32ToBits,
   f64ToBits,
   loadF64,
   loadU16,
@@ -547,6 +549,13 @@ export class Ptr {
     return loadU64(this.dataBytes(), byteOffset) ^ dflt;
   }
 
+  getF32(byteOffset: number, dflt = 0): number {
+    if (this.kind !== PtrKind.Struct) return dflt;
+    if ((byteOffset + 4) * 8 > this.dataBitCount()) return dflt;
+    const wire = loadU32(this.dataBytes(), byteOffset);
+    return bitsToF32((wire ^ f32ToBits(dflt)) >>> 0);
+  }
+
   getF64(byteOffset: number, dflt = 0): number {
     if (this.kind !== PtrKind.Struct) return dflt;
     if ((byteOffset + 8) * 8 > this.dataBitCount()) return dflt;
@@ -650,10 +659,10 @@ export class Ptr {
    * - Primitive byte/two/four/eight: upgrade view — field @0 is the element;
    *   `dataBits` limits oversize reads so they yield defaults (no neighbour spill).
    * - Pointer list (e.g. List(Text)): upgrade to 0-data / 1-pointer struct.
-   * - List(Void): zero-size struct view (encoding.html: any esize except bit).
-   * - List(Bool) / bit: refuse with KIND (only special exception in encoding.html).
+   * - List(Void): zero-size struct view (encoding.html allows every esize but bit).
+   * - List(Bool) / bit: refuse with KIND — encoding.html's only upgrade ban.
    *
-   * Parity: encoding.html list-upgrade rules; capnp-fortran t_list_upgrade_views.
+   * Parity: encoding.html Void-vs-Bool upgrade rule; capnp-fortran upgrade views.
    */
   listGetStruct(index: number): Ptr {
     assertCapnp(this.kind === PtrKind.List, "KIND");

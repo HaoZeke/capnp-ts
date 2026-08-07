@@ -237,8 +237,88 @@ describe("Field.defaultValue walk", () => {
     if (id!.slot!.defaultValue!.which === "uint32") {
       expect(id!.slot!.defaultValue!.value).toBe(0);
     }
+    // No `= …` in schema → hadExplicitDefault is false (bit 128).
+    expect(id!.slot!.hadExplicitDefault).toBe(false);
     const name = person!.struct!.fields.find((f) => f.name === "name");
     expect(name?.slot?.defaultValue?.which).toBe("text");
+  });
+
+  test("kitchen non-zero defaults walk + emit into getters", async () => {
+    const kitchenPath = join(fixturesDir, "kitchen.cgr.bin");
+    expect(existsSync(kitchenPath)).toBe(true);
+    const ast = await walkCgr(new Uint8Array(readFileSync(kitchenPath)));
+    const sink = ast.nodes.find((n) => n.displayName.endsWith(":Sink"));
+    expect(sink?.struct).toBeDefined();
+    const flag = sink!.struct!.fields.find((f) => f.name === "flag");
+    const count = sink!.struct!.fields.find((f) => f.name === "count");
+    const ratio = sink!.struct!.fields.find((f) => f.name === "ratio");
+    expect(flag?.slot?.hadExplicitDefault).toBe(true);
+    expect(flag?.slot?.defaultValue).toEqual({ which: "bool", value: true });
+    expect(count?.slot?.hadExplicitDefault).toBe(true);
+    expect(count?.slot?.defaultValue).toEqual({ which: "int32", value: -7 });
+    expect(ratio?.slot?.hadExplicitDefault).toBe(true);
+    expect(ratio?.slot?.defaultValue).toEqual({ which: "float64", value: 2.5 });
+
+    const src = emitSourceString(ast);
+    expect(src).toMatch(/Sink_getFlag\(ptr: Ptr, dflt = true\)/);
+    expect(src).toMatch(/Sink_getCount\(ptr: Ptr, dflt = -7\)/);
+    expect(src).toMatch(/Sink_getRatio\(ptr: Ptr, dflt = 2\.5\)/);
+    expect(src).toContain("ptr.getF64(");
+    expect(src).toContain("ptr.getBool(");
+  });
+
+  test("synthetic float32 default emits getF32 with schema dflt", async () => {
+    const { emitModuleSource } = await import("../src/emit.ts");
+    const synthetic = {
+      nodes: [
+        {
+          id: 1n,
+          displayName: "synth.capnp:Probe",
+          displayNamePrefixLength: 0,
+          scopeId: 0n,
+          which: "struct" as const,
+          whichTag: 1,
+          nestedNodes: [],
+          struct: {
+            dataWordCount: 1,
+            pointerCount: 0,
+            isGroup: false,
+            discriminantCount: 0,
+            discriminantOffset: 0,
+            fields: [
+              {
+                name: "x",
+                codeOrder: 0,
+                discriminant: 0xffff,
+                slot: {
+                  offset: 0,
+                  type: { which: "float32" as const },
+                  defaultValue: { which: "float32" as const, value: 1.5 },
+                  hadExplicitDefault: true,
+                },
+              },
+              {
+                name: "n",
+                codeOrder: 1,
+                discriminant: 0xffff,
+                slot: {
+                  offset: 1,
+                  type: { which: "int32" as const },
+                  defaultValue: { which: "int32" as const, value: -7 },
+                  hadExplicitDefault: true,
+                },
+              },
+            ],
+          },
+        },
+      ],
+      requestedFiles: [{ id: 0n, filename: "synth.capnp" }],
+    };
+    const src = emitModuleSource(synthetic as never, "synth.capnp", 0n);
+    expect(src).toContain("ptr.getF32(");
+    expect(src).toMatch(/Probe_getX\(ptr: Ptr, dflt = 1\.5\)/);
+    expect(src).toMatch(/Probe_getN\(ptr: Ptr, dflt = -7\)/);
+    expect(src).not.toMatch(/Probe_getX[\s\S]{0,80}getU32/);
   });
 });
 

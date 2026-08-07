@@ -3,23 +3,26 @@
  *
  * Cap'n Proto allows a writer and a reader to disagree on whether a list is a
  * primitive list or a list of structs that only use field `@0` (encoding.html
- * "list upgrades"). Parity with Cap'n C++ / capnp-fortran / capnp-janet:
+ * "Interpreting pointers differently"). Supported shapes:
  *
- * | Writer encoded              | Reader asks for                    | API |
- * |-----------------------------|------------------------------------|-----|
- * | List(UInt8/16/32/64)        | List(Struct) scalar @0             | listGetStruct + getU* |
- * | List(pointer) e.g. List(Text)| List(Struct) pointer @0           | listGetStruct + getText/getP |
- * | List(Struct) data word 0    | List(UInt*) field @0               | listGetU8/U16/U32/U64/F64 |
- * | List(Struct) pointer 0      | List(Text) / pointer list          | listGetText |
+ * | Writer encoded               | Reader asks for                 | API |
+ * |------------------------------|---------------------------------|-----|
+ * | List(UInt8/16/32/64)         | List(Struct) scalar @0          | listGetStruct + getU* |
+ * | List(pointer) e.g. List(Text)| List(Struct) pointer @0        | listGetStruct + getText/getP |
+ * | List(Struct) data word 0     | List(UInt*) field @0            | listGetU8/U16/U32/U64/F64 |
+ * | List(Struct) pointer 0       | List(Text) / pointer list       | listGetText |
  *
  * Upgrade views limit `dataBits` to the element width so oversize field reads
  * return the caller default and never spill into the next element.
  *
- * encoding.html: any list element size except bit (C=1) may be decoded as a
- * struct list. List(Void) upgrades to a zero-size struct view. Explicit
- * non-goals (KIND or default, no silent partial):
- * - List(Bool) / bit lists do not upgrade to struct views.
- * - Cross-width primitive demotion without a composite is not supported.
+ * encoding.html Void vs Bool (the only special-case pair in the list-upgrade
+ * rule):
+ * - Any element size **except** bit (C=1) may be decoded as a struct list.
+ * - List(Void) (C=0) **does** upgrade: zero-size struct view (no data, no ptrs).
+ * - List(Bool) (C=1 bit) **does not** upgrade: listGetStruct throws KIND.
+ *
+ * Explicit non-goal: cross-width primitive demotion without a composite
+ * (not claimed; refused or undefined — do not treat as silent partial success).
  *
  * Implementation lives on {@link Ptr} in message.ts; this module re-exports
  * free-function aliases matching the janet `capnp_list_get_*` surface.

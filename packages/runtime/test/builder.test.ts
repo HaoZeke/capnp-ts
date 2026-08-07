@@ -507,6 +507,28 @@ describe("MessageBuilder", () => {
     expect(msg2.root().getF64(0, 0)).not.toBe(2.5);
   });
 
+  test("setF32 + getF32 round-trip with default XOR", () => {
+    const b = new MessageBuilder();
+    const root = b.initRoot(1, 0);
+    root.setF32(0, 1.5);
+    const msg = Message.fromFlat(b.toFlat());
+    expect(msg.root().getF32(0)).toBe(1.5);
+
+    const b2 = new MessageBuilder();
+    const root2 = b2.initRoot(1, 0);
+    const dflt = 1.5;
+    root2.setF32(0, 2.5, dflt);
+    const msg2 = Message.fromFlat(b2.toFlat());
+    expect(msg2.root().getF32(0, dflt)).toBe(2.5);
+    expect(msg2.root().getF32(0, 0)).not.toBe(2.5);
+
+    // Zeroed section + non-zero schema default → default.
+    const b3 = new MessageBuilder();
+    b3.initRoot(1, 0);
+    const msg3 = Message.fromFlat(b3.toFlat());
+    expect(msg3.root().getF32(0, 1.5)).toBe(1.5);
+  });
+
   test("setU32 + getU32 round-trip with non-zero schema default XOR", () => {
     const b = new MessageBuilder();
     const root = b.initRoot(1, 0);

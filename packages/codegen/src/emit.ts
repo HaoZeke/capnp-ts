@@ -3,12 +3,13 @@
  *
  * Emits one ESM module per requested schema file:
  *   - struct dataWordCount / pointerCount layout constants
- *   - typed field getters (Ptr methods)
+ *   - typed field getters (Ptr methods) with schema-default XOR args
  *   - enums as const maps (no TypeScript `enum` keyword)
  *   - union which() + arm tag constants
  *   - UInt64/Int64 always via getU64 (bigint), never getU32
+ *   - Float32 via getF32 (IEEE bit XOR); Float64 via getF64
  *
- * Defaults XOR is zero-only for v1 (schema default 0). M6 adds non-zero defaults.
+ * Scalar defaults come from Field.slot.defaultValue (zero when omitted in schema).
  */
 
 import type {
@@ -16,6 +17,7 @@ import type {
   FieldAst,
   NodeAst,
   TypeAst,
+  ValueAst,
 } from "./cgr-walk.ts";
 import { NO_DISCRIMINANT } from "./cgr-walk.ts";
 import { basename, dirname, join } from "node:path";
@@ -93,6 +95,88 @@ function dataByteOffset(typeWhich: string, slotOffset: number): number {
   }
 }
 
+/** JS literal for a number (finite / NaN / ±Infinity / -0). */
+function jsNumberLiteral(n: number): string {
+  if (Number.isNaN(n)) return "NaN";
+  if (n === Infinity) return "Infinity";
+  if (n === -Infinity) return "-Infinity";
+  if (Object.is(n, -0)) return "-0";
+  return String(n);
+}
+
+/**
+ * Schema default as a TypeScript default-parameter expression, or null when
+ * the zero language default is enough (omit the `= …` only when value is the
+ * type's zero; still fine to emit `= 0` — callers pass through to get*).
+ */
+function scalarDefaultExpr(
+  typeWhich: string,
+  dv: ValueAst | undefined,
+): string {
+  if (!dv) {
+    if (typeWhich === "bool") return "false";
+    if (typeWhich === "int64" || typeWhich === "uint64") return "0n";
+    return "0";
+  }
+  switch (typeWhich) {
+    case "bool":
+      if (dv.which === "bool") return dv.value ? "true" : "false";
+      return "false";
+    case "int8":
+    case "int16":
+    case "int32":
+      if (
+        dv.which === "int8" ||
+        dv.which === "int16" ||
+        dv.which === "int32"
+      ) {
+        return jsNumberLiteral(dv.value);
+      }
+      return "0";
+    case "uint8":
+    case "uint16":
+    case "uint32":
+    case "enum":
+      if (
+        dv.which === "uint8" ||
+        dv.which === "uint16" ||
+        dv.which === "uint32" ||
+        dv.which === "enum"
+      ) {
+        return jsNumberLiteral(dv.value >>> 0);
+      }
+      // Signed Value tags used for unsigned slots (defensive).
+      if (
+        dv.which === "int8" ||
+        dv.which === "int16" ||
+        dv.which === "int32"
+      ) {
+        return jsNumberLiteral(dv.value >>> 0);
+      }
+      return "0";
+    case "int64":
+      if (dv.which === "int64" || dv.which === "uint64") {
+        return `${dv.value}n`;
+      }
+      return "0n";
+    case "uint64":
+      if (dv.which === "uint64" || dv.which === "int64") {
+        // Emit as unsigned bigint literal (mask to 64 bits).
+        const u = BigInt.asUintN(64, dv.value);
+        return `${u}n`;
+      }
+      return "0n";
+    case "float32":
+    case "float64":
+      if (dv.which === "float32" || dv.which === "float64") {
+        return jsNumberLiteral(dv.value);
+      }
+      return "0";
+    default:
+      return "0";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Node selection for a requested file
 // ---------------------------------------------------------------------------
@@ -143,6 +227,9 @@ function emitFieldGetter(
   const fn = `${typeName}_get${fname[0]!.toUpperCase()}${fname.slice(1)}`;
   const t = field.slot.type;
   const off = field.slot.offset;
+  const dv = field.slot.defaultValue;
+  const dfltExpr = scalarDefaultExpr(t.which, dv);
+  const byteOff = dataByteOffset(t.which, off);
 
   switch (t.which) {
     case "void":
@@ -150,63 +237,91 @@ function emitFieldGetter(
       return;
     case "bool":
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt = false): boolean {`,
+        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): boolean {`,
         `  return ptr.getBool(${off}, dflt);`,
         `}`,
         ``,
       );
       return;
     case "int8":
+      // Signed: XOR bits via getU8, then sign-extend to int8.
+      lines.push(
+        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): number {`,
+        `  return (ptr.getU8(${byteOff}, dflt & 0xff) << 24) >> 24;`,
+        `}`,
+        ``,
+      );
+      return;
     case "uint8":
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt = 0): number {`,
-        `  return ptr.getU8(${dataByteOffset(t.which, off)}, dflt);`,
+        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): number {`,
+        `  return ptr.getU8(${byteOff}, dflt);`,
         `}`,
         ``,
       );
       return;
     case "int16":
+      lines.push(
+        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): number {`,
+        `  return (ptr.getU16(${byteOff}, dflt & 0xffff) << 16) >> 16;`,
+        `}`,
+        ``,
+      );
+      return;
     case "uint16":
     case "enum":
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt = 0): number {`,
-        `  return ptr.getU16(${dataByteOffset(t.which, off)}, dflt);`,
+        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): number {`,
+        `  return ptr.getU16(${byteOff}, dflt);`,
         `}`,
         ``,
       );
       return;
     case "int32":
+      lines.push(
+        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): number {`,
+        `  return ptr.getU32(${byteOff}, dflt | 0) | 0;`,
+        `}`,
+        ``,
+      );
+      return;
     case "uint32":
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt = 0): number {`,
-        `  return ptr.getU32(${dataByteOffset(t.which, off)}, dflt);`,
+        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): number {`,
+        `  return ptr.getU32(${byteOff}, dflt);`,
         `}`,
         ``,
       );
       return;
     case "int64":
-    case "uint64":
       // CRITICAL: full u64 path (bigint). Never getU32 for 64-bit fields.
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt: bigint = 0n): bigint {`,
-        `  return ptr.getU64(${dataByteOffset(t.which, off)}, dflt);`,
+        `export function ${fn}(ptr: Ptr, dflt: bigint = ${dfltExpr}): bigint {`,
+        `  return BigInt.asIntN(64, ptr.getU64(${byteOff}, dflt));`,
+        `}`,
+        ``,
+      );
+      return;
+    case "uint64":
+      lines.push(
+        `export function ${fn}(ptr: Ptr, dflt: bigint = ${dfltExpr}): bigint {`,
+        `  return ptr.getU64(${byteOff}, dflt);`,
         `}`,
         ``,
       );
       return;
     case "float32":
-      // Runtime exposes f64; float32 wire is u32 bits — read as u32 for v1.
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt = 0): number {`,
-        `  return ptr.getU32(${dataByteOffset(t.which, off)}, dflt);`,
+        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): number {`,
+        `  return ptr.getF32(${byteOff}, dflt);`,
         `}`,
         ``,
       );
       return;
     case "float64":
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt = 0): number {`,
-        `  return ptr.getF64(${dataByteOffset(t.which, off)}, dflt);`,
+        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): number {`,
+        `  return ptr.getF64(${byteOff}, dflt);`,
         `}`,
         ``,
       );
@@ -394,7 +509,7 @@ export function emitModuleSource(
     if (n.which === "struct") emitStruct(n, lines);
   }
 
-  // Interfaces / consts / annotations: v1 emits nothing (M6+).
+  // Interfaces / consts / annotations: not emitted (no RPC / dynamic claim).
   return lines.join("\n");
 }
 

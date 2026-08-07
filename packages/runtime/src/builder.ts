@@ -11,6 +11,7 @@
  */
 
 import {
+  f32ToBits,
   f64ToBits,
   loadU64,
   storeU16,
@@ -582,7 +583,7 @@ export class StructBuilder {
 
   /**
    * Scalar data-section writes. Wire stores `value XOR dflt` (schema default),
-   * matching getU* / getBool / getF64 on the reader.
+   * matching getU* / getBool / getF32 / getF64 on the reader.
    */
   setU8(byteOffset: number, value: number, dflt = 0): void {
     const abs = this.word * WORD_BYTES + byteOffset;
@@ -606,6 +607,12 @@ export class StructBuilder {
     const abs = this.word * WORD_BYTES + byteOffset;
     this.bodyOk(abs + 8);
     storeU64(this.data(), abs, value ^ dflt);
+  }
+
+  setF32(byteOffset: number, value: number, dflt = 0): void {
+    const abs = this.word * WORD_BYTES + byteOffset;
+    this.bodyOk(abs + 4);
+    storeU32(this.data(), abs, (f32ToBits(value) ^ f32ToBits(dflt)) >>> 0);
   }
 
   setF64(byteOffset: number, value: number, dflt = 0): void {
