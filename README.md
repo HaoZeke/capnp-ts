@@ -36,15 +36,17 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
 
 - Stream-framed deserialize (copy) and zero-copy view of a caller buffer
 - Struct / list / far / double-far / capability pointer resolution
-- Scalar field readers (`u8`/`u16`/`u32`/`u64`/`f64`/`bool`) with past-end defaults
+- Scalar field readers (`u8`/`u16`/`u32`/`u64`/`f32`/`f64`/`bool`) with past-end
+  defaults and schema-default XOR (`get*` / `set*` take optional `dflt`)
 - Text, Data, pointer lists, primitive lists, bit-lists; composite list elements
-- Schema-evolution list upgrade/downgrade for the supported cases (see runtime)
+- Schema-evolution list upgrade/downgrade for supported shapes (see runtime
+  `list-evolution.ts`): encoding.html Void upgrades, Bool/bit refuses; prim and
+  pointer list → struct field `@0` views; composite downgrade to prim/Text
 - Stream segment-table serialize (`serializeToFlat` / `frameSegments`)
 - Multi-segment `MessageBuilder` arena with far / double-far pointer paths
 - Same-message orphan `disown` / `adopt`; cross-message `deepCopyPtr` / `structSetP`
-- Scalar get/set with schema-default XOR on the runtime (`get*` / `set*` take
-  an optional `dflt`); codegen still emits zero-only default arguments (M6
-  wires schema `Field.defaultValue` into getters/setters)
+- `capnpc-ts` emits schema `Field.defaultValue` into scalar getter default args
+  (zero when the schema omits `= …`)
 - Packed codec (`pack` / `unpack`) byte-identical to Cap'n C++ 1.4.0 on
   AddressBook (`pack(addressbook.bin) == addressbook.packed.bin`, 151 B)
 - Canonical form (`canonicalize` / `canonicalizeFlat`) byte-identical to
@@ -57,11 +59,11 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
   packed / canonical plus calculator Expression samples
   (`calculator_add_2_3.bin`, `calculator_mul_add.bin`, `calculator_value_5.bin`)
 - `capnpc-ts` plugin: framed CGR on stdin/file, typed `.ts` per requested schema
-  (layout constants, getters, const-map enums, union `which`, List(Text) via
-  `listGetText`, u64probe-safe `getU64`/`bigint`); AddressBook decode test
+  (layout constants, getters with defaults, const-map enums, union `which`,
+  List(Text) via `listGetText`, `getF32`/`getF64`, u64probe-safe `getU64`/`bigint`)
 
-Not yet shipped: full list-evolution matrix, non-zero default XOR in codegen
-emit, dynamic reflection, RPC.
+Not yet shipped: generated setters / full builder emit, dynamic reflection,
+cross-width list demotion matrix beyond the covered suite, RPC (Phase 2).
 
 ## Parity
 
@@ -76,11 +78,11 @@ present. Do not treat this table as a green checklist for unbuilt work.
 | Packed codec | yes | yes | yes | yes | **yes** (C++ 1.4.0 `0xff` fewer-than-two-zeros heuristic; AddressBook golden) |
 | Zero-copy reads from caller buffer | yes | yes | yes | yes | **yes** (`Message.viewFlat`) |
 | Traversal and depth limits | no | yes | yes | yes | **yes** (8 Mi words + depth 64; far/`getP`/`listGetP` accumulate; see SECURITY.md) |
-| Schema-evolution reads (defaults past end, list up/downgrade) | partial | yes | yes | yes | **partial** (supported upgrade/downgrade views; not full matrix) |
+| Schema-evolution reads (defaults past end, list up/downgrade) | partial | yes | yes | yes | **partial** (Void upgrade + Bool refuse per encoding.html; prim/pointer upgrade + composite downgrade; not every demotion edge) |
 | Builder / deep copy / orphans | limited | yes | yes | partial | **yes** (multi-seg arena + far/double-far; orphan disown/adopt; deepCopyPtr) |
 | Canonical form | no | yes | yes | yes | **yes** (AddressBook golden byte-identical to CLI) |
-| Code generator (`capnp compile -o`) | yes | yes | yes | yes | **yes** (v1: structs/enums/unions/getters/List helpers; schema defaults in emit still zero-only) |
-| RPC | no | yes | yes | out of scope for v0.x | **no** (Phase 2 package) |
+| Code generator (`capnp compile -o`) | yes | yes | yes | yes | **yes** (structs/enums/unions/getters with schema-default XOR args; List helpers; no generated setters yet) |
+| RPC | no | yes | yes | out of scope for v0.x | **no** (not shipped; Phase 2 package only) |
 | Interop with pycapnp (decode/encode same schema frames) | n/a | wraps C++ | n/a | n/a | **yes** (AddressBook + calculator; `packages/runtime/test/pycapnp-interop.test.ts`) |
 
 The serialization bar is Cap'n C++ 1.4.0 (`capnp encode` /
@@ -268,4 +270,5 @@ Tier A for this package means:
 3. Bidirectional interop with **pycapnp** (decode their frames; they decode our builder frames)
 4. Adversarial security fixes on reader/builder (depth, list charge, composite tag)
 
-Still not “full Cap'n C++”: no RPC L1, not every schema evolution edge, codegen defaults incomplete.
+Still not “full Cap'n C++”: no RPC (not shipped), not every schema-evolution
+demotion edge, no generated setters / dynamic API.

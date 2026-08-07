@@ -16,8 +16,9 @@ Pre-1.0 minor releases may include breaking API changes.
   UInt64/Int64 always via `getU64`/`bigint` (offline u64probe CGR fixture).
 - Generated AddressBook decodes runtime golden Alice/Bob; live
   `capnp compile -o…/capnpc-ts` gated with `test.skipIf` (no soft-skip pass).
-- CGR walk of `Field.slot.defaultValue` / `hadExplicitDefault` into the AST
-  (emit still zero-only `dflt` until M6).
+- CGR walk of `Field.slot.defaultValue` / `hadExplicitDefault` (bit 128) into
+  the AST; `capnpc-ts` emits non-zero scalar defaults into getter `dflt` args.
+- `Ptr.getF32` / `StructBuilder.setF32` (IEEE-754 bit XOR, same model as f64).
 - Scalar get/set schema-default XOR (`wire = logical XOR default`) on
   `Ptr.get*` / `StructBuilder.set*`; float defaults XOR IEEE bit patterns.
 - Same-message orphan `disown` / `adopt` (`Orphan` handle) on
@@ -58,8 +59,8 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Not yet
 
-- Full list-evolution matrix (cross-width refusals beyond the covered subset)
-- Codegen non-zero default XOR / full builders in emit (M6; AST walk present)
+- Cross-width list demotion matrix beyond the covered upgrade/downgrade suite
+- Generated setters / full builder emit / groups as first-class helpers
 - Live c-capnproto twin interop (Phase 2; offline sketch only)
-- In-repo family parity audit write-up
-- RPC (`@haozeke/capnp-rpc` Phase 2)
+- Dynamic by-name reflection
+- RPC (`@haozeke/capnp-rpc` Phase 2; not a v1 claim)

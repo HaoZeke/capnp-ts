@@ -58,10 +58,11 @@ bytes stay in the verbatim run). AddressBook covers the `bob@exam` /
 - Multi-segment `MessageBuilder` + far/double-far alloc paths
 - Orphans (`disown` / `adopt` same-message) and deep-copy (`deepCopyPtr`,
   `structSetP` / `deepCopyPtrToSlot` across messages)
-- Schema-default XOR on runtime scalar get/set (`dflt` argument); codegen emit
-  still zero-only defaults (AST walks `Field.defaultValue` for M6)
-- List upgrade/downgrade views for supported shapes only
-- `capnpc-ts` v1 typed emit: structs, const-map enums (Bun strip-safe), union
+- Schema-default XOR on runtime scalar get/set (`dflt`); codegen emits
+  `Field.defaultValue` into getter default args (incl. non-zero); `getF32`/`setF32`
+- List upgrade/downgrade views: encoding.html Void upgrade + Bool refuse; prim
+  / pointer upgrade + composite downgrade (not every demotion edge)
+- `capnpc-ts` typed emit: structs, const-map enums (Bun strip-safe), union
   `which`, List(Text) via `listGetText`, UInt64/Int64 via `getU64`/`bigint`
 - Public kinds use const objects (`WireKind` / `PtrKind` / `ElemSize`), not
   TypeScript `const enum`
@@ -79,31 +80,29 @@ packed + canonical CLI identity, list evolution / deep-copy / orphans,
 | M1 wire reader + AddressBook decode | **yes** | `message.test.ts`, `addressbook.test.ts` |
 | M2 builder + framing + multi-seg far | **yes** | Builder + far/double-far + orphan adopt/disown tests green |
 | M3 packed + canonical CLI identity | **yes** for AddressBook | Byte-identical 151 B packed + 272 B canonical goldens |
-| M4 list evolution + deep-copy + orphans | **mostly** | Upgrade/downgrade subset + orphan + deepCopy green; full matrix open |
-| M5 `capnpc-ts` v1 | **yes** | Typed emit structs/enums/unions; AddressBook Alice/Bob decode |
+| M4 list evolution + deep-copy + orphans | **mostly** | Void/Bool per encoding.html + upgrade/downgrade suite; orphans + deepCopy green |
+| M5 `capnpc-ts` v1 | **yes** | Typed emit structs/enums/unions + schema defaults; AddressBook Alice/Bob |
 | u64probe smoke | **yes** | Offline CGR fixture + generated `getU64`; no soft-skip silent pass |
 | M7 Pi/OMP harness example | **yes** | `examples/pi-admit-harness` Message API dogfood |
-| Family parity audit note | **no** | Cross-family comparison write-up not in-repo |
+| Family parity audit note | **yes** (vault) | `Software/capnp-ts/serialization-parity-audit-2026-08-06.org` |
 
-**Verdict: not fully Tier A.** Core runtime + pack/canonical + codegen v1 +
-Pi harness are green. Remaining gaps: full list-evolution matrix, family
-parity audit note, and codegen M6 (emit non-zero default XOR / full builders)
-if counted under the gate.
+**Verdict: Tier A serialization core green.** Remaining polish: generated
+setters, cross-width demotion edges beyond the suite, live c-capnproto twin.
+**RPC is not claimed** (Phase 2 only).
 
-## Remaining gaps (ordered by Tier A impact)
+## Remaining gaps (ordered by impact)
 
-1. **Family parity audit note** — in-repo family comparison write-up not done.
-2. **List-evolution matrix completeness** — suite covers key shapes, not full
-   fortran/janet matrix (cross-width demotion refusals, etc.).
-3. **Codegen M6** — wire walked `Field.defaultValue` into getter/setter emit;
-   fuller builders.
-4. **Builder byte identity** — not claimed (correct: non-goal without
+1. **Generated setters / full builders** — getters emit defaults; setters not
+   generated yet.
+2. **List-evolution demotion matrix** — suite covers key shapes; not every
+   cross-width refusal C++ accepts.
+3. **Builder byte identity** — not claimed (correct: non-goal without
    documented alloc order); semantic round-trip is the bar and is green for
    AddressBook.
 
 ## Non-goals (correctly out of Tier A)
 
-- RPC (`@haozeke/capnp-rpc`) — Phase 2
+- RPC (`@haozeke/capnp-rpc`) — Phase 2; do not claim
 - Live twin vs `HaoZeke/c-capnproto` — Phase 2 (offline sketch under `interop/`)
 - Cap'n Web / node-capnp FFI
 

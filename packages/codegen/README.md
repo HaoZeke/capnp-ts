@@ -129,9 +129,10 @@ $ capnp compile --src-prefix=. \
 | Typed struct getters + layout constants | **yes** |
 | Enum const maps (no TS `enum`) / unions / `which` | **yes** |
 | List element helpers (`*At` / `*Len`) | **yes** (struct via `listGetP`; Text via `listGetText`) |
-| CGR walk of `Field.defaultValue` | **yes** (AST only; not yet emitted into getters) |
+| CGR walk of `Field.defaultValue` / `hadExplicitDefault` | **yes** (bit 128; float32 as float) |
+| Scalar getter defaults from `Field.defaultValue` | **yes** (incl. non-zero; signed + getF32/getF64) |
 | u64probe `bigint` field paths | **yes** |
-| Non-zero schema-default XOR / full setters in emit | **no** (M6; getters still use `dflt = 0`) |
+| Generated setters / full builders | **no** |
 
 ## Package scripts
 
