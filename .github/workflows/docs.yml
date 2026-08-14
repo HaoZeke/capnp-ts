@@ -33,13 +33,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # wrangler-action picks its package manager from the lockfile it sees,
-      # and this repo is a bun workspace, so the deploy step needs bun on
-      # PATH even though the docs build itself does not.
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
       - uses: prefix-dev/setup-pixi@v0.8.8
         with:
           environments: docs
@@ -55,10 +48,26 @@ jobs:
           path: docs/build
           retention-days: 14
 
+      # The Cloudflare secrets are not configured for this repo yet, so the
+      # deploy is gated on the token being present. The site still builds and
+      # uploads as an artifact on every run.
+      - name: Check for Cloudflare credentials
+        id: cf
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CLOUDFLARE_API_TOKEN is not set; skipping deploy to capnp-ts.rgoswami.me"
+          fi
+
       - name: Ensure Cloudflare Pages project exists
         if: >-
-          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-          github.event_name == 'workflow_dispatch'
+          steps.cf.outputs.configured == 'true' &&
+          ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          github.event_name == 'workflow_dispatch')
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -66,10 +75,14 @@ jobs:
 
       - name: Deploy to Cloudflare Pages
         if: >-
-          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-          github.event_name == 'workflow_dispatch'
+          steps.cf.outputs.configured == 'true' &&
+          ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          github.event_name == 'workflow_dispatch')
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Without this the action infers bun from bun.lock and then fails
+          # to resolve wrangler through bunx.
+          packageManager: npm
           command: pages deploy docs/build --project-name=capnp-ts --branch=main
