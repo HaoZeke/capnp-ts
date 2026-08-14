@@ -5,4 +5,5 @@
  * layer that can name a third vat, which two-party cannot.
  */
 export { MemoryTransportPair, type Transport } from "./transport.ts";
+export { RpcStream, StreamError } from "./stream.ts";
 export { RpcConnection, type RpcServer } from "./vat.ts";

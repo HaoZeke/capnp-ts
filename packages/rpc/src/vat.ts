@@ -30,7 +30,13 @@ import {
   CapDescriptor,
   CapDescriptor_getSenderHosted,
   CapDescriptor_which,
+  BOOTSTRAP_DWORDS,
+  BOOTSTRAP_PWORDS,
   Bootstrap_getQuestionId,
+  FINISH_DWORDS,
+  FINISH_PWORDS,
+  RELEASE_DWORDS,
+  RELEASE_PWORDS,
   DISEMBARGO_DWORDS,
   DISEMBARGO_PWORDS,
   Disembargo_context,
@@ -44,6 +50,8 @@ import {
   Join_getTarget,
   MESSAGE_DWORDS,
   MESSAGE_PWORDS,
+  MESSAGE_TARGET_DWORDS,
+  MESSAGE_TARGET_PWORDS,
   Message,
   Message_getBootstrap,
   Message_getCall,
@@ -68,7 +76,9 @@ import {
   Payload_getContent,
   RETURN_DWORDS,
   RETURN_PWORDS,
+  Return_getAnswerId,
   Return_getResults,
+  Return_which,
   Release_getId,
   Release_getReferenceCount,
 } from "./rpc.capnp.ts";
@@ -129,6 +139,14 @@ interface ExportSlot {
  * question is answered once the last one lands, which is the order
  * rpc-twoparty.capnp's JoinResult describes.
  */
+/** A question this vat asked, from send until its Return arrives. */
+interface QuestionState {
+  /** The Return frame, once it lands. */
+  reply?: Uint8Array;
+  /** True when the Return carried an exception rather than results. */
+  failed: boolean;
+}
+
 interface JoinState {
   partCount: number;
   /** questionId and resolved export per partNum; undefined until seen. */
@@ -148,7 +166,10 @@ export class RpcConnection {
    * still be here when the pipelined call arrives.
    */
   private readonly answers = new Map<number, Uint8Array>();
+  /** Questions this vat has asked, by questionId, until their Return. */
+  private readonly questions = new Map<number, QuestionState>();
   private nextExportId = 0;
+  private nextQuestionId = 0;
 
   constructor(
     private readonly transport: Transport,
@@ -185,8 +206,18 @@ export class RpcConnection {
       case Message.disembargo:
         this.handleDisembargo(Message_getDisembargo(root));
         break;
+      case Message.return:
+        this.handleReturn(Message_getReturn(root), frame);
+        break;
+      case Message.resolve:
+        // Promise resolution. Replying unimplemented is the spec-defined
+        // signal that this vat does not adopt resolutions: the sender
+        // keeps forwarding calls addressed to the promise, which it does
+        // until Release.
+        this.sendUnimplemented(frame);
+        break;
       default:
-        // Provide, Accept, Resolve and the obsolete save/delete messages.
+        // Provide, Accept and the obsolete save/delete messages.
         this.sendUnimplemented(frame);
         break;
     }
@@ -211,6 +242,106 @@ export class RpcConnection {
     this.exports.set(id, { server, refcount: 1 });
     this.exportIdByServer.set(server, id);
     return id;
+  }
+
+  // --- client side -------------------------------------------------
+  //
+  // Asking questions rather than only answering them. A question is
+  // outstanding from the moment it is sent until its Return arrives, so
+  // the caller can pipeline against it in the meantime.
+
+  /** Ask for the peer's bootstrap capability. Returns the questionId. */
+  sendBootstrap(): number {
+    const questionId = this.nextQuestionId++;
+    const b = new MessageBuilder();
+    const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+    root.setU16(OFF.messageUnion, Message.bootstrap);
+    root
+      .initStruct(0, BOOTSTRAP_DWORDS, BOOTSTRAP_PWORDS)
+      .setU32(OFF.bootstrapQuestionId, questionId);
+    this.questions.set(questionId, { failed: false });
+    this.transport.send(b.toFlat());
+    return questionId;
+  }
+
+  /**
+   * Call a method on an imported capability. `fillParams` writes the
+   * parameter struct; returns the questionId.
+   */
+  sendCall(
+    importedCapId: number,
+    interfaceId: bigint,
+    methodId: number,
+    fillParams?: (params: StructBuilder) => void,
+  ): number {
+    const questionId = this.nextQuestionId++;
+    const b = new MessageBuilder();
+    const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+    root.setU16(OFF.messageUnion, Message.call);
+    const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
+    call.setU32(OFF.callQuestionId, questionId);
+    call.setU64(OFF.callInterfaceId, interfaceId);
+    call.setU16(OFF.callMethodId, methodId);
+    const target = call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS);
+    target.setU16(OFF.targetUnion, MessageTarget.importedCap);
+    target.setU32(OFF.targetImportedCap, importedCapId);
+    const payload = call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+    if (fillParams) fillParams(payload.initStruct(0, 1, 1));
+    this.questions.set(questionId, { failed: false });
+    this.transport.send(b.toFlat());
+    return questionId;
+  }
+
+  /** True once the Return for `questionId` has arrived. */
+  isAnswered(questionId: number): boolean {
+    return this.questions.get(questionId)?.reply !== undefined;
+  }
+
+  /** True when that Return carried an exception. */
+  isFailed(questionId: number): boolean {
+    return this.questions.get(questionId)?.failed === true;
+  }
+
+  /**
+   * Results of an answered question, or undefined while it is still
+   * outstanding or if it failed.
+   */
+  answerContent(questionId: number): Ptr | undefined {
+    const q = this.questions.get(questionId);
+    if (q?.reply === undefined || q.failed) return undefined;
+    const ret = Message_getReturn(CapnpMessage.fromFlat(q.reply).root());
+    return Payload_getContent(Return_getResults(ret));
+  }
+
+  /** Tell the peer we are done with an answer, and drop our copy. */
+  sendFinish(questionId: number): void {
+    const b = new MessageBuilder();
+    const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+    root.setU16(OFF.messageUnion, Message.finish);
+    root.initStruct(0, FINISH_DWORDS, FINISH_PWORDS).setU32(0, questionId);
+    this.questions.delete(questionId);
+    this.transport.send(b.toFlat());
+  }
+
+  /** Drop `count` references to an import. */
+  sendRelease(importId: number, count = 1): void {
+    const b = new MessageBuilder();
+    const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+    root.setU16(OFF.messageUnion, Message.release);
+    const rel = root.initStruct(0, RELEASE_DWORDS, RELEASE_PWORDS);
+    rel.setU32(0, importId);
+    rel.setU32(4, count);
+    this.transport.send(b.toFlat());
+  }
+
+  private handleReturn(ret: Ptr, frame: Uint8Array): void {
+    const answerId = Return_getAnswerId(ret);
+    const q = this.questions.get(answerId);
+    // A Return for a question we never asked is the peer's problem, not
+    // a reason to disturb our own tables.
+    if (q === undefined) return;
+    q.reply = frame;
+    q.failed = Return_which(ret) !== RETURN_RESULTS;
   }
 
   /** Export ids currently live, lowest first. Exposed for tests. */
