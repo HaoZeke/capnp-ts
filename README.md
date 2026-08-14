@@ -17,7 +17,7 @@ Cap'n C++ 1.4.0 AddressBook goldens **byte-for-byte** (see
 `addressbook.canonical.bin` 272 B; proven by `packed.test.ts` and
 `canonical.test.ts`). `capnpc-ts` walks a framed `CodeGeneratorRequest` and
 emits typed ESM (structs, const-map enums, unions/`which`, UInt64 via
-`getU64`/`bigint`). RPC is a later package, not a v1 gate.
+`getU64`/`bigint`). RPC ships as a separate package, not as part of the v1 runtime.
 
 npm packages:
 
@@ -63,7 +63,10 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
   List(Text) via `listGetText`, `getF32`/`getF64`, u64probe-safe `getU64`/`bigint`)
 
 Not yet shipped: generated setters / full builder emit, dynamic reflection,
-cross-width list demotion matrix beyond the covered suite, RPC (Phase 2).
+cross-width list demotion matrix beyond the covered suite.
+
+`@haozeke/capnp-rpc` is the vat: levels 1 through 4, tested against a live
+capnp-C++ `EzRpcServer` peer (`interop/run_rpc_interop.sh`).
 
 ## Parity
 
@@ -82,15 +85,15 @@ present. Do not treat this table as a green checklist for unbuilt work.
 | Builder / deep copy / orphans | limited | yes | yes | partial | **yes** (multi-seg arena + far/double-far; orphan disown/adopt; deepCopyPtr) |
 | Canonical form | no | yes | yes | yes | **yes** (AddressBook golden byte-identical to CLI) |
 | Code generator (`capnp compile -o`) | yes | yes | yes | yes | **yes** (structs/enums/unions/getters with schema-default XOR args; List helpers; no generated setters yet) |
-| RPC | no | yes | yes | out of scope for v0.x | **no** (not shipped; Phase 2 package only) |
+| RPC levels 1-4 | no | L1-L2 (no L4) | L1-L2 (no L4) | L1-L4 | **L1-L4** (`@haozeke/capnp-rpc`; L3 over `rpc-threeparty.capnp`, L4 `Join` which upstream C++ lacks) |
 | Interop with pycapnp (decode/encode same schema frames) | n/a | wraps C++ | n/a | n/a | **yes** (AddressBook + calculator; `packages/runtime/test/pycapnp-interop.test.ts`) |
 
 The serialization bar is Cap'n C++ 1.4.0 (`capnp encode` /
 `convert binary:packed` / `binary:canonical`) plus the same AddressBook and
 calculator Expression samples used by fortran/janet. Goldens are regenerated
 by `scripts/gen-sample-fixtures.sh` / `bun run fixtures` and checked in under
-`packages/runtime/test/golden/`. Live twin vs c-capnproto is Phase 2 interop,
-not a v1 claim.
+`packages/runtime/test/golden/`. The RPC package additionally runs against a
+live capnp-C++ peer over TCP.
 
 Builder output is **not** claimed byte-identical without a documented alloc
 order; semantic build → serialize → decode is the bar and is green for
@@ -235,7 +238,7 @@ examples/           pi-admit-harness (Message.fromFlat Alice/Bob dogfood)
 
 | Non-goal | Note |
 |----------|------|
-| RPC inside `@haozeke/capnp` | Optional `@haozeke/capnp-rpc` L1 later; L3/4 unimplemented like C++/fortran |
+| RPC inside `@haozeke/capnp` | Stays a separate package, `@haozeke/capnp-rpc`; the runtime does not depend on it |
 | Wrapping node-capnp / libcapnp | Pure TS only (Bun strip loaders and extension packs) |
 | Cap'n Web | Separate ecosystem |
 | Byte-identical *builder* output without documented alloc order | Semantic round-trip first; live twin is Phase 2 |
@@ -248,7 +251,7 @@ examples/           pi-admit-harness (Message.fromFlat Alice/Bob dogfood)
 | TypeScript | this repo | Wire runtime + `capnpc-ts` (typed emit v1) |
 | Fortran | [capnp-fortran](https://github.com/HaoZeke/capnp-fortran) | Serialization + RPC parity bar |
 | Janet | [capnp-janet](https://github.com/HaoZeke/capnp-janet) | Ship lessons (`List(Text)` C=6, pack 0xff) |
-| C | [c-capnproto](https://github.com/HaoZeke/c-capnproto) | Live golden peer (Phase 2) |
+| C | [c-capnproto](https://github.com/HaoZeke/c-capnproto) | Live golden peer; shares `schema/rpc-threeparty.capnp` |
 | Spec CLI | Cap'n C++ 1.4.0 `capnp` | encode / packed / canonical oracle |
 
 Shared AddressBook schema id: `@0x9eb32e19f86ee174`.
@@ -270,5 +273,6 @@ Tier A for this package means:
 3. Bidirectional interop with **pycapnp** (decode their frames; they decode our builder frames)
 4. Adversarial security fixes on reader/builder (depth, list charge, composite tag)
 
-Still not “full Cap'n C++”: no RPC (not shipped), not every schema-evolution
-demotion edge, no generated setters / dynamic API.
+Still not “full Cap'n C++”: not every schema-evolution demotion edge, no
+generated setters, no dynamic API. RPC ships separately as
+`@haozeke/capnp-rpc`.
