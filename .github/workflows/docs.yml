@@ -33,6 +33,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # wrangler-action picks its package manager from the lockfile it sees,
+      # and this repo is a bun workspace, so the deploy step needs bun on
+      # PATH even though the docs build itself does not.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       - uses: prefix-dev/setup-pixi@v0.8.8
         with:
           environments: docs
