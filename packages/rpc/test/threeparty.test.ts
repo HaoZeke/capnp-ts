@@ -181,13 +181,24 @@ describe("level 3 handoff", () => {
     void carolPair;
   });
 
+  // Refused even while a different arrangement is standing: matching is
+  // on the nonce, not on there being something to hand over.
   test("an Accept with an unknown nonce is refused", () => {
     const { bob, alice } = bobWithExport();
+    sendProvide(alice, 19, 0, 0xc0ffeen);
+    bob.pump();
+    readReply(alice);
+
     sendAccept(alice, 20, 0xdeadbeefn);
     bob.pump();
     const reply = readReply(alice);
     expect(reply.answerId).toBe(20);
     expect(reply.isException).toBe(true);
+    expect(bob.pendingProvisions()).toEqual([0xc0ffeen]);
+
+    sendAccept(alice, 21, 0xc0ffeen);
+    bob.pump();
+    expect(readReply(alice).isException).toBe(false);
   });
 
   test("providing a capability we do not host is refused", () => {
