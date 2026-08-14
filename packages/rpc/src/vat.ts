@@ -39,6 +39,7 @@ import {
   BOOTSTRAP_PWORDS,
   ACCEPT_DWORDS,
   ACCEPT_PWORDS,
+  Accept_getEmbargo,
   Accept_getProvision,
   Accept_getQuestionId,
   Bootstrap_getQuestionId,
@@ -54,6 +55,7 @@ import {
   DISEMBARGO_DWORDS,
   DISEMBARGO_PWORDS,
   Disembargo_context,
+  Disembargo_context_getProvide,
   Disembargo_context_getSenderLoopback,
   Disembargo_context_which,
   Disembargo_getContext,
@@ -150,6 +152,18 @@ const RETURN_EXCEPTION = 1;
  * Where a capability handed to us by an introducer really lives, and the
  * vine that reaches it through the introducer in the meantime.
  */
+/** A capability held for a third vat, and the Provide that arranged it. */
+interface Provision {
+  exportId: number;
+  questionId: number;
+}
+
+/** An embargoed Accept: claimed, answer withheld until the disembargo. */
+interface HeldAccept {
+  exportId: number;
+  answerId: number;
+}
+
 export interface Introduction {
   vineId: number;
   host: string;
@@ -215,7 +229,9 @@ export class RpcConnection {
    * recipient claim the capability without us having to trust her
    * account of who sent her.
    */
-  private readonly provisions = new Map<bigint, number>();
+  private readonly provisions = new Map<bigint, Provision>();
+  /** Embargoed Accepts, keyed by the introducer's Provide question. */
+  private readonly heldAccepts = new Map<number, HeldAccept>();
   private readonly introductions = new Map<bigint, Introduction>();
   private nextExportId = 0;
   private nextQuestionId = 0;
@@ -491,7 +507,8 @@ export class RpcConnection {
     const nonce = RecipientId_getNonce(Provide_getRecipient(provide));
     // The recipient will hold a reference of its own once it accepts.
     this.exports.get(exportId)!.refcount++;
-    this.provisions.set(nonce, exportId);
+    // The question id is how a later Disembargo names this arrangement.
+    this.provisions.set(nonce, { exportId, questionId });
     this.sendEmptyReturn(questionId);
   }
 
@@ -505,13 +522,28 @@ export class RpcConnection {
     if (accept.kind !== PtrKind.Struct) return;
     const questionId = Accept_getQuestionId(accept);
     const nonce = ProvisionId_getNonce(Accept_getProvision(accept));
-    const exportId = this.provisions.get(nonce);
-    if (exportId === undefined) {
+    const held = this.provisions.get(nonce);
+    if (held === undefined) {
       this.sendException(questionId, "accept: no such provision");
       return;
     }
     this.provisions.delete(nonce);
 
+    if (Accept_getEmbargo(accept)) {
+      // Claimed, but the Return waits: the recipient has calls in flight
+      // through the introducer, and answering now would let one sent
+      // straight to us overtake them. The introducer lifts it with
+      // Disembargo.provide.
+      this.heldAccepts.set(held.questionId, {
+        exportId: held.exportId,
+        answerId: questionId,
+      });
+      return;
+    }
+    this.sendAcceptedCap(questionId, held.exportId);
+  }
+
+  private sendAcceptedCap(questionId: number, exportId: number): void {
     const b = new MessageBuilder();
     const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
     root.setU16(OFF.messageUnion, Message.return);
@@ -521,6 +553,11 @@ export class RpcConnection {
     const payload = ret.initStruct(0, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
     this.writeSingleCapPayload(b, payload, exportId);
     this.sendAnswer(questionId, b.toFlat());
+  }
+
+  /** Accepts claimed but still embargoed, awaiting Disembargo.provide. */
+  embargoedAccepts(): number[] {
+    return [...this.heldAccepts.keys()];
   }
 
   /** Pending handoffs, for tests and for shutdown accounting. */
@@ -814,6 +851,17 @@ export class RpcConnection {
    */
   private handleDisembargo(disembargo: Ptr): void {
     const context = Disembargo_getContext(disembargo);
+    if (Disembargo_context_which(context) === Disembargo_context.provide) {
+      // The introducer lifts the embargo on the Accept it arranged,
+      // naming its own Provide question. One naming nothing we hold is
+      // the sender's problem, not a reason to disturb this connection.
+      const provideQuestion = Disembargo_context_getProvide(context);
+      const held = this.heldAccepts.get(provideQuestion);
+      if (held === undefined) return;
+      this.heldAccepts.delete(provideQuestion);
+      this.sendAcceptedCap(held.answerId, held.exportId);
+      return;
+    }
     if (Disembargo_context_which(context) !== Disembargo_context.senderLoopback) {
       // receiverLoopback is the reply to an embargo we raised, and this
       // vat raises none; accept it without echoing to avoid a loop.

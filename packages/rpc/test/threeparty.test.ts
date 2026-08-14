@@ -22,6 +22,9 @@ import {
 import {
   ACCEPT_DWORDS,
   ACCEPT_PWORDS,
+  DISEMBARGO_DWORDS,
+  DISEMBARGO_PWORDS,
+  Disembargo_context,
   BOOTSTRAP_DWORDS,
   BOOTSTRAP_PWORDS,
   MESSAGE_DWORDS,
@@ -108,6 +111,29 @@ function sendAccept(t: Transport, questionId: number, nonce: bigint): void {
   accept.setU32(0, questionId);
   const provision = accept.initStruct(0, PROVISION_ID_DWORDS, PROVISION_ID_PWORDS);
   provision.setU64(0, nonce);
+  t.send(b.toFlat());
+}
+
+/** Carol -> Bob: claim the capability, but hold the answer. */
+function sendAcceptEmbargoed(t: Transport, questionId: number, nonce: bigint): void {
+  const b = new MessageBuilder();
+  const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+  root.setU16(0, Message.accept);
+  const accept = root.initStruct(0, ACCEPT_DWORDS, ACCEPT_PWORDS);
+  accept.setU32(0, questionId);
+  accept.setBool(32, true);
+  accept.initStruct(0, PROVISION_ID_DWORDS, PROVISION_ID_PWORDS).setU64(0, nonce);
+  t.send(b.toFlat());
+}
+
+/** Alice -> Bob: lift the embargo, naming her own Provide question. */
+function sendDisembargoProvide(t: Transport, provideQuestionId: number): void {
+  const b = new MessageBuilder();
+  const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+  root.setU16(0, Message.disembargo);
+  const dis = root.initStruct(0, DISEMBARGO_DWORDS, DISEMBARGO_PWORDS);
+  dis.setU16(4, Disembargo_context.provide);
+  dis.setU32(0, provideQuestionId);
   t.send(b.toFlat());
 }
 
@@ -226,5 +252,39 @@ describe("level 3 handoff", () => {
     expect(readReply(alice).isException).toBe(false);
     // Claiming one leaves the other standing.
     expect(bob.pendingProvisions()).toEqual([0xbbbn]);
+  });
+
+  // An embargoed Accept claims the capability but is not answered until
+  // the introducer says the recipient's earlier calls have all arrived.
+  // Answering sooner would let a call sent straight to Bob overtake one
+  // still in flight through Alice.
+  test("an embargoed Accept waits for the disembargo", () => {
+    const { bob, alice } = bobWithExport();
+    const nonce = 0x5150n;
+
+    sendProvide(alice, 70, 0, nonce);
+    bob.pump();
+    expect(readReply(alice).isException).toBe(false);
+
+    sendAcceptEmbargoed(alice, 71, nonce);
+    bob.pump();
+    expect(alice.receive()).toBeNull();
+    expect(bob.embargoedAccepts()).toEqual([70]);
+    // The arrangement is claimed, so a second Accept finds nothing.
+    expect(bob.pendingProvisions()).toEqual([]);
+
+    // A Disembargo naming a Provide Bob never received changes nothing.
+    sendDisembargoProvide(alice, 999);
+    bob.pump();
+    expect(alice.receive()).toBeNull();
+    expect(bob.embargoedAccepts()).toEqual([70]);
+
+    sendDisembargoProvide(alice, 70);
+    bob.pump();
+    const reply = readReply(alice);
+    expect(reply.answerId).toBe(71);
+    expect(reply.isException).toBe(false);
+    expect(reply.contentKind).toBe(PtrKind.Cap);
+    expect(bob.embargoedAccepts()).toEqual([]);
   });
 });
