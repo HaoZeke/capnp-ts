@@ -56,6 +56,9 @@ jobs:
       - name: Goldens still match the capnp CLI
         run: bash scripts/gen-sample-fixtures.sh --check
 
+      - name: Level 3 frames still match the capnp CLI
+        run: bash scripts/gen-rpc-frames.sh --check
+
       - name: Codegen smoke
         run: |
           mkdir -p /tmp/capnpc-ts-smoke
