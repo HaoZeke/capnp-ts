@@ -53,6 +53,8 @@ export class RpcStream {
     interfaceId: bigint,
     methodId: number,
     fillParams?: (params: StructBuilder) => void,
+    paramsDwords = 1,
+    paramsPwords = 1,
   ): number {
     if (this.failed) {
       throw new StreamError("stream already failed");
@@ -67,6 +69,8 @@ export class RpcStream {
       interfaceId,
       methodId,
       fillParams,
+      paramsDwords,
+      paramsPwords,
     );
     this.outstanding.push(questionId);
     return questionId;

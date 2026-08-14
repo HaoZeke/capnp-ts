@@ -8,6 +8,9 @@ platforms = ["linux-64"]
 [dependencies]
 capnproto = "1.4.*"
 nodejs = ">=20"
+# interop/ links the capnp-C++ RPC peer the vat is tested against.
+cxx-compiler = "*"
+pkg-config = "*"
 
 [feature.docs]
 dependencies = { python = ">=3.10", sphinx = ">=7,<9", emacs = "*" }
@@ -30,3 +33,5 @@ docs = ["docs"]
 fixtures = "bash scripts/gen-sample-fixtures.sh"
 fixtures-check = { cmd = "bash scripts/gen-sample-fixtures.sh --check", description = "Assert goldens still match the capnp CLI" }
 test = "bun test packages/runtime"
+build-peer = { cmd = "bash interop/build-peer.sh", description = "Build the capnp-C++ Adder peer for the RPC interop test" }
+rpc-interop = { cmd = "bash interop/run_rpc_interop.sh build-interop/rpc_peer_server interop/rpc_client.ts", depends-on = ["build-peer"], description = "Run this vat against a live capnp-C++ peer" }

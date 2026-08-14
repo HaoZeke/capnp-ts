@@ -215,3 +215,5 @@ coverage/
 
 
 .venv-pycapnp/
+# capnp-C++ interop peer build output
+/build-interop/

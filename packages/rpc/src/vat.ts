@@ -267,12 +267,19 @@ export class RpcConnection {
   /**
    * Call a method on an imported capability. `fillParams` writes the
    * parameter struct; returns the questionId.
+   *
+   * The caller gives the parameter struct's dimensions because only it
+   * knows the method signature. A size guessed here silently drops any
+   * field past the end: two Int64 arguments need two data words, and one
+   * word would lose the second without saying so.
    */
   sendCall(
     importedCapId: number,
     interfaceId: bigint,
     methodId: number,
     fillParams?: (params: StructBuilder) => void,
+    paramsDwords = 1,
+    paramsPwords = 1,
   ): number {
     const questionId = this.nextQuestionId++;
     const b = new MessageBuilder();
@@ -286,7 +293,7 @@ export class RpcConnection {
     target.setU16(OFF.targetUnion, MessageTarget.importedCap);
     target.setU32(OFF.targetImportedCap, importedCapId);
     const payload = call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
-    if (fillParams) fillParams(payload.initStruct(0, 1, 1));
+    if (fillParams) fillParams(payload.initStruct(0, paramsDwords, paramsPwords));
     this.questions.set(questionId, { failed: false });
     this.transport.send(b.toFlat());
     return questionId;
