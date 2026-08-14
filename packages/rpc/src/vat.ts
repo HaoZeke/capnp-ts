@@ -29,7 +29,12 @@ import {
   CAP_DESCRIPTOR_PWORDS,
   CapDescriptor,
   CapDescriptor_getSenderHosted,
+  CapDescriptor_getThirdPartyHosted,
   CapDescriptor_which,
+  THIRD_PARTY_CAP_DESCRIPTOR_DWORDS,
+  THIRD_PARTY_CAP_DESCRIPTOR_PWORDS,
+  ThirdPartyCapDescriptor_getId,
+  ThirdPartyCapDescriptor_getVineId,
   BOOTSTRAP_DWORDS,
   BOOTSTRAP_PWORDS,
   ACCEPT_DWORDS,
@@ -105,6 +110,14 @@ import {
 import {
   ProvisionId_getNonce,
   RecipientId_getNonce,
+  THIRD_PARTY_CAP_ID_DWORDS,
+  THIRD_PARTY_CAP_ID_PWORDS,
+  ThirdPartyCapId_getNonce,
+  ThirdPartyCapId_getVat,
+  VAT_ID_DWORDS,
+  VAT_ID_PWORDS,
+  VatId_getHost,
+  VatId_getPort,
 } from "./rpc-threeparty.capnp.ts";
 
 import type { Transport } from "./transport.ts";
@@ -133,6 +146,16 @@ const RETURN_RESULTS = 0;
 const RETURN_EXCEPTION = 1;
 
 /** A capability this vat hosts. */
+/**
+ * Where a capability handed to us by an introducer really lives, and the
+ * vine that reaches it through the introducer in the meantime.
+ */
+export interface Introduction {
+  vineId: number;
+  host: string;
+  port: number;
+}
+
 export interface RpcServer {
   /**
    * Handle one call. Write the reply into `results` and return; throw to
@@ -193,6 +216,7 @@ export class RpcConnection {
    * account of who sent her.
    */
   private readonly provisions = new Map<bigint, number>();
+  private readonly introductions = new Map<bigint, Introduction>();
   private nextExportId = 0;
   private nextQuestionId = 0;
 
@@ -380,6 +404,58 @@ export class RpcConnection {
     if (q === undefined) return;
     q.reply = frame;
     q.failed = Return_which(ret) !== RETURN_RESULTS;
+    if (!q.failed) this.noteIntroductions(Return_getResults(ret));
+  }
+
+
+  // --- level 3: introductions handed to us --------------------------
+  //
+  // The other half of the handoff. A payload can name a capability that
+  // lives in a third vat, as a `thirdPartyHosted` descriptor carrying
+  // where to go and a vine: an ordinary import through the introducer,
+  // so calls work before we ever reach the third party. That is the
+  // fallback the spec gives receivers that cannot reach one, and it is
+  // why the vine must outlive the pickup. Dialling belongs to the
+  // network layer, so the arrangement is recorded and handed over.
+
+  private noteIntroductions(payload: Ptr): void {
+    if (payload.kind !== PtrKind.Struct) return;
+    const table = Payload_getCapTable(payload);
+    for (let i = 0; i < table.listLen(); i++) {
+      const descriptor = table.listGetP(i);
+      if (descriptor.kind !== PtrKind.Struct) continue;
+      if (CapDescriptor_which(descriptor) !== CapDescriptor.thirdPartyHosted) continue;
+      const tp = CapDescriptor_getThirdPartyHosted(descriptor);
+      if (tp.kind !== PtrKind.Struct) continue;
+      const id = ThirdPartyCapDescriptor_getId(tp);
+      if (id.kind !== PtrKind.Struct) continue;
+      const vat = ThirdPartyCapId_getVat(id);
+      if (vat.kind !== PtrKind.Struct) continue;
+      this.introductions.set(ThirdPartyCapId_getNonce(id), {
+        vineId: ThirdPartyCapDescriptor_getVineId(tp),
+        host: VatId_getHost(vat),
+        port: VatId_getPort(vat),
+      });
+    }
+  }
+
+  /** Introductions handed to us and not yet picked up. */
+  pendingIntroductions(): Map<bigint, Introduction> {
+    return new Map(this.introductions);
+  }
+
+  /**
+   * Finish the pickup for `nonce`: releases the vine, which the sender
+   * treats as the signal to close its `Provide`. Call this only once the
+   * third party has actually handed the capability over; releasing early
+   * drops the fallback path with nothing in its place.
+   */
+  introductionDone(nonce: bigint): boolean {
+    const held = this.introductions.get(nonce);
+    if (held === undefined) return false;
+    this.introductions.delete(nonce);
+    this.sendRelease(held.vineId, 1);
+    return true;
   }
 
   /** Export ids currently live, lowest first. Exposed for tests. */
@@ -498,6 +574,7 @@ export class RpcConnection {
     const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
     ret.setU32(OFF.returnAnswerId, questionId);
 
+    this.noteIntroductions(Call_getParams(call));
     const params = Payload_getContent(Call_getParams(call));
     try {
       ret.setU16(OFF.returnUnion, RETURN_RESULTS);
@@ -644,6 +721,36 @@ export class RpcConnection {
     );
     cd.setU16(OFF.capDescriptorUnion, CapDescriptor.senderHosted);
     cd.setU32(OFF.capDescriptorSenderHosted, exportId);
+  }
+
+  /**
+   * Write a one-entry capTable naming a capability hosted by a third
+   * vat: where the recipient should go, which pending `Provide` to claim
+   * once there, and the vine we export so calls work in the meantime.
+   */
+  writeThirdPartyCapTable(
+    payload: StructBuilder,
+    where: Introduction,
+    nonce: bigint,
+  ): void {
+    const cd = payload.initCompositeList(
+      1,
+      1,
+      CAP_DESCRIPTOR_DWORDS,
+      CAP_DESCRIPTOR_PWORDS,
+    );
+    cd.setU16(OFF.capDescriptorUnion, CapDescriptor.thirdPartyHosted);
+    const tp = cd.initStruct(
+      0,
+      THIRD_PARTY_CAP_DESCRIPTOR_DWORDS,
+      THIRD_PARTY_CAP_DESCRIPTOR_PWORDS,
+    );
+    tp.setU32(0, where.vineId);
+    const id = tp.initStruct(0, THIRD_PARTY_CAP_ID_DWORDS, THIRD_PARTY_CAP_ID_PWORDS);
+    id.setU64(0, nonce);
+    const vat = id.initStruct(0, VAT_ID_DWORDS, VAT_ID_PWORDS);
+    vat.setText(0, where.host);
+    vat.setU16(0, where.port);
   }
 
   /**
