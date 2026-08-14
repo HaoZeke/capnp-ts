@@ -23,11 +23,18 @@ import {
   type StructBuilder,
 } from "../../runtime/src/index.ts";
 import {
+  ACCEPT_DWORDS,
+  ACCEPT_PWORDS,
   BOOTSTRAP_DWORDS,
   BOOTSTRAP_PWORDS,
   MESSAGE_DWORDS,
   MESSAGE_PWORDS,
+  MESSAGE_TARGET_DWORDS,
+  MESSAGE_TARGET_PWORDS,
   Message,
+  MessageTarget,
+  PROVIDE_DWORDS,
+  PROVIDE_PWORDS,
   Message_getReturn,
   Message_which,
   Payload_getContent,
@@ -36,6 +43,14 @@ import {
   Return_getResults,
   Return_which,
 } from "../src/rpc.capnp.ts";
+import {
+  PROVISION_ID_DWORDS,
+  PROVISION_ID_PWORDS,
+  RECIPIENT_ID_DWORDS,
+  RECIPIENT_ID_PWORDS,
+  VAT_ID_DWORDS,
+  VAT_ID_PWORDS,
+} from "../src/rpc-threeparty.capnp.ts";
 import { MemoryTransportPair, type Transport } from "../src/transport.ts";
 import { RpcConnection, type RpcServer } from "../src/vat.ts";
 
@@ -113,5 +128,33 @@ describe("level 3 frames from the reference encoder", () => {
     const reply = readReturn(peer);
     expect(reply.answerId).toBe(43);
     expect(reply.isException).toBe(true);
+  });
+
+  // The other direction. Allocation order is not dictated by the format,
+  // so this holds because both encoders lay a message out in schema
+  // order; it is what makes the frames above comparable at all.
+  test("this encoder writes the reference bytes", () => {
+    const provide = new MessageBuilder();
+    const proot = provide.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+    proot.setU16(0, Message.provide);
+    const pv = proot.initStruct(0, PROVIDE_DWORDS, PROVIDE_PWORDS);
+    pv.setU32(0, 42);
+    const target = pv.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS);
+    target.setU16(4, MessageTarget.importedCap);
+    target.setU32(0, 0);
+    const recipient = pv.initStruct(1, RECIPIENT_ID_DWORDS, RECIPIENT_ID_PWORDS);
+    recipient.setU64(0, NONCE);
+    const vat = recipient.initStruct(0, VAT_ID_DWORDS, VAT_ID_PWORDS);
+    vat.setText(0, "127.0.0.1");
+    vat.setU16(0, 4000);
+    expect(provide.toFlat()).toEqual(golden("rpc-provide.bin"));
+
+    const accept = new MessageBuilder();
+    const aroot = accept.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+    aroot.setU16(0, Message.accept);
+    const ac = aroot.initStruct(0, ACCEPT_DWORDS, ACCEPT_PWORDS);
+    ac.setU32(0, 43);
+    ac.initStruct(0, PROVISION_ID_DWORDS, PROVISION_ID_PWORDS).setU64(0, NONCE);
+    expect(accept.toFlat()).toEqual(golden("rpc-accept.bin"));
   });
 });
