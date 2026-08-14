@@ -40,7 +40,9 @@ hooks = [
   { id = "codespell", args = [
     "--skip=*.lock,*.bin,CHANGELOG.md,docs/build/*,node_modules/*",
     "-L",
-    "crate,nd,te,inout,clen,ser,dout",
+    # Verbatim Cap'n Proto schema vocabulary: capTable is a field name
+    # and Embargos/thirdParty are upstream's spellings in rpc.capnp.
+    "crate,nd,te,inout,clen,ser,dout,capTable,embargos,Embargos,thirdParty",
   ] },
 ]
 
