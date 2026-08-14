@@ -387,6 +387,132 @@ function emitFieldGetter(
   }
 }
 
+
+/**
+ * Typed stubs for an interface.
+ *
+ * A client wraps an imported capability so a call reads as
+ * `adder.add(...)` rather than a raw interfaceId and methodId, and a
+ * server base turns an incoming Call back into a named method. The
+ * parameter and result structs are ordinary generated structs, found by
+ * id, so the stub only has to carry their dimensions.
+ */
+function emitInterface(
+  node: NodeAst,
+  byId: Map<bigint, NodeAst>,
+  lines: string[],
+): void {
+  const methods = node.methods;
+  if (!methods) return;
+  const typeName = shortTypeName(node.displayName);
+  const upper = upperSnake(typeName);
+
+  lines.push(
+    `/** Interface ${node.displayName}. */`,
+    `export const ${upper}_INTERFACE_ID = 0x${node.id.toString(16)}n;`,
+    ``,
+  );
+
+  // Method table: ordinal, and the shape of each struct the call moves.
+  const dims = (id: bigint): { dw: number; pw: number } => {
+    const n = byId.get(id);
+    return {
+      dw: n?.struct?.dataWordCount ?? 0,
+      pw: n?.struct?.pointerCount ?? 0,
+    };
+  };
+
+  lines.push(`export const ${typeName}_methods = {`);
+  for (const m of methods) {
+    const p = dims(m.paramStructType);
+    const r = dims(m.resultStructType);
+    lines.push(
+      `  ${m.name}: { ordinal: ${m.ordinal},` +
+        ` paramsDwords: ${p.dw}, paramsPwords: ${p.pw},` +
+        ` resultsDwords: ${r.dw}, resultsPwords: ${r.pw} },`,
+    );
+  }
+  lines.push(`} as const;`, ``);
+
+  // Client: one method per schema method, sending on a connection.
+  lines.push(
+    `/** Calls ${typeName} methods on an imported capability. */`,
+    `export class ${typeName}Client {`,
+    `  constructor(`,
+    `    private readonly conn: {`,
+    `      sendCall(`,
+    `        importedCapId: number,`,
+    `        interfaceId: bigint,`,
+    `        methodId: number,`,
+    `        fillParams?: (params: StructBuilder) => void,`,
+    `        paramsDwords?: number,`,
+    `        paramsPwords?: number,`,
+    `      ): number;`,
+    `    },`,
+    `    private readonly importedCapId: number,`,
+    `  ) {}`,
+    ``,
+  );
+  for (const m of methods) {
+    lines.push(
+      `  /** Send ${typeName}.${m.name}; returns the questionId. */`,
+      `  ${m.name}(fillParams?: (params: StructBuilder) => void): number {`,
+      `    const m = ${typeName}_methods.${m.name};`,
+      `    return this.conn.sendCall(`,
+      `      this.importedCapId,`,
+      `      ${upper}_INTERFACE_ID,`,
+      `      m.ordinal,`,
+      `      fillParams,`,
+      `      m.paramsDwords,`,
+      `      m.paramsPwords,`,
+      `    );`,
+      `  }`,
+      ``,
+    );
+  }
+  lines.push(`}`, ``);
+
+  // Server: dispatch an incoming Call to a named method.
+  lines.push(
+    `/** Implement ${typeName} by extending this and overriding its methods. */`,
+    `export abstract class ${typeName}Server {`,
+  );
+  for (const m of methods) {
+    lines.push(
+      `  abstract ${m.name}(params: Ptr, results: StructBuilder): void;`,
+    );
+  }
+  lines.push(
+    ``,
+    `  /** Route one Call. Throws when the id or ordinal is not ours. */`,
+    `  dispatch(`,
+    `    interfaceId: bigint,`,
+    `    methodId: number,`,
+    `    params: Ptr,`,
+    `    results: StructBuilder,`,
+    `  ): void {`,
+    `    if (interfaceId !== ${upper}_INTERFACE_ID) {`,
+    '      throw new Error(`' + typeName + ': wrong interface ${interfaceId}`);',
+    `    }`,
+    `    switch (methodId) {`,
+  );
+  for (const m of methods) {
+    lines.push(
+      `      case ${m.ordinal}:`,
+      `        this.${m.name}(params, results);`,
+      `        return;`,
+    );
+  }
+  lines.push(
+    `      default:`,
+    '        throw new Error(`' + typeName + ': no method ${methodId}`);',
+    `    }`,
+    `  }`,
+    `}`,
+    ``,
+  );
+}
+
 function emitStruct(node: NodeAst, lines: string[]): void {
   const s = node.struct;
   if (!s) return;
@@ -488,7 +614,15 @@ export function emitModuleSource(
   );
   lines.push(` */`);
   lines.push(``);
-  lines.push(`import type { Ptr } from "@haozeke/capnp";`);
+  // StructBuilder is only referenced by interface stubs, so it is only
+  // imported when the file has one; an unused type import would trip a
+  // consumer's lint.
+  const hasInterface = nodes.some((n) => n.which === "interface");
+  lines.push(
+    hasInterface
+      ? `import type { Ptr, StructBuilder } from "@haozeke/capnp";`
+      : `import type { Ptr } from "@haozeke/capnp";`,
+  );
   lines.push(``);
   lines.push(
     `export const __capnpcTsMeta = {`,
@@ -509,7 +643,15 @@ export function emitModuleSource(
     if (n.which === "struct") emitStruct(n, lines);
   }
 
-  // Interfaces / consts / annotations: not emitted (no RPC / dynamic claim).
+  // Every node, not just the emitted ones: a method's parameter struct is
+  // an implicit node that the file filter drops, and its dimensions are
+  // exactly what the stub needs.
+  const byId = new Map(ast.nodes.map((n) => [n.id, n]));
+  for (const n of nodes) {
+    if (n.which === "interface") emitInterface(n, byId, lines);
+  }
+
+  // Consts and annotations are not emitted.
   return lines.join("\n");
 }
 

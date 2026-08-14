@@ -14,6 +14,11 @@
  *   struct: dataWordCount u16 @14, pointerCount u16 @24, isGroup bool bit224,
  *           discriminantCount u16 @30, discriminantOffset u32 @32, fields List ptr3
  *   enum: enumerants List ptr3
+ *   interface: methods List ptr3, superclasses ptr4
+ *
+ * Method: 3 data words, 5 ptrs
+ *   codeOrder u16 @0; paramStructType u64 @8; resultStructType u64 @16
+ *   name Text ptr0; annotations ptr1
  *
  * Field: 3 data words, 4 ptrs
  *   codeOrder u16 @0; discriminantValue u16 @2 (default 0xffff, wire XOR);
@@ -242,6 +247,16 @@ export type NodeAst = {
   struct?: StructNodeAst;
   /** Set when which === "enum". */
   enumerants?: EnumerantAst[];
+  /** Set when which === "interface". */
+  methods?: MethodAst[];
+};
+
+/** One method on an interface node. */
+export type MethodAst = {
+  name: string;
+  ordinal: number;
+  paramStructType: bigint;
+  resultStructType: bigint;
 };
 
 export type RequestedFileAst = {
@@ -467,6 +482,26 @@ function decodeNestedNodes(list: Ptr): NestedNodeAst[] {
   return out;
 }
 
+/**
+ * An interface's methods, in ordinal order. The ordinal is the list
+ * index: schema.capnp assigns method @N by position, and that number is
+ * what a Call carries as methodId.
+ */
+function decodeMethods(list: Ptr): MethodAst[] {
+  const out: MethodAst[] = [];
+  if (list.kind !== PtrKind.List) return out;
+  for (let i = 0; i < list.listLen(); i++) {
+    const m = list.listGetP(i);
+    out.push({
+      name: m.getText(0),
+      ordinal: i,
+      paramStructType: m.getU64(8),
+      resultStructType: m.getU64(16),
+    });
+  }
+  return out;
+}
+
 function decodeEnumerants(list: Ptr): EnumerantAst[] {
   if (list.kind !== PtrKind.List) return [];
   const out: EnumerantAst[] = [];
@@ -525,6 +560,8 @@ function decodeNode(n: Ptr): NodeAst {
     };
   } else if (which === "enum") {
     base.enumerants = decodeEnumerants(n.getp(3));
+  } else if (which === "interface") {
+    base.methods = decodeMethods(n.getp(3));
   }
 
   return base;

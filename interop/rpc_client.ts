@@ -10,9 +10,7 @@ import { connect, type Socket } from "node:net";
 
 import { RpcConnection } from "../packages/rpc/src/vat.ts";
 import { StreamTransport } from "../packages/rpc/src/socket.ts";
-
-/** Mirrors the id in schema/adder.capnp. */
-const ADDER_IFACE = 0xea01e10cbc414411n;
+import { AdderClient } from "./adder.capnp.ts";
 
 const port = Number(process.argv[2] ?? 43117);
 
@@ -64,19 +62,14 @@ if (conn.isFailed(qBoot)) {
 }
 
 // The bootstrap capability lands in the peer's export table; a two-party
-// server hands out id 0 for it.
-const qCall = conn.sendCall(
-  0,
-  ADDER_IFACE,
-  0,
-  (params) => {
-    params.setU64(0, 20n);
-    params.setU64(8, 22n);
-  },
-  // Two Int64 arguments: two data words, no pointers.
-  2,
-  0,
-);
+// server hands out id 0 for it. The generated client knows the interface
+// id, the ordinal, and the parameter struct's shape, so none of those are
+// written out here.
+const adder = new AdderClient(conn, 0);
+const qCall = adder.add((params) => {
+  params.setU64(0, 20n);
+  params.setU64(8, 22n);
+});
 await until(() => conn.isAnswered(qCall));
 if (conn.isFailed(qCall)) {
   console.error("capnp-C++ returned an exception for add()");
