@@ -1,0 +1,84 @@
+#+title: capnp-ts
+#+options: toc:2 num:nil
+
+Pure TypeScript [[https://capnproto.org][Cap'n Proto]] wire runtime and the
+=capnpc-ts= schema-compiler plugin. Wire-first, following
+[[https://capnproto.org/encoding.html][encoding.html]]: zero-copy segment
+views, defensive traversal limits, and byte parity against the =capnp= CLI
+where it is claimed.
+
+Peer of [[https://c-capnproto.rgoswami.me][c-capnproto]],
+[[https://capnp-fortran.rgoswami.me][capnp-fortran]] and
+[[https://capnp-janet.rgoswami.me][capnp-janet]]; the four share goldens
+produced by upstream =capnp= rather than by each other.
+
+* Install
+
+Two npm packages, both ESM:
+
+| Package             | Role                                                    |
+|---------------------+---------------------------------------------------------|
+| =@haozeke/capnp=    | Wire runtime: pointer, message, builder, packed, canonical |
+| =@haozeke/capnpc-ts= | =capnp compile -o= plugin emitting typed ESM            |
+
+#+begin_src console
+$ bun install
+$ bun test
+#+end_src
+
+The toolchain (=capnp= 1.4, node) is pinned in =pixi.toml=:
+
+#+begin_src console
+$ pixi install
+$ pixi run test
+#+end_src
+
+* First message
+
+Read one of the goldens =capnp encode= produced:
+
+#+begin_src typescript
+import { Message } from "@haozeke/capnp";
+
+const msg = Message.fromFlat(await Bun.file("addressbook.bin").bytes());
+const root = msg.root();
+
+const people = root.getP(0);              // AddressBook.people @0
+console.log(people.listLen());            // 2
+
+const alice = people.listGetP(0);
+console.log(alice.getU32(0));             // 123
+console.log(alice.getText(0));            // "Alice"
+#+end_src
+
+=Message.viewFlat= is the zero-copy variant: it borrows the caller's buffer
+rather than copying, so that buffer must outlive the message.
+
+* Generating types
+
+=capnpc-ts= is a =capnp compile= plugin, so it takes a schema the same way
+every other Cap'n Proto backend does:
+
+#+begin_src console
+$ capnp compile -o./packages/codegen/bin/capnpc-ts schema/addressbook.capnp
+$ ls addressbook.ts
+#+end_src
+
+It emits const-map enums rather than TypeScript =enum=, typed get/set pairs,
+and =which= discriminants for unions. UInt64 and Int64 fields route through
+=getU64= / =bigint= rather than losing precision through =number=.
+
+* Goldens
+
+=packages/runtime/test/golden/= holds frames written by the upstream =capnp=
+CLI, not by this runtime. =scripts/gen-sample-fixtures.sh --check=
+regenerates them and fails if a byte moved, which is what makes them
+evidence of upstream parity rather than a record of our own output. CI runs
+that check.
+
+* What is not here
+
+- RPC. A later package; level 3 and 4 are unimplemented.
+- A libcapnp or node-capnp FFI wrapper. This is a native implementation.
+- Cap'n Web.
+- A soft fork of the unmaintained =jdiaz5513/capnp-ts=.

@@ -1,0 +1,37 @@
+name: prek
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: prek-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  prek:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install prek
+        uses: taiki-e/install-action@v2
+        with:
+          # prek >= 0.4 discovers prek.toml; 0.3 looked only for .pre-commit-config.yaml
+          tool: prek@0.4.4
+
+      - name: Run prek
+        run: prek run -a --refresh

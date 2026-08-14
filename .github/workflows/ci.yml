@@ -40,12 +40,11 @@ jobs:
       - name: Typecheck packages
         run: bun run build
 
-      - name: Fixture regen smoke
-        run: |
-          bun run fixtures
-          test -s packages/runtime/test/golden/addressbook.bin
-          test -s packages/runtime/test/golden/addressbook.packed.bin
-          test -s packages/runtime/test/golden/addressbook.canonical.bin
+      # Regenerating and checking only for non-empty would accept a golden
+      # that drifted; --check asserts the bytes still match the capnp CLI,
+      # which is what makes them evidence of upstream parity.
+      - name: Goldens still match the capnp CLI
+        run: bash scripts/gen-sample-fixtures.sh --check
 
       - name: Codegen smoke
         run: |

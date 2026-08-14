@@ -1,0 +1,62 @@
+# Git hooks via `prek` (https://prek.j178.dev) — Rust drop-in for pre-commit.
+# Install: `prek install`
+# Run all: `prek run -a`
+#:schema https://www.schemastore.org/prek.json
+
+minimum_prek_version = "0.3.0"
+
+exclude = """(?x)(
+    ^node_modules/|
+    ^\\.pixi/|
+    ^dist/|
+    ^docs/build/|
+    ^packages/[^/]+/dist/|
+    ^packages/runtime/test/golden/|
+    ^bun\\.lock$
+)"""
+
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "trailing-whitespace" },
+  { id = "end-of-file-fixer" },
+  { id = "check-yaml" },
+  { id = "check-toml" },
+  { id = "check-json" },
+  { id = "check-merge-conflict" },
+  { id = "check-added-large-files", args = ["--maxkb=1000"] },
+  { id = "detect-private-key" },
+]
+
+[[repos]]
+repo = "https://github.com/pre-commit/pre-commit-hooks"
+rev = "v6.0.0"
+hooks = [{ id = "check-case-conflict" }]
+
+[[repos]]
+repo = "https://github.com/codespell-project/codespell"
+rev = "v2.4.1"
+hooks = [
+  { id = "codespell", args = [
+    "--skip=*.lock,*.bin,CHANGELOG.md,docs/build/*,node_modules/*",
+    "-L",
+    "crate,nd,te,inout,clen,ser,dout",
+  ] },
+]
+
+[[repos]]
+repo = "local"
+hooks = [
+  {
+    id = "tsc-typecheck",
+    name = "tsc typecheck (bun run build)",
+    entry = "bash",
+    language = "system",
+    pass_filenames = false,
+    files = "\\.(ts|json)$",
+    args = [
+      "-c",
+      "if ! command -v bun >/dev/null 2>&1; then echo 'bun not on PATH (https://bun.sh)'; exit 1; fi; exec bun run build",
+    ],
+  },
+]
