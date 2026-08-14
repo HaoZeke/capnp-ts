@@ -6,8 +6,8 @@
     "examples/*"
   ],
   "scripts": {
-    "test": "bun test packages/runtime packages/codegen",
-    "build": "bun run --filter @haozeke/capnp build && bun run --filter @haozeke/capnpc-ts build",
+    "test": "bun test packages/runtime packages/codegen packages/rpc",
+    "build": "bun run --filter @haozeke/capnp build && bun run --filter @haozeke/capnpc-ts build && bun run --filter @haozeke/capnp-rpc build",
     "fixtures": "bash scripts/gen-sample-fixtures.sh"
   },
   "devDependencies": {

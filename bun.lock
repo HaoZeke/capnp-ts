@@ -26,6 +26,13 @@
         "@haozeke/capnp": "workspace:*",
       },
     },
+    "packages/rpc": {
+      "name": "@haozeke/capnp-rpc",
+      "version": "0.1.0-dev",
+      "dependencies": {
+        "@haozeke/capnp": "workspace:*",
+      },
+    },
     "packages/runtime": {
       "name": "@haozeke/capnp",
       "version": "0.1.0-dev",
@@ -90,6 +97,8 @@
     "@haozeke/capnp": ["@haozeke/capnp@workspace:packages/runtime"],
 
     "@haozeke/capnp-pi-admit-harness": ["@haozeke/capnp-pi-admit-harness@workspace:examples/pi-admit-harness"],
+
+    "@haozeke/capnp-rpc": ["@haozeke/capnp-rpc@workspace:packages/rpc"],
 
     "@haozeke/capnpc-ts": ["@haozeke/capnpc-ts@workspace:packages/codegen"],
 

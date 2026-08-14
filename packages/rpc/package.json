@@ -1,0 +1,24 @@
+{
+  "name": "@haozeke/capnp-rpc",
+  "version": "0.1.0-dev",
+  "description": "Cap'n Proto RPC vat for the pure TypeScript runtime (levels 1 and 4)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "bun": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src"],
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@haozeke/capnp": "workspace:*"
+  }
+}
