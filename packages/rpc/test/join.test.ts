@@ -162,6 +162,28 @@ describe("RPC level 4: Join", () => {
     expect(second.hasCap).toBe(false);
   });
 
+  test("every part unresolvable still fails", () => {
+    // The parts agree, but they agree on naming nothing: equality has to
+    // be proven against a capability we host, not against absence.
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.b, new CountingServer());
+    bootstrapExport(pair.a, vat, 1);
+    const [live] = vat.liveExports();
+    const dead = live! + 999;
+
+    sendJoinPart(pair.a, 740, dead, 17, 2, 0);
+    vat.pump();
+    sendJoinPart(pair.a, 741, dead, 17, 2, 1);
+    vat.pump();
+
+    const first = readJoinReply(pair.a);
+    const second = readJoinReply(pair.a);
+    expect(first.succeeded).toBe(false);
+    expect(second.succeeded).toBe(false);
+    expect(first.hasCap).toBe(false);
+    expect(second.hasCap).toBe(false);
+  });
+
   test("an incomplete set is never answered", () => {
     const pair = new MemoryTransportPair();
     const vat = new RpcConnection(pair.b, new CountingServer());
