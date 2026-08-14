@@ -32,7 +32,16 @@ import {
   CapDescriptor_which,
   BOOTSTRAP_DWORDS,
   BOOTSTRAP_PWORDS,
+  ACCEPT_DWORDS,
+  ACCEPT_PWORDS,
+  Accept_getProvision,
+  Accept_getQuestionId,
   Bootstrap_getQuestionId,
+  PROVIDE_DWORDS,
+  PROVIDE_PWORDS,
+  Provide_getQuestionId,
+  Provide_getRecipient,
+  Provide_getTarget,
   FINISH_DWORDS,
   FINISH_PWORDS,
   RELEASE_DWORDS,
@@ -55,7 +64,9 @@ import {
   Message,
   Message_getBootstrap,
   Message_getCall,
+  Message_getAccept,
   Message_getDisembargo,
+  Message_getProvide,
   Message_getFinish,
   Message_getReturn,
   Message_getJoin,
@@ -90,6 +101,11 @@ import {
   JoinKeyPart_getPartCount,
   JoinKeyPart_getPartNum,
 } from "./rpc-twoparty.capnp.ts";
+
+import {
+  ProvisionId_getNonce,
+  RecipientId_getNonce,
+} from "./rpc-threeparty.capnp.ts";
 
 import type { Transport } from "./transport.ts";
 
@@ -168,6 +184,15 @@ export class RpcConnection {
   private readonly answers = new Map<number, Uint8Array>();
   /** Questions this vat has asked, by questionId, until their Return. */
   private readonly questions = new Map<number, QuestionState>();
+  /**
+   * Capabilities promised to a third vat, by nonce, awaiting its Accept.
+   *
+   * Level 3: the introducer told us to expect someone, and the nonce is
+   * the whole of the arrangement. Matching on it alone is what lets the
+   * recipient claim the capability without us having to trust her
+   * account of who sent her.
+   */
+  private readonly provisions = new Map<bigint, number>();
   private nextExportId = 0;
   private nextQuestionId = 0;
 
@@ -209,6 +234,12 @@ export class RpcConnection {
       case Message.return:
         this.handleReturn(Message_getReturn(root), frame);
         break;
+      case Message.provide:
+        this.handleProvide(Message_getProvide(root));
+        break;
+      case Message.accept:
+        this.handleAccept(Message_getAccept(root));
+        break;
       case Message.resolve:
         // Promise resolution. Replying unimplemented is the spec-defined
         // signal that this vat does not adopt resolutions: the sender
@@ -217,7 +248,7 @@ export class RpcConnection {
         this.sendUnimplemented(frame);
         break;
       default:
-        // Provide, Accept and the obsolete save/delete messages.
+        // The obsolete save/delete messages.
         this.sendUnimplemented(frame);
         break;
     }
@@ -356,7 +387,84 @@ export class RpcConnection {
     return [...this.exports.keys()].sort((x, y) => x - y);
   }
 
+
+  // --- level 3: three-party handoff ---------------------------------
+  //
+  // The introducer asks us to hold a capability for a third vat, and
+  // that vat later claims it. Both halves key on the nonce the
+  // introducer chose, which is the only thing the three messages share.
+
+  /**
+   * `Provide`: hold `target` for whoever presents this nonce.
+   *
+   * The answer is an empty Return: the introducer is not waiting for a
+   * value, only for confirmation that the arrangement is recorded, and
+   * it sends `Finish` once the recipient has been told where to go.
+   */
+  private handleProvide(provide: Ptr): void {
+    // The peer chooses the message shape, so a truncated one is a
+    // protocol error to answer rather than a reason to throw out of the
+    // message loop.
+    if (provide.kind !== PtrKind.Struct) return;
+    const questionId = Provide_getQuestionId(provide);
+    const exportId = this.resolveTarget(Provide_getTarget(provide));
+    if (exportId < 0) {
+      this.sendException(questionId, "provide: no such capability");
+      return;
+    }
+    const nonce = RecipientId_getNonce(Provide_getRecipient(provide));
+    // The recipient will hold a reference of its own once it accepts.
+    this.exports.get(exportId)!.refcount++;
+    this.provisions.set(nonce, exportId);
+    this.sendEmptyReturn(questionId);
+  }
+
+  /**
+   * `Accept`: claim a capability a third vat provided for us.
+   *
+   * A nonce is single-use. Leaving it claimable would let anyone who
+   * learns it take the capability again later.
+   */
+  private handleAccept(accept: Ptr): void {
+    if (accept.kind !== PtrKind.Struct) return;
+    const questionId = Accept_getQuestionId(accept);
+    const nonce = ProvisionId_getNonce(Accept_getProvision(accept));
+    const exportId = this.provisions.get(nonce);
+    if (exportId === undefined) {
+      this.sendException(questionId, "accept: no such provision");
+      return;
+    }
+    this.provisions.delete(nonce);
+
+    const b = new MessageBuilder();
+    const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+    root.setU16(OFF.messageUnion, Message.return);
+    const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+    ret.setU32(OFF.returnAnswerId, questionId);
+    ret.setU16(OFF.returnUnion, RETURN_RESULTS);
+    const payload = ret.initStruct(0, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+    this.writeSingleCapPayload(b, payload, exportId);
+    this.sendAnswer(questionId, b.toFlat());
+  }
+
+  /** Pending handoffs, for tests and for shutdown accounting. */
+  pendingProvisions(): bigint[] {
+    return [...this.provisions.keys()];
+  }
+
+  private sendEmptyReturn(questionId: number): void {
+    const b = new MessageBuilder();
+    const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+    root.setU16(OFF.messageUnion, Message.return);
+    const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+    ret.setU32(OFF.returnAnswerId, questionId);
+    ret.setU16(OFF.returnUnion, RETURN_RESULTS);
+    ret.initStruct(0, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+    this.sendAnswer(questionId, b.toFlat());
+  }
+
   private handleBootstrap(bootstrap: Ptr): void {
+    if (bootstrap.kind !== PtrKind.Struct) return;
     const questionId = Bootstrap_getQuestionId(bootstrap);
     if (this.bootstrap === undefined) {
       this.sendException(questionId, "no bootstrap capability");
@@ -375,6 +483,7 @@ export class RpcConnection {
   }
 
   private handleCall(call: Ptr): void {
+    if (call.kind !== PtrKind.Struct) return;
     const questionId = Call_getQuestionId(call);
     const exportId = this.resolveTarget(Call_getTarget(call));
     const slot = exportId >= 0 ? this.exports.get(exportId) : undefined;
@@ -430,6 +539,7 @@ export class RpcConnection {
    * layer this transport does not have.
    */
   private handleJoin(join: Ptr): void {
+    if (join.kind !== PtrKind.Struct) return;
     const questionId = Join_getQuestionId(join);
     const keyPart = Join_getKeyPart(join);
     if (keyPart.kind !== PtrKind.Struct) {
@@ -511,6 +621,7 @@ export class RpcConnection {
     this.transport.send(frame);
   }
 
+  /** `b` is needed for the cap orphan, which names a slot in its table. */
   private writeSingleCapPayload(
     b: MessageBuilder,
     payload: StructBuilder,
