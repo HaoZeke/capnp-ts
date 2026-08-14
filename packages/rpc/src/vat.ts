@@ -28,7 +28,16 @@ import {
   CAP_DESCRIPTOR_DWORDS,
   CAP_DESCRIPTOR_PWORDS,
   CapDescriptor,
+  CapDescriptor_getSenderHosted,
+  CapDescriptor_which,
   Bootstrap_getQuestionId,
+  DISEMBARGO_DWORDS,
+  DISEMBARGO_PWORDS,
+  Disembargo_context,
+  Disembargo_context_getSenderLoopback,
+  Disembargo_context_which,
+  Disembargo_getContext,
+  Disembargo_getTarget,
   Finish_getQuestionId,
   Join_getKeyPart,
   Join_getQuestionId,
@@ -38,19 +47,28 @@ import {
   Message,
   Message_getBootstrap,
   Message_getCall,
+  Message_getDisembargo,
   Message_getFinish,
+  Message_getReturn,
   Message_getJoin,
   Message_getRelease,
   Message_which,
   MessageTarget,
   MessageTarget_getImportedCap,
+  MessageTarget_getPromisedAnswer,
   MessageTarget_which,
+  PromisedAnswer_Op,
+  PromisedAnswer_Op_getGetPointerField,
+  PromisedAnswer_Op_which,
+  PromisedAnswer_getQuestionId,
+  PromisedAnswer_getTransform,
   PAYLOAD_DWORDS,
   PAYLOAD_PWORDS,
   Payload_getCapTable,
   Payload_getContent,
   RETURN_DWORDS,
   RETURN_PWORDS,
+  Return_getResults,
   Release_getId,
   Release_getReferenceCount,
 } from "./rpc.capnp.ts";
@@ -78,6 +96,8 @@ const OFF = {
   targetImportedCap: 0,
   capDescriptorUnion: 0,
   capDescriptorSenderHosted: 4,
+  disembargoContextUnion: 4,
+  disembargoContextValue: 0,
   joinResultJoinId: 0,
   joinResultSucceeded: 32, // bit offset
 } as const;
@@ -120,6 +140,14 @@ export class RpcConnection {
   private readonly exports = new Map<number, ExportSlot>();
   private readonly exportIdByServer = new Map<RpcServer, number>();
   private readonly joins = new Map<number, JoinState>();
+  /**
+   * Results already returned, kept until the peer sends `Finish`.
+   *
+   * Promise pipelining is the reason: a caller may address a capability
+   * inside an answer before it has seen the answer, so the answer has to
+   * still be here when the pipelined call arrives.
+   */
+  private readonly answers = new Map<number, Uint8Array>();
   private nextExportId = 0;
 
   constructor(
@@ -144,15 +172,18 @@ export class RpcConnection {
         this.handleCall(Message_getCall(root));
         break;
       case Message.finish:
-        // Nothing is retained per answer yet, so a Finish only needs to
-        // be accepted rather than acted on.
-        Finish_getQuestionId(Message_getFinish(root));
+        // The caller is done with the answer, so the results it might
+        // have pipelined against can go.
+        this.answers.delete(Finish_getQuestionId(Message_getFinish(root)));
         break;
       case Message.release:
         this.handleRelease(Message_getRelease(root));
         break;
       case Message.join:
         this.handleJoin(Message_getJoin(root));
+        break;
+      case Message.disembargo:
+        this.handleDisembargo(Message_getDisembargo(root));
         break;
       default:
         // Provide, Accept, Resolve and the obsolete save/delete messages.
@@ -202,7 +233,7 @@ export class RpcConnection {
     ret.setU16(OFF.returnUnion, RETURN_RESULTS);
     const payload = ret.initStruct(0, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
     this.writeSingleCapPayload(b, payload, exportId);
-    this.transport.send(b.toFlat());
+    this.sendAnswer(questionId, b.toFlat());
   }
 
   private handleCall(call: Ptr): void {
@@ -224,13 +255,18 @@ export class RpcConnection {
     try {
       ret.setU16(OFF.returnUnion, RETURN_RESULTS);
       const payload = ret.initStruct(0, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+      // The server writes into the payload's content struct, not into the
+      // Payload, which has no data section of its own. One data word and
+      // one pointer word covers the replies the bundled servers make; a
+      // richer server allocates inside dispatch.
+      const results = payload.initStruct(0, 1, 1);
       slot.server.dispatch(
         Call_getInterfaceId(call),
         Call_getMethodId(call),
         params,
-        payload,
+        results,
       );
-      this.transport.send(b.toFlat());
+      this.sendAnswer(questionId, b.toFlat());
     } catch (e) {
       this.sendException(questionId, e instanceof Error ? e.message : String(e));
     }
@@ -328,6 +364,15 @@ export class RpcConnection {
     this.transport.send(b.toFlat());
   }
 
+  /**
+   * Send a Return and keep it until `Finish`, so a call pipelined against
+   * this answer can still find the capability it names.
+   */
+  private sendAnswer(questionId: number, frame: Uint8Array): void {
+    this.answers.set(questionId, frame);
+    this.transport.send(frame);
+  }
+
   private writeSingleCapPayload(
     b: MessageBuilder,
     payload: StructBuilder,
@@ -352,10 +397,85 @@ export class RpcConnection {
     cd.setU32(OFF.capDescriptorSenderHosted, exportId);
   }
 
+  /**
+   * Resolve a MessageTarget to a local export id, or -1 when it names
+   * nothing this vat hosts.
+   *
+   * `promisedAnswer` is promise pipelining: the caller addressed a
+   * capability inside an answer, identified by walking the transform ops
+   * into that answer's results and reading the capTable entry the
+   * resulting pointer names.
+   */
   private resolveTarget(target: Ptr): number {
-    if (MessageTarget_which(target) !== MessageTarget.importedCap) return -1;
-    const id = MessageTarget_getImportedCap(target);
+    switch (MessageTarget_which(target)) {
+      case MessageTarget.importedCap: {
+        const id = MessageTarget_getImportedCap(target);
+        return this.exports.has(id) ? id : -1;
+      }
+      case MessageTarget.promisedAnswer:
+        return this.resolvePromisedAnswer(MessageTarget_getPromisedAnswer(target));
+      default:
+        return -1;
+    }
+  }
+
+  private resolvePromisedAnswer(promised: Ptr): number {
+    const frame = this.answers.get(PromisedAnswer_getQuestionId(promised));
+    if (frame === undefined) return -1;
+
+    const ret = Message_getReturn(CapnpMessage.fromFlat(frame).root());
+    const payload = Return_getResults(ret);
+    let cursor = Payload_getContent(payload);
+
+    const ops = PromisedAnswer_getTransform(promised);
+    for (let i = 0; i < ops.listLen(); i++) {
+      const op = ops.listGetP(i);
+      if (PromisedAnswer_Op_which(op) !== PromisedAnswer_Op.getPointerField) continue;
+      // The peer chooses the transform, so a step that walks into
+      // something with no pointer section is an unresolvable target
+      // rather than a reason to throw out of the message loop.
+      if (cursor.kind !== PtrKind.Struct) return -1;
+      cursor = cursor.getP(PromisedAnswer_Op_getGetPointerField(op));
+    }
+    if (cursor.kind !== PtrKind.Cap) return -1;
+
+    // The pointer holds a capTable index; the descriptor beside it says
+    // which export the caller is actually naming.
+    const table = Payload_getCapTable(payload);
+    const index = cursor.count;
+    if (index < 0 || index >= table.listLen()) return -1;
+    const descriptor = table.listGetP(index);
+    if (CapDescriptor_which(descriptor) !== CapDescriptor.senderHosted) return -1;
+    const id = CapDescriptor_getSenderHosted(descriptor);
     return this.exports.has(id) ? id : -1;
+  }
+
+  /**
+   * A Disembargo with `senderLoopback` is echoed back as
+   * `receiverLoopback` carrying the same id. That reflection is what lets
+   * the sender know every call it had already sent through a promise has
+   * arrived, so it can stop routing new ones the long way round.
+   */
+  private handleDisembargo(disembargo: Ptr): void {
+    const context = Disembargo_getContext(disembargo);
+    if (Disembargo_context_which(context) !== Disembargo_context.senderLoopback) {
+      // receiverLoopback is the reply to an embargo we raised, and this
+      // vat raises none; accept it without echoing to avoid a loop.
+      return;
+    }
+    const id = Disembargo_context_getSenderLoopback(context);
+
+    const b = new MessageBuilder();
+    const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+    root.setU16(OFF.messageUnion, Message.disembargo);
+    const out = root.initStruct(0, DISEMBARGO_DWORDS, DISEMBARGO_PWORDS);
+    // Echo the target back untouched: the sender matches on it.
+    out.setP(0, Disembargo_getTarget(disembargo));
+    // `context` is a group, so it shares Disembargo's own data section
+    // rather than living behind a pointer.
+    out.setU16(OFF.disembargoContextUnion, Disembargo_context.receiverLoopback);
+    out.setU32(OFF.disembargoContextValue, id);
+    this.transport.send(b.toFlat());
   }
 
   private sendException(questionId: number, reason: string): void {
