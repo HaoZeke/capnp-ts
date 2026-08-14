@@ -298,10 +298,12 @@ export function summaryFromAst(ast: CgrAst): CgrSummary {
  */
 export async function walkCgr(bytes: Uint8Array): Promise<CgrAst> {
   const { Message } = await import("../../runtime/src/message.ts");
-  const msg = Message.fromFlat(bytes);
-  // Schema graphs are deep; raise traversal budget after open.
-  msg.traversalLeft = 1_073_741_824;
-  msg.depthLimit = 256;
+  // Schema graphs are deep and wide, so both budgets are raised at open
+  // rather than mutated afterwards: depthLimit is readonly on Message.
+  const msg = Message.fromFlat(bytes, {
+    traversalWords: 1_073_741_824,
+    depthLimit: 256,
+  });
 
   const root = msg.root();
   if (root.kind !== PtrKind.Struct) {

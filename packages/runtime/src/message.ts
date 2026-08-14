@@ -106,7 +106,7 @@ export class Message {
     data: Uint8Array,
     opts?: { traversalWords?: number; depthLimit?: number },
   ): Message {
-    return parseFlat(data, true, opts);
+    return Message.parseFlat(data, true, opts);
   }
 
   /** Zero-copy view of stream-framed message; data must outlive the Message. */
@@ -114,7 +114,7 @@ export class Message {
     data: Uint8Array,
     opts?: { traversalWords?: number; depthLimit?: number },
   ): Message {
-    return parseFlat(data, false, opts);
+    return Message.parseFlat(data, false, opts);
   }
 
   /**
@@ -184,42 +184,43 @@ export class Message {
   remainingTraversal(): number {
     return this.traversalLeft;
   }
+
+  private static parseFlat(
+    data: Uint8Array,
+    copy: boolean,
+    opts?: { traversalWords?: number; depthLimit?: number },
+  ): Message {
+    assertCapnp(data.length >= 8, "FRAMING", "message shorter than 8 bytes");
+    const nsegs = loadU32(data, 0) + 1;
+    assertCapnp(nsegs > 0 && nsegs <= MAX_SEGMENTS, "FRAMING", `bad nsegs ${nsegs}`);
+    let tableBytes = 4 + 4 * nsegs;
+    if (tableBytes % 8 !== 0) tableBytes += 4;
+    assertCapnp(data.length >= tableBytes, "FRAMING", "truncated segment table");
+
+    const sizes: number[] = [];
+    let totalWords = 0;
+    for (let i = 0; i < nsegs; i++) {
+      const sz = loadU32(data, 4 + 4 * i);
+      sizes.push(sz);
+      totalWords += sz;
+    }
+    const body = tableBytes + totalWords * WORD_BYTES;
+    assertCapnp(body <= data.length, "FRAMING", "truncated segment body");
+
+    const owned = copy ? data.slice(0, body) : undefined;
+    const base = owned ?? data.subarray(0, body);
+    const segs: SegmentView[] = [];
+    let off = tableBytes;
+    for (let i = 0; i < nsegs; i++) {
+      const words = sizes[i]!;
+      const nbytes = words * WORD_BYTES;
+      segs.push({ data: base.subarray(off, off + nbytes), words });
+      off += nbytes;
+    }
+    return new Message(segs, { ...opts, owned });
+  }
 }
 
-function parseFlat(
-  data: Uint8Array,
-  copy: boolean,
-  opts?: { traversalWords?: number; depthLimit?: number },
-): Message {
-  assertCapnp(data.length >= 8, "FRAMING", "message shorter than 8 bytes");
-  const nsegs = loadU32(data, 0) + 1;
-  assertCapnp(nsegs > 0 && nsegs <= MAX_SEGMENTS, "FRAMING", `bad nsegs ${nsegs}`);
-  let tableBytes = 4 + 4 * nsegs;
-  if (tableBytes % 8 !== 0) tableBytes += 4;
-  assertCapnp(data.length >= tableBytes, "FRAMING", "truncated segment table");
-
-  const sizes: number[] = [];
-  let totalWords = 0;
-  for (let i = 0; i < nsegs; i++) {
-    const sz = loadU32(data, 4 + 4 * i);
-    sizes.push(sz);
-    totalWords += sz;
-  }
-  const body = tableBytes + totalWords * WORD_BYTES;
-  assertCapnp(body <= data.length, "FRAMING", "truncated segment body");
-
-  const owned = copy ? data.slice(0, body) : undefined;
-  const base = owned ?? data.subarray(0, body);
-  const segs: SegmentView[] = [];
-  let off = tableBytes;
-  for (let i = 0; i < nsegs; i++) {
-    const words = sizes[i]!;
-    const nbytes = words * WORD_BYTES;
-    segs.push({ data: base.subarray(off, off + nbytes), words });
-    off += nbytes;
-  }
-  return new Message(segs, { ...opts, owned });
-}
 
 function boundsWord(m: Message, seg: number, word: number): void {
   assertCapnp(seg >= 0 && seg < m.segs.length, "SEGMENT");
