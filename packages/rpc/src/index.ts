@@ -7,4 +7,9 @@
 export { MemoryTransportPair, type Transport } from "./transport.ts";
 export { frameLength, StreamTransport } from "./socket.ts";
 export { RpcStream, StreamError } from "./stream.ts";
-export { RpcConnection, type RpcServer } from "./vat.ts";
+export {
+  type Introduction,
+  RpcConnection,
+  type RpcServer,
+  Vat,
+} from "./vat.ts";

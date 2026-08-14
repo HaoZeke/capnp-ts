@@ -110,7 +110,11 @@ import {
 } from "./rpc-twoparty.capnp.ts";
 
 import {
+  PROVISION_ID_DWORDS,
+  PROVISION_ID_PWORDS,
   ProvisionId_getNonce,
+  RECIPIENT_ID_DWORDS,
+  RECIPIENT_ID_PWORDS,
   RecipientId_getNonce,
   THIRD_PARTY_CAP_ID_DWORDS,
   THIRD_PARTY_CAP_ID_PWORDS,
@@ -154,8 +158,25 @@ const RETURN_EXCEPTION = 1;
  */
 /** A capability held for a third vat, and the Provide that arranged it. */
 interface Provision {
-  exportId: number;
+  server: RpcServer;
   questionId: number;
+}
+
+/**
+ * What a vat knows across all its connections.
+ *
+ * A level 3 handoff is arranged on one connection and claimed on
+ * another: the introducer sends `Provide` over its own connection, and
+ * the recipient arrives on hers. Export ids are per-connection, so what
+ * the arrangement holds is the capability itself, and the claiming
+ * connection exports it under an id of its own.
+ *
+ * Connections given no vat get one to themselves, which is what a
+ * two-party deployment wants.
+ */
+export class Vat {
+  /** Capabilities held for a third vat, by the nonce that claims them. */
+  readonly provisions = new Map<bigint, Provision>();
 }
 
 /** An embargoed Accept: claimed, answer withheld until the disembargo. */
@@ -229,7 +250,7 @@ export class RpcConnection {
    * recipient claim the capability without us having to trust her
    * account of who sent her.
    */
-  private readonly provisions = new Map<bigint, Provision>();
+  private readonly vat: Vat;
   /** Embargoed Accepts, keyed by the introducer's Provide question. */
   private readonly heldAccepts = new Map<number, HeldAccept>();
   private readonly introductions = new Map<bigint, Introduction>();
@@ -239,7 +260,10 @@ export class RpcConnection {
   constructor(
     private readonly transport: Transport,
     private readonly bootstrap?: RpcServer,
-  ) {}
+    vat?: Vat,
+  ) {
+    this.vat = vat ?? new Vat();
+  }
 
   /** Handle one pending message. Returns false when none was waiting. */
   pumpOnce(): boolean {
@@ -392,6 +416,67 @@ export class RpcConnection {
   }
 
   /** Tell the peer we are done with an answer, and drop our copy. */
+  /**
+   * `Provide`: ask the peer to hold `importedCapId` for a third vat.
+   *
+   * This is the introducer's half of a handoff. The nonce is the whole
+   * of the arrangement: the recipient presents it in an `Accept`, and
+   * the host matches on it alone, so it never has to take the
+   * recipient's word for who sent her. Returns the question id, which
+   * is also what a later `Disembargo.provide` names.
+   */
+  sendProvide(importedCapId: number, recipient: Introduction, nonce: bigint): number {
+    const questionId = this.nextQuestionId++;
+    const b = new MessageBuilder();
+    const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+    root.setU16(OFF.messageUnion, Message.provide);
+    const provide = root.initStruct(0, PROVIDE_DWORDS, PROVIDE_PWORDS);
+    provide.setU32(0, questionId);
+    const target = provide.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS);
+    target.setU16(OFF.targetUnion, MessageTarget.importedCap);
+    target.setU32(0, importedCapId);
+    const rid = provide.initStruct(1, RECIPIENT_ID_DWORDS, RECIPIENT_ID_PWORDS);
+    rid.setU64(0, nonce);
+    const vat = rid.initStruct(0, VAT_ID_DWORDS, VAT_ID_PWORDS);
+    vat.setText(0, recipient.host);
+    vat.setU16(0, recipient.port);
+    this.questions.set(questionId, { failed: false });
+    this.transport.send(b.toFlat());
+    return questionId;
+  }
+
+  /**
+   * `Accept`: claim a capability a third vat provided for us. Returns
+   * the question id; the answer carries the capability.
+   */
+  sendAccept(nonce: bigint, embargo = false): number {
+    const questionId = this.nextQuestionId++;
+    const b = new MessageBuilder();
+    const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+    root.setU16(OFF.messageUnion, Message.accept);
+    const accept = root.initStruct(0, ACCEPT_DWORDS, ACCEPT_PWORDS);
+    accept.setU32(0, questionId);
+    if (embargo) accept.setBool(32, true);
+    accept.initStruct(0, PROVISION_ID_DWORDS, PROVISION_ID_PWORDS).setU64(0, nonce);
+    this.questions.set(questionId, { failed: false });
+    this.transport.send(b.toFlat());
+    return questionId;
+  }
+
+  /**
+   * `Disembargo` with `context.provide`: lift the embargo on the Accept
+   * this vat arranged with `Provide`, naming that question.
+   */
+  sendDisembargoProvide(provideQuestionId: number): void {
+    const b = new MessageBuilder();
+    const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+    root.setU16(OFF.messageUnion, Message.disembargo);
+    const dis = root.initStruct(0, DISEMBARGO_DWORDS, DISEMBARGO_PWORDS);
+    dis.setU16(OFF.disembargoContextUnion, Disembargo_context.provide);
+    dis.setU32(0, provideQuestionId);
+    this.transport.send(b.toFlat());
+  }
+
   sendFinish(questionId: number): void {
     const b = new MessageBuilder();
     const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
@@ -506,9 +591,12 @@ export class RpcConnection {
     }
     const nonce = RecipientId_getNonce(Provide_getRecipient(provide));
     // The recipient will hold a reference of its own once it accepts.
-    this.exports.get(exportId)!.refcount++;
-    // The question id is how a later Disembargo names this arrangement.
-    this.provisions.set(nonce, { exportId, questionId });
+    const slot = this.exports.get(exportId)!;
+    slot.refcount++;
+    // The arrangement holds the capability, not this connection's id for
+    // it: the recipient may well arrive on another connection. The
+    // question id is how a later Disembargo names this arrangement.
+    this.vat.provisions.set(nonce, { server: slot.server, questionId });
     this.sendEmptyReturn(questionId);
   }
 
@@ -522,25 +610,25 @@ export class RpcConnection {
     if (accept.kind !== PtrKind.Struct) return;
     const questionId = Accept_getQuestionId(accept);
     const nonce = ProvisionId_getNonce(Accept_getProvision(accept));
-    const held = this.provisions.get(nonce);
+    const held = this.vat.provisions.get(nonce);
     if (held === undefined) {
       this.sendException(questionId, "accept: no such provision");
       return;
     }
-    this.provisions.delete(nonce);
+    this.vat.provisions.delete(nonce);
+    // Export it here: the id the introducer used belongs to its own
+    // connection and means nothing on this one.
+    const exportId = this.exportCap(held.server);
 
     if (Accept_getEmbargo(accept)) {
       // Claimed, but the Return waits: the recipient has calls in flight
       // through the introducer, and answering now would let one sent
       // straight to us overtake them. The introducer lifts it with
       // Disembargo.provide.
-      this.heldAccepts.set(held.questionId, {
-        exportId: held.exportId,
-        answerId: questionId,
-      });
+      this.heldAccepts.set(held.questionId, { exportId, answerId: questionId });
       return;
     }
-    this.sendAcceptedCap(questionId, held.exportId);
+    this.sendAcceptedCap(questionId, exportId);
   }
 
   private sendAcceptedCap(questionId: number, exportId: number): void {
@@ -562,7 +650,7 @@ export class RpcConnection {
 
   /** Pending handoffs, for tests and for shutdown accounting. */
   pendingProvisions(): bigint[] {
-    return [...this.provisions.keys()];
+    return [...this.vat.provisions.keys()];
   }
 
   private sendEmptyReturn(questionId: number): void {
@@ -598,6 +686,10 @@ export class RpcConnection {
   private handleCall(call: Ptr): void {
     if (call.kind !== PtrKind.Struct) return;
     const questionId = Call_getQuestionId(call);
+    // The cap table describes the message, not the dispatch: a call this
+    // vat cannot route still told us where a third party's capability
+    // lives.
+    this.noteIntroductions(Call_getParams(call));
     const exportId = this.resolveTarget(Call_getTarget(call));
     const slot = exportId >= 0 ? this.exports.get(exportId) : undefined;
     if (slot === undefined) {
@@ -611,7 +703,6 @@ export class RpcConnection {
     const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
     ret.setU32(OFF.returnAnswerId, questionId);
 
-    this.noteIntroductions(Call_getParams(call));
     const params = Payload_getContent(Call_getParams(call));
     try {
       ret.setU16(OFF.returnUnion, RETURN_RESULTS);

@@ -85,7 +85,7 @@ present. Do not treat this table as a green checklist for unbuilt work.
 | Builder / deep copy / orphans | limited | yes | yes | partial | **yes** (multi-seg arena + far/double-far; orphan disown/adopt; deepCopyPtr) |
 | Canonical form | no | yes | yes | yes | **yes** (AddressBook golden byte-identical to CLI) |
 | Code generator (`capnp compile -o`) | yes | yes | yes | yes | **yes** (structs/enums/unions/getters with schema-default XOR args; List helpers; no generated setters yet) |
-| RPC levels 1-4 | no | L1-L2 (no L4) | L1-L2 (no L4) | L1-L4 | **L1-L4** (`@haozeke/capnp-rpc`; L3 both halves, hosting and vines, with `Accept.embargo`, over `rpc-threeparty.capnp`; L4 `Join`, which upstream C++ lacks) |
+| RPC levels 1-4 | no | L1-L2 (no L4) | L1-L2 (no L4) | L1-L4 | **L1-L4** (`@haozeke/capnp-rpc`; L3 both halves with `Accept.embargo`, over `rpc-threeparty.capnp`, tested as a three-vat handoff; L4 `Join`, which upstream C++ lacks) |
 | Interop with pycapnp (decode/encode same schema frames) | n/a | wraps C++ | n/a | n/a | **yes** (AddressBook + calculator; `packages/runtime/test/pycapnp-interop.test.ts`) |
 
 The serialization bar is Cap'n C++ 1.4.0 (`capnp encode` /
