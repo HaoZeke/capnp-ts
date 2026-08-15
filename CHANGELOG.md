@@ -10,6 +10,26 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Added
 
+- `@haozeke/capnp-rpc` covers RPC level 3, both halves. `Provide` holds a
+  capability under the recipient's nonce and `Accept` claims it; an
+  `Accept` with `embargo` waits for `Disembargo` with `context.provide`.
+  A `thirdPartyHosted` CapDescriptor records an introduction, handed
+  over by `pendingIntroductions` and finished by `introductionDone`,
+  which releases the vine. `sendProvide`, `sendAccept` and
+  `sendDisembargoProvide` are the introducer's side.
+- `schema/rpc-threeparty.capnp`, the network layer that names a third
+  vat, shared verbatim with c-capnproto, capnp-fortran and capnp-janet.
+  `rpc.capnp` leaves those ids to the network, and `rpc-twoparty.capnp`
+  declares them empty because a two-party connection has no third to
+  name.
+- `Vat`: level 3 arrangements belong to a vat rather than a connection,
+  since a handoff is made on one and claimed on another. A connection
+  given no `Vat` gets one to itself.
+- `answerCapId`, without which a capability returned in an answer could
+  not be called.
+- Level 3 goldens the reference `capnp` CLI encodes
+  (`packages/rpc/test/golden/rpc-{provide,accept,introduce}.bin`),
+  regenerated and verified by `scripts/gen-rpc-frames.sh`.
 - `capnpc-ts` v1 typed emit: structs (word counts + getters), enums as const
   maps (no TS `enum` / no public `const enum`), union `which()` + arm tags,
   List(Struct) via `listGetP` and List(Text) via `listGetText`;
