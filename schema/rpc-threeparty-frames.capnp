@@ -21,8 +21,8 @@ struct Message {
   union {
     unimplemented @0 :AnyPointer;
     abort @1 :AnyPointer;
-    call @2 :AnyPointer;
-    return @3 :AnyPointer;
+    call @2 :Call;
+    return @3 :Return;
     finish @4 :AnyPointer;
     resolve @5 :AnyPointer;
     release @6 :AnyPointer;
@@ -48,6 +48,58 @@ struct Accept {
   embargo @2 :Bool;
 }
 
+struct Call {
+  questionId @0 :UInt32;
+  target @1 :MessageTarget;
+  interfaceId @2 :UInt64;
+  methodId @3 :UInt16;
+  allowThirdPartyTailCall @8 :Bool = false;
+  noPromisePipelining @9 :Bool = false;
+  onlyPromisePipeline @10 :Bool = false;
+  params @4 :Payload;
+  sendResultsTo :union {
+    caller @5 :Void;
+    yourself @6 :Void;
+    thirdParty @7 :RecipientId;
+  }
+}
+
+struct Return {
+  answerId @0 :UInt32;
+  releaseParamCaps @1 :Bool = true;
+  noFinishNeeded @8 :Bool = false;
+  union {
+    results @2 :Payload;
+    exception @3 :AnyPointer;
+    canceled @4 :Void;
+    resultsSentElsewhere @5 :Void;
+    takeFromOtherQuestion @6 :UInt32;
+    acceptFromThirdParty @7 :ThirdPartyCapId;
+  }
+}
+
+struct Payload {
+  content @0 :AnyPointer;
+  capTable @1 :List(CapDescriptor);
+}
+
+struct CapDescriptor {
+  union {
+    none @0 :Void;
+    senderHosted @1 :UInt32;
+    senderPromise @2 :UInt32;
+    receiverHosted @3 :UInt32;
+    receiverAnswer @4 :AnyPointer;
+    thirdPartyHosted @5 :ThirdPartyCapDescriptor;
+  }
+  attachedFd @6 :UInt8 = 0xff;
+}
+
+struct ThirdPartyCapDescriptor {
+  id @0 :ThirdPartyCapId;
+  vineId @1 :UInt32;
+}
+
 struct MessageTarget {
   union {
     importedCap @0 :UInt32;
@@ -67,6 +119,11 @@ struct ProvisionId {
 }
 
 struct RecipientId {
+  vat @0 :VatId;
+  nonce @1 :UInt64;
+}
+
+struct ThirdPartyCapId {
   vat @0 :VatId;
   nonce @1 :UInt64;
 }

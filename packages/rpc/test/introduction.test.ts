@@ -10,6 +10,9 @@
  * outlive the pickup.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   Message as CapnpMessage,
   MessageBuilder,
@@ -40,6 +43,10 @@ import {
 } from "../src/rpc.capnp.ts";
 import { MemoryTransportPair, type Transport } from "../src/transport.ts";
 import { type Introduction, RpcConnection, type RpcServer } from "../src/vat.ts";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const golden = (name: string): Uint8Array =>
+  new Uint8Array(readFileSync(join(here, "golden", name)));
 
 const NONCE = 0xabcdefn;
 const WHERE: Introduction = { vineId: 77, host: "10.0.0.7", port: 5000 };
@@ -175,5 +182,21 @@ describe("level 3 introductions", () => {
     client.pump();
 
     expect(client.pendingIntroductions().get(NONCE)).toEqual(WHERE);
+  });
+
+  // The frame the reference encoder writes, rather than one this package
+  // built: a layout the writer and reader share but the wire format does
+  // not would pass every case above.
+  test("an introduction from the reference encoder is recorded", () => {
+    const { bob, peer } = bobWithExport();
+    peer.send(golden("rpc-introduce.bin"));
+    bob.pump();
+    // The call names export 0, which is live, so it is answered too; the
+    // introduction rides in its params either way.
+    expect(bob.pendingIntroductions().get(0xabcdefn)).toEqual({
+      vineId: 77,
+      host: "10.0.0.7",
+      port: 5000,
+    });
   });
 });

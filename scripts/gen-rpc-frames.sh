@@ -38,9 +38,21 @@ printf '%s' '(provide = (questionId = 42, target = (importedCap = 0),
 printf '%s' '(accept = (questionId = 43, provision = (nonce = 0xfeedface)))' |
   capnp encode "$schema" Message >"$out/rpc-accept.bin"
 
+# A payload that names a capability living in a third vat, with the vine
+# that reaches it through the introducer meanwhile. A call rather than an
+# answer, so a vat can read it without an outstanding question of the
+# right number. Question 44, so nothing coincides with the frames above.
+printf '%s' '(call = (questionId = 44, target = (importedCap = 0),
+              interfaceId = 0x1234, methodId = 0,
+              params = (capTable = [(thirdPartyHosted = (
+                id = (vat = (host = "10.0.0.7", port = 5000),
+                      nonce = 0xabcdef),
+                vineId = 77))])))' |
+  capnp encode "$schema" Message >"$out/rpc-introduce.bin"
+
 if [[ $check -eq 1 ]]; then
   rc=0
-  for f in rpc-provide.bin rpc-accept.bin; do
+  for f in rpc-provide.bin rpc-accept.bin rpc-introduce.bin; do
     if cmp -s "$out/$f" "$fix/$f"; then
       echo "ok   $f matches $(capnp --version)"
     else
@@ -51,4 +63,4 @@ if [[ $check -eq 1 ]]; then
   exit $rc
 fi
 
-echo "wrote $fix/rpc-provide.bin $fix/rpc-accept.bin with $(capnp --version)"
+echo "wrote goldens under $fix with $(capnp --version)"
