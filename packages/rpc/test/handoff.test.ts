@@ -141,9 +141,14 @@ describe("a level 3 handoff between three vats", () => {
     const ac = new MemoryTransportPair();
     const aliceToCarol = new RpcConnection(ac.a);
     const carolToAlice = new RpcConnection(ac.b, new Marked(1));
+    // Bob answers Carol's connection with a different object, so the two
+    // connections do not agree on export ids by accident: the capability
+    // Alice hands over must arrive under an id of Carol's connection,
+    // not the one Alice used.
+    const sidecar = new Marked(1000);
     const cb = new MemoryTransportPair();
     const carolToBob = new RpcConnection(cb.a);
-    const bobToCarol = new RpcConnection(cb.b, hosted, bobVat);
+    const bobToCarol = new RpcConnection(cb.b, sidecar, bobVat);
 
     // 1. Alice tells Bob to expect Carol.
     const provide = aliceToBob.sendProvide(0, CAROL, NONCE);
@@ -159,6 +164,13 @@ describe("a level 3 handoff between three vats", () => {
     ac.a.receive();
     const learned = carolToAlice.pendingIntroductions().get(NONCE);
     expect(learned).toEqual(BOB);
+
+    // Carol bootstraps Bob first, so her connection's export 0 is the
+    // sidecar and the handed-over capability cannot land on 0 too.
+    const side = carolToBob.sendBootstrap();
+    bobToCarol.pump();
+    carolToBob.pump();
+    expect(carolToBob.answerContent(side)?.kind).toBe(PtrKind.Cap);
 
     // 3. Carol presents the nonce to Bob, over her own connection. She
     //    was never told which export id Alice used, and it would mean
@@ -178,13 +190,17 @@ describe("a level 3 handoff between three vats", () => {
     expect(carolToAlice.introductionDone(NONCE)).toBe(true);
     expect(carolToAlice.pendingIntroductions().size).toBe(0);
 
-    // Carol now holds the capability Bob hosts: a call on it reaches the
-    // very object Alice was talking to.
+    // Carol now holds the capability Bob hosts. Calling it reaches the
+    // object Alice was talking to, not whatever else sits at that id on
+    // Carol's connection: this one answers 42, the sidecar 1000.
     const before = hosted.calls;
-    const q = carolToBob.sendCall(0, 0x1234n, 0);
+    const claimedId = carolToBob.answerCapId(claim);
+    expect(claimedId).toBeGreaterThan(0);
+    const q = carolToBob.sendCall(claimedId, 0x1234n, 0);
     bobToCarol.pump();
     carolToBob.pump();
     expect(hosted.calls).toBe(before + 1);
+    expect(sidecar.calls).toBe(0);
     expect(carolToBob.answerContent(q)?.getU32(0)).toBe(42);
     void provide;
     void readReply;

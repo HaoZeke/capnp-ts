@@ -415,7 +415,28 @@ export class RpcConnection {
     return Payload_getContent(Return_getResults(ret));
   }
 
-  /** Tell the peer we are done with an answer, and drop our copy. */
+  /**
+   * The import id of a capability an answer returned, or -1 when the
+   * answer carries no capability.
+   *
+   * A returned capability arrives as a pointer into the answer's
+   * capTable; calling it needs the id the descriptor beside it names,
+   * which is what this reads.
+   */
+  answerCapId(questionId: number): number {
+    const q = this.questions.get(questionId);
+    if (q?.reply === undefined || q.failed) return -1;
+    const ret = Message_getReturn(CapnpMessage.fromFlat(q.reply).root());
+    const payload = Return_getResults(ret);
+    const content = Payload_getContent(payload);
+    if (content.kind !== PtrKind.Cap) return -1;
+    const table = Payload_getCapTable(payload);
+    if (content.count < 0 || content.count >= table.listLen()) return -1;
+    const descriptor = table.listGetP(content.count);
+    if (CapDescriptor_which(descriptor) !== CapDescriptor.senderHosted) return -1;
+    return CapDescriptor_getSenderHosted(descriptor);
+  }
+
   /**
    * `Provide`: ask the peer to hold `importedCapId` for a third vat.
    *
