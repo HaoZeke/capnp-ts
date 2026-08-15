@@ -43,7 +43,8 @@ Defensive defaults: 8 Mi word traversal limit, depth 64, segment caps,
 
 * Non-goals (v1)
 
-- RPC (separate package later; L3/4 unimplemented)
+- RPC inside the runtime package (it ships separately, as
+  =@haozeke/capnp-rpc=, covering levels 1 through 4)
 - libcapnp / node-capnp FFI
 - Cap'n Web
 - Undocumented builder alloc order as a byte-identity claim
@@ -52,4 +53,6 @@ Defensive defaults: 8 Mi word traversal limit, depth 64, segment caps,
 
 Wire-first peer of HaoZeke =capnp-fortran=, =capnp-janet=, and
 =c-capnproto=. CLI goldens under =packages/runtime/test/golden/= are the
-primary oracle until live twin interop lands.
+primary oracle, and the RPC package adds level 3 frames the same CLI
+encodes from the shared =schema/rpc-threeparty.capnp=, which all four
+ports carry verbatim.
