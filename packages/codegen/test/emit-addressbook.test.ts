@@ -95,6 +95,43 @@ describe("generated AddressBook decode", () => {
     expect(gen.Person_getEmail(bob)).toBe("bob@example.com");
   });
 
+  test("generated builders create an AddressBook without hand offsets", async () => {
+    const src = emitSourceString(await loadAddressbookAst());
+    const outDir = mkdtempSync(join(tmpdir(), "capnpc-ts-ab-builder-"));
+    const outFile = join(outDir, "addressbook.ts");
+    writeFileSync(outFile, src, "utf8");
+    const gen = await import(outFile);
+
+    const builder = new MessageBuilder();
+    const book = builder.initRoot(
+      gen.AddressBook_dataWordCount,
+      gen.AddressBook_pointerCount,
+    );
+    const alice = gen.AddressBook_initPeople(book, 2);
+    gen.Person_setId(alice, 123);
+    gen.Person_setName(alice, "Alice");
+    gen.Person_setEmail(alice, "alice@example.com");
+    const phones = gen.Person_initPhones(alice, 1);
+    gen.Person_PhoneNumber_setNumber(phones, "555-1212");
+    gen.Person_PhoneNumber_setType(phones, gen.Person_PhoneNumber_Type.mobile);
+
+    const bob = alice.nextElement();
+    gen.Person_setId(bob, 456);
+    gen.Person_setName(bob, "Bob");
+    gen.Person_setEmail(bob, "bob@example.com");
+
+    const root = Message.fromFlat(builder.toFlat()).root();
+    const people = gen.AddressBook_getPeople(root);
+    expect(people.listLen()).toBe(2);
+    expect(gen.Person_getName(people.listGetP(0))).toBe("Alice");
+    expect(gen.Person_getEmail(people.listGetP(1))).toBe("bob@example.com");
+    expect(
+      gen.Person_PhoneNumber_getNumber(
+        gen.Person_getPhonesAt(people.listGetP(0), 0),
+      ),
+    ).toBe("555-1212");
+  });
+
   test("List(Text) element helper emits listGetText not listGetP.getText", async () => {
     // AddressBook has List(Person) only; synthesize a List(Text) field via kitchen
     // fixture if present, else assert the emitter path on a minimal hand AST walk.
