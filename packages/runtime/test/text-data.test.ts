@@ -82,6 +82,7 @@ describe("text and data edge cases", () => {
     const msg = Message.fromFlat(b.toFlat());
     expect(msg.root().getText(0)).toBe("present");
     expect(msg.root().getText(1)).toBe("");
+    expect(msg.root().getText(1, "schema default")).toBe("schema default");
     expect(msg.root().getP(1).kind).toBe(PtrKind.Null);
   });
 
@@ -105,6 +106,8 @@ describe("text and data edge cases", () => {
     const msg = Message.fromFlat(b.toFlat());
     expect([...msg.root().getData(0)]).toEqual([0xde, 0xad]);
     expect(msg.root().getData(1).length).toBe(0);
+    const dflt = new Uint8Array([0xca, 0xfe]);
+    expect(msg.root().getData(1, dflt)).toBe(dflt);
   });
 
   test("text with trailing NUL: count includes NUL; getText strips it", () => {

@@ -300,6 +300,12 @@ describe("Field.defaultValue walk", () => {
     expect(src).toMatch(/Sink_getFlag\(ptr: Ptr, dflt = true\)/);
     expect(src).toMatch(/Sink_getCount\(ptr: Ptr, dflt = -7\)/);
     expect(src).toMatch(/Sink_getRatio\(ptr: Ptr, dflt = 2\.5\)/);
+    expect(src).toContain('const SINK_LABEL_DEFAULT = "unnamed";');
+    expect(src).toContain(
+      "const SINK_PAYLOAD_DEFAULT = new Uint8Array([222, 173, 190, 239]);",
+    );
+    expect(src).toContain("ptr.getText(0, SINK_LABEL_DEFAULT)");
+    expect(src).toContain("ptr.getData(1, SINK_PAYLOAD_DEFAULT)");
     expect(src).toContain("ptr.getF64(");
     expect(src).toContain("ptr.getBool(");
   });
