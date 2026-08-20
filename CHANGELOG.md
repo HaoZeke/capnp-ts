@@ -40,6 +40,9 @@ Pre-1.0 minor releases may include breaking API changes.
   the AST; `capnpc-ts` emits non-zero scalar defaults into getter `dflt` args.
 - Generated scalar, Text, Data, and pointer setters; union setters select their
   discriminant, and struct / `List(Struct)` initializers use CGR word counts.
+- Generated interface metadata, typed client helpers, and abstract server
+  dispatch bases carry the schema interface id, method ordinal, and parameter
+  and result struct dimensions.
 - Text and Data schema defaults on null pointers, with module-level Data
   constants so generated getters do not allocate the default on every read.
 - `Ptr.getF32` / `StructBuilder.setF32` (IEEE-754 bit XOR, same model as f64).
