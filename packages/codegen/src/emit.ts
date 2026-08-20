@@ -391,6 +391,7 @@ function emitFieldSetter(
   typeName: string,
   field: FieldAst,
   discriminantByte: number | undefined,
+  byId: Map<bigint, NodeAst>,
   lines: string[],
 ): void {
   if (!field.slot) return;
@@ -400,6 +401,7 @@ function emitFieldSetter(
   const off = field.slot.offset;
   const dfltExpr = scalarDefaultExpr(t.which, field.slot.defaultValue);
   const byteOff = dataByteOffset(t.which, off);
+  const initFn = `${typeName}_init${fname[0]!.toUpperCase()}${fname.slice(1)}`;
   const select =
     discriminantByte !== undefined && field.discriminant !== NO_DISCRIMINANT
       ? [`  ptr.setU16(${discriminantByte}, ${field.discriminant});`]
@@ -461,6 +463,51 @@ function emitFieldSetter(
         `ptr: StructBuilder, value: number, dflt = ${dfltExpr}`,
         `ptr.setF64(${byteOff}, value, dflt);`,
       );
+      return;
+    case "text":
+      emit(
+        `ptr: StructBuilder, value: string`,
+        `ptr.setText(${off}, value);`,
+      );
+      return;
+    case "data":
+      emit(
+        `ptr: StructBuilder, value: Uint8Array`,
+        `ptr.setData(${off}, value);`,
+      );
+      return;
+    case "struct": {
+      emit(`ptr: StructBuilder, value: Ptr`, `ptr.setP(${off}, value);`);
+      const target = byId.get(t.typeId)?.struct;
+      if (target) {
+        lines.push(
+          `export function ${initFn}(ptr: StructBuilder): StructBuilder {`,
+          ...select,
+          `  return ptr.initStruct(${off}, ${target.dataWordCount}, ${target.pointerCount});`,
+          `}`,
+          ``,
+        );
+      }
+      return;
+    }
+    case "list": {
+      emit(`ptr: StructBuilder, value: Ptr`, `ptr.setP(${off}, value);`);
+      const elem = t.elementType;
+      const target = elem.which === "struct" ? byId.get(elem.typeId)?.struct : undefined;
+      if (target) {
+        lines.push(
+          `export function ${initFn}(ptr: StructBuilder, count: number): StructBuilder {`,
+          ...select,
+          `  return ptr.initList(${off}, count, ${target.dataWordCount}, ${target.pointerCount});`,
+          `}`,
+          ``,
+        );
+      }
+      return;
+    }
+    case "interface":
+    case "anyPointer":
+      emit(`ptr: StructBuilder, value: Ptr`, `ptr.setP(${off}, value);`);
       return;
     default:
       return;
@@ -593,7 +640,11 @@ function emitInterface(
   );
 }
 
-function emitStruct(node: NodeAst, lines: string[]): void {
+function emitStruct(
+  node: NodeAst,
+  byId: Map<bigint, NodeAst>,
+  lines: string[],
+): void {
   const s = node.struct;
   if (!s) return;
   const typeName = shortTypeName(node.displayName);
@@ -657,7 +708,7 @@ function emitStruct(node: NodeAst, lines: string[]): void {
       continue;
     }
     emitFieldGetter(typeName, f, lines);
-    emitFieldSetter(typeName, f, discriminantByte, lines);
+    emitFieldSetter(typeName, f, discriminantByte, byId, lines);
   }
 }
 
@@ -718,18 +769,19 @@ export function emitModuleSource(
     ``,
   );
 
+  // Every node, not just the emitted ones: field and method types can be
+  // implicit or imported nodes whose dimensions are needed by generated
+  // builder helpers and interface stubs.
+  const byId = new Map(ast.nodes.map((n) => [n.id, n]));
+
   // Enums first (referenced by struct field comments / types).
   for (const n of nodes) {
     if (n.which === "enum") emitEnum(n, lines);
   }
   for (const n of nodes) {
-    if (n.which === "struct") emitStruct(n, lines);
+    if (n.which === "struct") emitStruct(n, byId, lines);
   }
 
-  // Every node, not just the emitted ones: a method's parameter struct is
-  // an implicit node that the file filter drops, and its dimensions are
-  // exactly what the stub needs.
-  const byId = new Map(ast.nodes.map((n) => [n.id, n]));
   for (const n of nodes) {
     if (n.which === "interface") emitInterface(n, byId, lines);
   }
