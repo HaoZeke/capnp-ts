@@ -387,6 +387,86 @@ function emitFieldGetter(
   }
 }
 
+function emitFieldSetter(
+  typeName: string,
+  field: FieldAst,
+  discriminantByte: number | undefined,
+  lines: string[],
+): void {
+  if (!field.slot) return;
+  const fname = ident(field.name);
+  const fn = `${typeName}_set${fname[0]!.toUpperCase()}${fname.slice(1)}`;
+  const t = field.slot.type;
+  const off = field.slot.offset;
+  const dfltExpr = scalarDefaultExpr(t.which, field.slot.defaultValue);
+  const byteOff = dataByteOffset(t.which, off);
+  const select =
+    discriminantByte !== undefined && field.discriminant !== NO_DISCRIMINANT
+      ? [`  ptr.setU16(${discriminantByte}, ${field.discriminant});`]
+      : [];
+
+  const emit = (signature: string, write: string | undefined): void => {
+    lines.push(`export function ${fn}(${signature}): void {`, ...select);
+    if (write) lines.push(`  ${write}`);
+    lines.push(`}`, ``);
+  };
+
+  switch (t.which) {
+    case "void":
+      if (select.length > 0) emit("ptr: StructBuilder", undefined);
+      return;
+    case "bool":
+      emit(
+        `ptr: StructBuilder, value: boolean, dflt = ${dfltExpr}`,
+        `ptr.setBool(${off}, value, dflt);`,
+      );
+      return;
+    case "int8":
+    case "uint8":
+      emit(
+        `ptr: StructBuilder, value: number, dflt = ${dfltExpr}`,
+        `ptr.setU8(${byteOff}, value, dflt);`,
+      );
+      return;
+    case "int16":
+    case "uint16":
+    case "enum":
+      emit(
+        `ptr: StructBuilder, value: number, dflt = ${dfltExpr}`,
+        `ptr.setU16(${byteOff}, value, dflt);`,
+      );
+      return;
+    case "int32":
+    case "uint32":
+      emit(
+        `ptr: StructBuilder, value: number, dflt = ${dfltExpr}`,
+        `ptr.setU32(${byteOff}, value, dflt);`,
+      );
+      return;
+    case "int64":
+    case "uint64":
+      emit(
+        `ptr: StructBuilder, value: bigint, dflt: bigint = ${dfltExpr}`,
+        `ptr.setU64(${byteOff}, value, dflt);`,
+      );
+      return;
+    case "float32":
+      emit(
+        `ptr: StructBuilder, value: number, dflt = ${dfltExpr}`,
+        `ptr.setF32(${byteOff}, value, dflt);`,
+      );
+      return;
+    case "float64":
+      emit(
+        `ptr: StructBuilder, value: number, dflt = ${dfltExpr}`,
+        `ptr.setF64(${byteOff}, value, dflt);`,
+      );
+      return;
+    default:
+      return;
+  }
+}
+
 
 /**
  * Typed stubs for an interface.
@@ -529,9 +609,11 @@ function emitStruct(node: NodeAst, lines: string[]): void {
   lines.push(`export const ${typeName}_dataWordCount = ${s.dataWordCount};`);
   lines.push(`export const ${typeName}_pointerCount = ${s.pointerCount};`);
 
+  let discriminantByte: number | undefined;
   if (s.discriminantCount > 0) {
     // discriminantOffset is in 16-bit units → byte offset * 2.
     const discByte = (s.discriminantOffset * 2) >>> 0;
+    discriminantByte = discByte;
     lines.push(
       `/** Union discriminant byte offset (u16). */`,
       `export const ${typeName}_discriminantOffset = ${discByte};`,
@@ -575,6 +657,7 @@ function emitStruct(node: NodeAst, lines: string[]): void {
       continue;
     }
     emitFieldGetter(typeName, f, lines);
+    emitFieldSetter(typeName, f, discriminantByte, lines);
   }
 }
 
@@ -614,12 +697,12 @@ export function emitModuleSource(
   );
   lines.push(` */`);
   lines.push(``);
-  // StructBuilder is only referenced by interface stubs, so it is only
-  // imported when the file has one; an unused type import would trip a
-  // consumer's lint.
+  // StructBuilder is referenced by generated setters and interface stubs.
+  // Keep enum-only modules free of an unused type import.
   const hasInterface = nodes.some((n) => n.which === "interface");
+  const hasStruct = nodes.some((n) => n.which === "struct");
   lines.push(
-    hasInterface
+    hasInterface || hasStruct
       ? `import type { Ptr, StructBuilder } from "@haozeke/capnp";`
       : `import type { Ptr } from "@haozeke/capnp";`,
   );
