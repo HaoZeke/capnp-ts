@@ -43,6 +43,8 @@ import {
   wpStructPwords,
 } from "./pointer.ts";
 
+const EMPTY_DATA = new Uint8Array(0);
+
 export interface SegmentView {
   readonly data: Uint8Array;
   readonly words: number;
@@ -593,9 +595,9 @@ export class Ptr {
     return this.getP(ptrIndex);
   }
 
-  getText(ptrIndex: number): string {
+  getText(ptrIndex: number, dflt = ""): string {
     const list = this.getP(ptrIndex);
-    if (list.kind === PtrKind.Null) return "";
+    if (list.kind === PtrKind.Null) return dflt;
     assertCapnp(
       list.kind === PtrKind.List && list.esize === ElemSize.Byte,
       "KIND",
@@ -608,9 +610,9 @@ export class Ptr {
     return new TextDecoder().decode(s.data.subarray(start, start + n));
   }
 
-  getData(ptrIndex: number): Uint8Array {
+  getData(ptrIndex: number, dflt: Uint8Array = EMPTY_DATA): Uint8Array {
     const list = this.getP(ptrIndex);
-    if (list.kind === PtrKind.Null) return new Uint8Array(0);
+    if (list.kind === PtrKind.Null) return dflt;
     assertCapnp(
       list.kind === PtrKind.List && list.esize === ElemSize.Byte,
       "KIND",

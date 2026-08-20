@@ -327,20 +327,42 @@ function emitFieldGetter(
       );
       return;
     case "text":
-      lines.push(
-        `export function ${fn}(ptr: Ptr): string {`,
-        `  return ptr.getText(${off});`,
-        `}`,
-        ``,
-      );
+      if (field.slot.hadExplicitDefault && dv?.which === "text") {
+        const dflt = `${upperSnake(typeName)}_${upperSnake(fname)}_DEFAULT`;
+        lines.push(
+          `const ${dflt} = ${JSON.stringify(dv.value)};`,
+          `export function ${fn}(ptr: Ptr): string {`,
+          `  return ptr.getText(${off}, ${dflt});`,
+          `}`,
+          ``,
+        );
+      } else {
+        lines.push(
+          `export function ${fn}(ptr: Ptr): string {`,
+          `  return ptr.getText(${off});`,
+          `}`,
+          ``,
+        );
+      }
       return;
     case "data":
-      lines.push(
-        `export function ${fn}(ptr: Ptr): Uint8Array {`,
-        `  return ptr.getData(${off});`,
-        `}`,
-        ``,
-      );
+      if (field.slot.hadExplicitDefault && dv?.which === "data") {
+        const dflt = `${upperSnake(typeName)}_${upperSnake(fname)}_DEFAULT`;
+        lines.push(
+          `const ${dflt} = new Uint8Array([${Array.from(dv.value).join(", ")}]);`,
+          `export function ${fn}(ptr: Ptr): Uint8Array {`,
+          `  return ptr.getData(${off}, ${dflt});`,
+          `}`,
+          ``,
+        );
+      } else {
+        lines.push(
+          `export function ${fn}(ptr: Ptr): Uint8Array {`,
+          `  return ptr.getData(${off});`,
+          `}`,
+          ``,
+        );
+      }
       return;
     case "list":
     case "struct":
