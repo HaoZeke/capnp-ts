@@ -38,6 +38,10 @@ Pre-1.0 minor releases may include breaking API changes.
   `capnp compile -o…/capnpc-ts` gated with `test.skipIf` (no soft-skip pass).
 - CGR walk of `Field.slot.defaultValue` / `hadExplicitDefault` (bit 128) into
   the AST; `capnpc-ts` emits non-zero scalar defaults into getter `dflt` args.
+- Generated scalar, Text, Data, and pointer setters; union setters select their
+  discriminant, and struct / `List(Struct)` initializers use CGR word counts.
+- Text and Data schema defaults on null pointers, with module-level Data
+  constants so generated getters do not allocate the default on every read.
 - `Ptr.getF32` / `StructBuilder.setF32` (IEEE-754 bit XOR, same model as f64).
 - Scalar get/set schema-default XOR (`wire = logical XOR default`) on
   `Ptr.get*` / `StructBuilder.set*`; float defaults XOR IEEE bit patterns.
@@ -77,10 +81,9 @@ Pre-1.0 minor releases may include breaking API changes.
 - Docs: root README with honest family parity table, `SECURITY.md`,
   `CONTRIBUTING.md`, runtime package README, architecture org note.
 
-### Not yet
+### Current limits
 
 - Cross-width list demotion matrix beyond the covered upgrade/downgrade suite
-- Generated setters / full builder emit / groups as first-class helpers
+- Generated primitive/pointer-list element builders and group init wrappers
 - Live c-capnproto twin interop (Phase 2; offline sketch only)
 - Dynamic by-name reflection
-- RPC (`@haozeke/capnp-rpc` Phase 2; not a v1 claim)

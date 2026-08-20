@@ -2,10 +2,11 @@
 
 Cap'n Proto schema compiler plugin for TypeScript (HaoZeke family).
 
-**Status:** v1 typed emit. The plugin opens a framed `CodeGeneratorRequest`
-(CGR), walks Node/Field/Type, and writes one ESM `.ts` module per requested
-schema file with layout constants, field getters, const-map enums, and union
-`which()` helpers. UInt64/Int64 always use `getU64` / `bigint` (never `getU32`).
+**Status:** typed reader and builder emit. The plugin opens a framed
+`CodeGeneratorRequest` (CGR), walks Node/Field/Type, and writes one ESM `.ts`
+module per requested schema file with layout constants, field accessors,
+const-map enums, and union `which()` helpers. UInt64/Int64 always use `getU64`
+/ `bigint` (never `getU32`).
 
 ## Requirements
 
@@ -53,15 +54,27 @@ capnpc-ts: wrote .../addressbook.ts
 Generated module (shape):
 
 ```typescript
-import type { Ptr } from "@haozeke/capnp";
+import type { Ptr, StructBuilder } from "@haozeke/capnp";
 
 export const PERSON_DWORDS = 1;
 export const PERSON_PWORDS = 4;
 export function Person_getId(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
 }
+export function Person_setId(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
 export function Person_getName(ptr: Ptr): string {
   return ptr.getText(0);
+}
+export function Person_setName(ptr: StructBuilder, value: string): void {
+  ptr.setText(0, value);
+}
+export function AddressBook_initPeople(
+  ptr: StructBuilder,
+  count: number,
+): StructBuilder {
+  return ptr.initList(0, count, 1, 4);
 }
 export function AddressBook_getPeopleAt(ptr: Ptr, index: number): Ptr {
   return ptr.getP(0).listGetP(index);
@@ -132,7 +145,9 @@ $ capnp compile --src-prefix=. \
 | CGR walk of `Field.defaultValue` / `hadExplicitDefault` | **yes** (bit 128; float32 as float) |
 | Scalar getter defaults from `Field.defaultValue` | **yes** (incl. non-zero; signed + getF32/getF64) |
 | u64probe `bigint` field paths | **yes** |
-| Generated setters / full builders | **no** |
+| Scalar/Text/Data/pointer setters | **yes** (union setters also select the arm) |
+| Struct and `List(Struct)` initializers | **yes** (shape resolved from CGR nodes) |
+| Primitive/pointer-list element builders | **no** |
 
 ## Package scripts
 
