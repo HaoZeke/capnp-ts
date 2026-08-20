@@ -19,7 +19,7 @@ import {
   emitSourceString,
   walkCgr,
 } from "../src/index.ts";
-import { Message, PtrKind } from "../../runtime/src/index.ts";
+import { Message, MessageBuilder, PtrKind } from "../../runtime/src/index.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..", "..");
@@ -319,6 +319,89 @@ describe("Field.defaultValue walk", () => {
     expect(src).toMatch(/Probe_getX\(ptr: Ptr, dflt = 1\.5\)/);
     expect(src).toMatch(/Probe_getN\(ptr: Ptr, dflt = -7\)/);
     expect(src).not.toMatch(/Probe_getX[\s\S]{0,80}getU32/);
+  });
+});
+
+describe("generated scalar builders", () => {
+  test("setters apply defaults and select union fields", async () => {
+    const { emitModuleSource } = await import("../src/emit.ts");
+    const synthetic = {
+      nodes: [
+        {
+          id: 1n,
+          displayName: "synth.capnp:Probe",
+          displayNamePrefixLength: 0,
+          scopeId: 0n,
+          which: "struct" as const,
+          whichTag: 1,
+          nestedNodes: [],
+          struct: {
+            dataWordCount: 2,
+            pointerCount: 0,
+            isGroup: false,
+            discriminantCount: 2,
+            discriminantOffset: 4,
+            fields: [
+              {
+                name: "count",
+                codeOrder: 0,
+                discriminant: 0xffff,
+                slot: {
+                  offset: 0,
+                  type: { which: "int32" as const },
+                  defaultValue: { which: "int32" as const, value: -7 },
+                  hadExplicitDefault: true,
+                },
+              },
+              {
+                name: "first",
+                codeOrder: 1,
+                discriminant: 0,
+                slot: {
+                  offset: 1,
+                  type: { which: "int32" as const },
+                  defaultValue: { which: "int32" as const, value: 0 },
+                  hadExplicitDefault: false,
+                },
+              },
+              {
+                name: "second",
+                codeOrder: 2,
+                discriminant: 1,
+                slot: {
+                  offset: 1,
+                  type: { which: "int32" as const },
+                  defaultValue: { which: "int32" as const, value: 0 },
+                  hadExplicitDefault: false,
+                },
+              },
+            ],
+          },
+        },
+      ],
+      requestedFiles: [{ id: 0n, filename: "synth.capnp" }],
+    };
+    const src = emitModuleSource(synthetic as never, "synth.capnp", 0n);
+    expect(src).toContain("import type { Ptr, StructBuilder }");
+    expect(src).toMatch(
+      /Probe_setCount\(ptr: StructBuilder, value: number, dflt = -7\)/,
+    );
+    expect(src).toMatch(/Probe_setSecond[\s\S]*?ptr\.setU16\(8, 1\)/);
+
+    const outDir = mkdtempSync(join(tmpdir(), "capnpc-ts-builder-"));
+    const outFile = join(outDir, "synth.ts");
+    writeFileSync(outFile, src, "utf8");
+    const gen = await import(outFile);
+
+    const builder = new MessageBuilder();
+    const root = builder.initRoot(2, 0);
+    gen.Probe_setCount(root, -7);
+    gen.Probe_setSecond(root, 42);
+
+    const reader = Message.fromFlat(builder.toFlat()).root();
+    expect(gen.Probe_getCount(reader)).toBe(-7);
+    expect(gen.Probe_which(reader)).toBe(1);
+    expect(gen.Probe_getSecond(reader)).toBe(42);
   });
 });
 
