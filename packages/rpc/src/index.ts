@@ -5,7 +5,8 @@
  */
 export { MemoryTransportPair, type Transport } from "./transport.ts";
 export { frameLength, StreamTransport } from "./socket.ts";
-export { RpcStream, StreamError } from "./stream.ts";
+export { DEFAULT_STREAM_WINDOW, WindowFlowController } from "./flow.ts";
+export { RpcStream } from "./stream.ts";
 export {
   BrokenClient,
   CallBuilder,

@@ -12,8 +12,11 @@
  */
 import type { StructBuilder } from "@haozeke/capnp";
 
+import { WindowFlowController } from "./flow.ts";
+
 import {
   BrokenClient,
+  callStreaming,
   type CallOptions,
   CallState,
   type ClientHook,
@@ -30,6 +33,8 @@ export type TargetWriter = (target: StructBuilder) => void;
 export interface RemoteHost {
   /** Set once the connection is gone; every remote capability then fails. */
   readonly disconnected: RpcError | undefined;
+  /** Bytes of stream calls a sender may have in flight on one capability. */
+  readonly streamWindow: number;
   sendCallTo(
     write: TargetWriter,
     interfaceId: bigint,
@@ -49,6 +54,20 @@ export interface RpcClientHook extends ClientHook {
   writeDescriptor(desc: StructBuilder): void;
   /** Fill in a `MessageTarget` that addresses this capability. */
   writeTarget(target: StructBuilder): void;
+}
+
+/** Send one stream call through `flow`, finishing the question once it returns. */
+function sendStreaming(
+  host: RemoteHost,
+  flow: WindowFlowController,
+  write: TargetWriter,
+  interfaceId: bigint,
+  methodId: number,
+  params: Payload,
+): Promise<void> {
+  const call = host.sendCallTo(write, interfaceId, methodId, params, { streaming: true });
+  call.result.onSettled(() => call.release());
+  return flow.send(call.wireSize, call.result);
 }
 
 /** One pending question; `Finish` goes out when the last reference is dropped. */
@@ -100,11 +119,29 @@ const RECEIVER_HOSTED = 3;
 const RECEIVER_ANSWER = 4;
 
 export class ImportClient extends RefHook implements RpcClientHook {
+  readonly flow: WindowFlowController;
+
   constructor(
     private readonly host: RemoteHost,
     readonly importId: number,
   ) {
     super();
+    this.flow = new WindowFlowController(() => host.streamWindow);
+  }
+
+  callStreaming(interfaceId: bigint, methodId: number, params: Payload): Promise<void> {
+    return sendStreaming(
+      this.host,
+      this.flow,
+      (t) => this.writeTarget(t),
+      interfaceId,
+      methodId,
+      params,
+    );
+  }
+
+  flush(): Promise<void> {
+    return this.flow.waitAllAcked();
   }
 
   get brand(): unknown {
@@ -144,6 +181,8 @@ export class ImportClient extends RefHook implements RpcClientHook {
 
 /** A capability inside an answer that has not come back yet. */
 export class PipelineClient extends RefHook implements RpcClientHook {
+  readonly flow: WindowFlowController;
+
   constructor(
     private readonly host: RemoteHost,
     private readonly question: QuestionRef,
@@ -151,6 +190,22 @@ export class PipelineClient extends RefHook implements RpcClientHook {
     private readonly ops: readonly number[],
   ) {
     super();
+    this.flow = new WindowFlowController(() => host.streamWindow);
+  }
+
+  callStreaming(interfaceId: bigint, methodId: number, params: Payload): Promise<void> {
+    return sendStreaming(
+      this.host,
+      this.flow,
+      (t) => this.writeTarget(t),
+      interfaceId,
+      methodId,
+      params,
+    );
+  }
+
+  flush(): Promise<void> {
+    return this.flow.waitAllAcked();
   }
 
   get brand(): unknown {
@@ -234,6 +289,15 @@ export class PromiseClient extends RefHook implements RpcClientHook {
   call(interfaceId: bigint, methodId: number, params: Payload, opts?: CallOptions): CallState {
     this.receivedCall = true;
     return this.cap.call(interfaceId, methodId, params, opts);
+  }
+
+  callStreaming(interfaceId: bigint, methodId: number, params: Payload): Promise<void> {
+    this.receivedCall = true;
+    return callStreaming(this.cap, interfaceId, methodId, params);
+  }
+
+  flush(): Promise<void> {
+    return this.cap.flush?.() ?? Promise.resolve();
   }
 
   writeTarget(target: StructBuilder): void {
