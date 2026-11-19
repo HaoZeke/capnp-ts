@@ -18,6 +18,7 @@ import {
   Message,
   MessageBuilder,
   SchemaLoader,
+  Type,
   canonicalizeFlat,
   deepCopyPtrToSlot,
   newDynamicStructOrphan,
@@ -341,6 +342,63 @@ describe("DynamicStruct / DynamicList / DynamicEnum / DynamicCapability", () => 
       compRoot.getP(tagsField.offset),
     );
     expect(downgradedTexts.toArray().map((x) => x.asText())).toEqual(["k0", "k1"]);
+
+    // 4. Cross-width primitive list evolution in DynamicList.Reader
+    const primEvoMsg = new MessageBuilder();
+    const primRoot = primEvoMsg.initRoot(0, 3);
+    primRoot.initPrimList(
+      0,
+      ElemSize.FourBytes,
+      2,
+      4,
+      new Uint8Array([0x79, 0x56, 0x34, 0x12, 0x05, 0x00, 0x00, 0x00]),
+    );
+    primRoot.initPrimList(1, ElemSize.Byte, 2, 1, new Uint8Array([0xab, 0xcd]));
+    primRoot.initPrimList(2, ElemSize.Bit, 2, 1, new Uint8Array([0b10]));
+    const primParsed = Message.fromFlat(primEvoMsg.toFlat()).root();
+
+    const u32AsU8 = new DynamicList.Reader(ListSchema.of(Type.UINT8), primParsed.getP(0));
+    expect(u32AsU8.get(0).asUInt8()).toBe(0x79);
+    expect(u32AsU8.get(1).asUInt8()).toBe(0x05);
+    const u32AsU16 = new DynamicList.Reader(ListSchema.of(Type.UINT16), primParsed.getP(0));
+    expect(u32AsU16.get(0).asUInt16()).toBe(0x5679);
+    const u32AsBool = new DynamicList.Reader(ListSchema.of(Type.BOOL), primParsed.getP(0));
+    expect(u32AsBool.get(0).asBool()).toBe(true);
+    expect(u32AsBool.get(1).asBool()).toBe(false);
+    const u32AsVoid = new DynamicList.Reader(ListSchema.of(Type.VOID), primParsed.getP(0));
+    expect(u32AsVoid.get(0).asVoid()).toBeUndefined();
+
+    const u8AsU32 = new DynamicList.Reader(ListSchema.of(Type.UINT32), primParsed.getP(1));
+    expect(() => u8AsU32.get(0)).toThrow(CapnpError);
+    const boolAsVoid = new DynamicList.Reader(ListSchema.of(Type.VOID), primParsed.getP(2));
+    expect(() => boolAsVoid.get(0)).toThrow(CapnpError);
+
+    // 5. DynamicStructBuilder in-place upgrades of smaller composite & non-composite struct lists + root
+    const upgBuilder = new MessageBuilder();
+    const upgRoot = DynamicStruct.upgradeRoot(
+      upgBuilder,
+      Message.fromFlat(oldBuilder.toFlat()),
+      sinkSchema,
+    );
+    expect(upgRoot.asReader().get("flag").asBool()).toBe(true);
+    upgRoot.set("i64", 123456n);
+    expect(upgRoot.asReader().get("i64").asInt64()).toBe(123456n);
+
+    // Smaller composite list (1 dword, 0 pwords) inside tags slot upgraded to Tag (1 dword, 1 pword)
+    const oldListEl = upgRoot.sb.initCompositeList(tagsField.offset, 1, 1, 0);
+    oldListEl.setU32(0, (77 ^ -42) >>> 0); // Tag.code default = -42
+    const upgradedTagsB = upgRoot.get("tags").asList();
+    upgradedTagsB.get(0).asStruct().set("key", "added-key");
+    expect(upgRoot.asReader().get("tags").asList().get(0).asStruct().get("key").asText()).toBe("added-key");
+    expect(upgRoot.asReader().get("tags").asList().get(0).asStruct().get("code").asInt32()).toBe(77);
+
+    // Non-composite pointer list List(Text) upgraded in place to List(Tag)
+    const textPtrSlots = upgRoot.sb.initPointerList(tagsField.offset, 1);
+    deepCopyPtrToSlot(upgBuilder, textPtrSlots, tmpParsed.getP(0), 0);
+    const upgradedFromPtrB = upgRoot.get("tags").asList();
+    upgradedFromPtrB.get(0).asStruct().set("code", 321);
+    expect(upgRoot.asReader().get("tags").asList().get(0).asStruct().get("key").asText()).toBe("upgraded-0");
+    expect(upgRoot.asReader().get("tags").asList().get(0).asStruct().get("code").asInt32()).toBe(321);
   });
 
   test("supports disown/adopt orphans and DynamicCapability client/server", async () => {
