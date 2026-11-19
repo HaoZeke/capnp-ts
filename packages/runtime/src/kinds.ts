@@ -71,6 +71,7 @@ export type CapnpErrorCode =
   | "BOUNDS"
   | "SEGMENT"
   | "KIND"
+  | "SCHEMA"
   | "DEPTH"
   | "TRAVERSAL"
   | "PACKED"

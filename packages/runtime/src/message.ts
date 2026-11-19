@@ -45,6 +45,26 @@ import {
 
 const EMPTY_DATA = new Uint8Array(0);
 
+/** Data bits of a non-composite element. Pointer lists contribute 0 data bits. */
+function listDataBits(esize: number): number {
+  switch (esize) {
+    case ElemSize.Void:
+      return 0;
+    case ElemSize.Bit:
+      return 1;
+    case ElemSize.Byte:
+      return 8;
+    case ElemSize.TwoBytes:
+      return 16;
+    case ElemSize.FourBytes:
+      return 32;
+    case ElemSize.EightBytes:
+      return 64;
+    default:
+      return 0;
+  }
+}
+
 export interface SegmentView {
   readonly data: Uint8Array;
   readonly words: number;
@@ -745,6 +765,9 @@ export class Ptr {
 
   listGetText(index: number): string {
     assertCapnp(this.kind === PtrKind.List, "KIND");
+    assertCapnp(index >= 0, "BOUNDS");
+    // List(Text) is a pointer list. C++ rejects data lists and data-only structs.
+    this.assertListCompat(0, 1);
     if (this.esize === ElemSize.Pointer) {
       const elem = this.listGetP(index);
       if (elem.kind === PtrKind.Null) return "";
@@ -763,6 +786,59 @@ export class Ptr {
     throw new CapnpError("KIND");
   }
 
+  /**
+   * C++ `readListPointer` element-size check (capnp 1.4.0).
+   * `expectedBits` is 1 for Bool and 8/16/32/64 for data. `expectedPointers`
+   * is 1 for a pointer list. Promotions and Bool-to-data reads throw SCHEMA.
+   * A Bool reader may view a wider data list; the bool accessor then ignores step.
+   */
+  private assertListCompat(expectedBits: number, expectedPointers: number): void {
+    if (this.esize === ElemSize.Composite) {
+      if (expectedBits === 1 && expectedPointers === 0) {
+        throw new CapnpError(
+          "SCHEMA",
+          "Schema mismatch: Found struct list where bit list was expected; upgrading boolean lists to structs is no longer supported.",
+        );
+      }
+      if (expectedBits > 0 && this.dwords <= 0) {
+        throw new CapnpError(
+          "SCHEMA",
+          "Schema mismatch: Expected a primitive list, but got a list of pointer-only structs.",
+        );
+      }
+      if (expectedPointers > this.pwords) {
+        throw new CapnpError(
+          "SCHEMA",
+          "Schema mismatch: Expected a pointer list, but got a list of data-only structs.",
+        );
+      }
+      return;
+    }
+
+    if (this.esize === ElemSize.Bit && !(expectedBits === 1 && expectedPointers === 0)) {
+      throw new CapnpError(
+        "SCHEMA",
+        "Schema mismatch: Found bit list where struct list was expected; upgrading boolean lists to structs is no longer supported.",
+      );
+    }
+
+    const dataBits = listDataBits(this.esize);
+    const pointers = this.esize === ElemSize.Pointer ? 1 : 0;
+    if (expectedBits > dataBits || expectedPointers > pointers) {
+      throw new CapnpError(
+        "SCHEMA",
+        "Schema mismatch: Message contained list with incompatible element type.",
+      );
+    }
+  }
+
+  /** Negative index is BOUNDS. A mismatched element size is SCHEMA even past the end. */
+  private preparePrimitive(expectedBits: number, index: number): boolean {
+    assertCapnp(index >= 0, "BOUNDS");
+    this.assertListCompat(expectedBits, 0);
+    return index < this.count;
+  }
+
   private listElemBytes(index: number, elemBytes: number): Uint8Array {
     const s = this.msg.segs[this.seg]!;
     const off = this.word * WORD_BYTES + index * elemBytes;
@@ -777,99 +853,74 @@ export class Ptr {
 
   listGetU8(index: number, dflt = 0): number {
     if (this.kind !== PtrKind.List) return dflt;
-    assertCapnp(index >= 0, "BOUNDS");
-    if (index >= this.count) return dflt;
+    if (!this.preparePrimitive(8, index)) return dflt;
     if (this.esize === ElemSize.Byte) return this.listElemBytes(index, 1)[0]!;
-    if (this.esize === ElemSize.Bit) return dflt;
-    if (this.esize === ElemSize.Composite && this.dwords >= 1) {
-      return this.compositeElemData(index)[0]!;
-    }
+    if (this.esize === ElemSize.Composite) return this.compositeElemData(index)[0]!;
     const el = this.listGetStruct(index);
-    if (8 > el.dataBitCount()) return dflt;
     return el.dataBytes()[0]!;
   }
 
   listGetU16(index: number, dflt = 0): number {
     if (this.kind !== PtrKind.List) return dflt;
-    assertCapnp(index >= 0, "BOUNDS");
-    if (index >= this.count) return dflt;
+    if (!this.preparePrimitive(16, index)) return dflt;
     if (this.esize === ElemSize.TwoBytes) {
       return loadU16(this.listElemBytes(index, 2), 0);
     }
-    if (this.esize === ElemSize.Bit) return dflt;
-    if (this.esize === ElemSize.Composite && this.dwords >= 1) {
+    if (this.esize === ElemSize.Composite) {
       return loadU16(this.compositeElemData(index), 0);
     }
     const el = this.listGetStruct(index);
-    if (16 > el.dataBitCount()) return dflt;
     return loadU16(el.dataBytes(), 0);
   }
 
   listGetU32(index: number, dflt = 0): number {
     if (this.kind !== PtrKind.List) return dflt;
-    assertCapnp(index >= 0, "BOUNDS");
-    if (index >= this.count) return dflt;
+    if (!this.preparePrimitive(32, index)) return dflt;
     if (this.esize === ElemSize.FourBytes) {
       return loadU32(this.listElemBytes(index, 4), 0);
     }
-    if (this.esize === ElemSize.Bit) return dflt;
-    if (this.esize === ElemSize.Composite && this.dwords >= 1) {
+    if (this.esize === ElemSize.Composite) {
       return loadU32(this.compositeElemData(index), 0);
     }
     const el = this.listGetStruct(index);
-    if (32 > el.dataBitCount()) return dflt;
     return loadU32(el.dataBytes(), 0);
   }
 
   listGetU64(index: number, dflt = 0n): bigint {
     if (this.kind !== PtrKind.List) return dflt;
-    assertCapnp(index >= 0, "BOUNDS");
-    if (index >= this.count) return dflt;
+    if (!this.preparePrimitive(64, index)) return dflt;
     if (this.esize === ElemSize.EightBytes) {
       return loadU64(this.listElemBytes(index, 8), 0);
     }
-    if (this.esize === ElemSize.Bit) return dflt;
-    if (this.esize === ElemSize.Composite && this.dwords >= 1) {
+    if (this.esize === ElemSize.Composite) {
       return loadU64(this.compositeElemData(index), 0);
     }
     const el = this.listGetStruct(index);
-    if (64 > el.dataBitCount()) return dflt;
     return loadU64(el.dataBytes(), 0);
   }
 
   listGetF64(index: number, dflt = 0): number {
     if (this.kind !== PtrKind.List) return dflt;
-    assertCapnp(index >= 0, "BOUNDS");
-    if (index >= this.count) return dflt;
+    if (!this.preparePrimitive(64, index)) return dflt;
     if (this.esize === ElemSize.EightBytes) {
       return loadF64(this.listElemBytes(index, 8), 0);
     }
-    if (this.esize === ElemSize.Bit) return dflt;
-    if (this.esize === ElemSize.Composite && this.dwords >= 1) {
+    if (this.esize === ElemSize.Composite) {
       return loadF64(this.compositeElemData(index), 0);
     }
     const el = this.listGetStruct(index);
-    if (64 > el.dataBitCount()) return dflt;
     return loadF64(el.dataBytes(), 0);
   }
 
   listGetBool(index: number, dflt = false): boolean {
     if (this.kind !== PtrKind.List) return dflt;
     assertCapnp(index >= 0, "BOUNDS");
+    // Bool-from-data is allowed: expected width is 1 bit, so any wider data
+    // list passes. Bool-to-data, void, pointer, and struct lists throw.
+    this.assertListCompat(1, 0);
     if (index >= this.count) return dflt;
-    if (
-      this.esize !== ElemSize.Bit &&
-      this.esize !== ElemSize.Byte &&
-      this.esize !== ElemSize.TwoBytes &&
-      this.esize !== ElemSize.FourBytes &&
-      this.esize !== ElemSize.EightBytes &&
-      !(this.esize === ElemSize.Composite && this.dwords >= 1)
-    ) {
-      return dflt;
-    }
-    // C++ ListReader permits readers expecting bit elements to consume any
-    // non-empty data list. Its bool accessor deliberately ignores the list
-    // step, so the result comes from the first `count` packed data bits.
+    // C++ ListReader::getDataElement<bool> ignores step. The result is the
+    // first `count` packed bits of the data area.
     const base = this.msg.segs[this.seg]!.data;
     const off = this.word * WORD_BYTES + ((index / 8) | 0);
     const bit = 1 << (index % 8);
