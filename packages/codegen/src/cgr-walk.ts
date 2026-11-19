@@ -107,6 +107,17 @@ export const TYPE_STRUCT = 16;
 export const TYPE_INTERFACE = 17;
 export const TYPE_ANY_POINTER = 18;
 
+/** Type.anyPointer union tags (schema.capnp). */
+export const ANY_POINTER_UNCONSTRAINED = 0;
+export const ANY_POINTER_PARAMETER = 1;
+export const ANY_POINTER_IMPLICIT_METHOD_PARAMETER = 2;
+
+/** Type.anyPointer.unconstrained.anyKind enum values. */
+export const ANY_KIND_ANY_POINTER = 0;
+export const ANY_KIND_STRUCT = 1;
+export const ANY_KIND_LIST = 2;
+export const ANY_KIND_CAPABILITY = 3;
+
 export type TypeWhichName =
   | "void"
   | "bool"
@@ -153,13 +164,50 @@ const TYPE_WHICH_NAMES: readonly TypeWhichName[] = [
 /** Field.noDiscriminant — not a union member (schema.capnp default 0xffff). */
 export const NO_DISCRIMINANT = 0xffff;
 
+export type AnyKindName =
+  | "anyPointer"
+  | "struct"
+  | "list"
+  | "capability";
+
+export type AnyPointerConstraintAst =
+  | {
+      which: "unconstrained";
+      anyKind: AnyKindName;
+    }
+  | {
+      which: "parameter";
+      scopeId: bigint;
+      parameterIndex: number;
+    }
+  | {
+      which: "implicitMethodParameter";
+      parameterIndex: number;
+    };
+
+export type BrandScopeAst = {
+  scopeId: bigint;
+  which: "bind" | "inherit";
+  bind?: Array<TypeAst | null>;
+};
+
+export type BrandAst = {
+  scopes: BrandScopeAst[];
+};
+
 /** Decoded Cap'n Proto Type (recursive for list). */
 export type TypeAst =
-  | { which: Exclude<TypeWhichName, "list" | "enum" | "struct" | "interface"> }
+  | {
+      which: Exclude<
+        TypeWhichName,
+        "list" | "enum" | "struct" | "interface" | "anyPointer"
+      >;
+    }
   | { which: "list"; elementType: TypeAst }
-  | { which: "enum"; typeId: bigint }
-  | { which: "struct"; typeId: bigint }
-  | { which: "interface"; typeId: bigint };
+  | { which: "enum"; typeId: bigint; brand?: BrandAst }
+  | { which: "struct"; typeId: bigint; brand?: BrandAst }
+  | { which: "interface"; typeId: bigint; brand?: BrandAst }
+  | { which: "anyPointer"; constraint: AnyPointerConstraintAst };
 
 /**
  * Decoded schema.capnp Value (scalar + text/data only for v1 walk).
@@ -246,6 +294,8 @@ export type NodeAst = {
   which: NodeWhichName;
   whichTag: number;
   nestedNodes: NestedNodeAst[];
+  /** Generic parameter names from Node.parameters. */
+  parameters?: string[];
   /** Set when which === "struct". */
   struct?: StructNodeAst;
   /** Set when which === "enum". */
@@ -385,6 +435,65 @@ function typeWhichName(tag: number): TypeWhichName {
   return TYPE_WHICH_NAMES[tag] ?? "void";
 }
 
+function anyKindName(tag: number): AnyKindName {
+  switch (tag) {
+    case ANY_KIND_STRUCT:
+      return "struct";
+    case ANY_KIND_LIST:
+      return "list";
+    case ANY_KIND_CAPABILITY:
+      return "capability";
+    default:
+      return "anyPointer";
+  }
+}
+
+function decodeBrandBindings(list: Ptr): Array<TypeAst | null> {
+  if (list.kind !== PtrKind.List) return [];
+  const out: Array<TypeAst | null> = [];
+  for (let i = 0; i < list.listLen(); i++) {
+    const b = list.listGetp(i);
+    if (b.kind !== PtrKind.Struct) {
+      out.push(null);
+      continue;
+    }
+    // Brand.Binding union: unbound @0, type @1.
+    const which = b.getU16(0);
+    if (which === 1) {
+      out.push(decodeType(b.getp(0)));
+    } else {
+      out.push(null);
+    }
+  }
+  return out;
+}
+
+function decodeBrand(brand: Ptr): BrandAst | undefined {
+  if (brand.kind !== PtrKind.Struct) return undefined;
+  const scopes = brand.getp(0);
+  if (scopes.kind !== PtrKind.List) return undefined;
+  const out: BrandScopeAst[] = [];
+  for (let i = 0; i < scopes.listLen(); i++) {
+    const s = scopes.listGetp(i);
+    if (s.kind !== PtrKind.Struct) continue;
+    // Brand.Scope union: bind @0, inherit @1.
+    const which = s.getU16(8);
+    if (which === 1) {
+      out.push({
+        scopeId: s.getU64(0),
+        which: "inherit",
+      });
+      continue;
+    }
+    out.push({
+      scopeId: s.getU64(0),
+      which: "bind",
+      bind: decodeBrandBindings(s.getp(0)),
+    });
+  }
+  return out.length > 0 ? { scopes: out } : undefined;
+}
+
 function decodeType(t: Ptr): TypeAst {
   if (t.kind !== PtrKind.Struct) {
     return { which: "void" };
@@ -395,7 +504,36 @@ function decodeType(t: Ptr): TypeAst {
     return { which: "list", elementType: decodeType(t.getp(0)) };
   }
   if (which === "enum" || which === "struct" || which === "interface") {
-    return { which, typeId: t.getU64(8) };
+    return { which, typeId: t.getU64(8), brand: decodeBrand(t.getp(0)) };
+  }
+  if (which === "anyPointer") {
+    const anyTag = t.getU16(8);
+    if (anyTag === ANY_POINTER_PARAMETER) {
+      return {
+        which,
+        constraint: {
+          which: "parameter",
+          scopeId: t.getU64(16),
+          parameterIndex: t.getU16(10),
+        },
+      };
+    }
+    if (anyTag === ANY_POINTER_IMPLICIT_METHOD_PARAMETER) {
+      return {
+        which,
+        constraint: {
+          which: "implicitMethodParameter",
+          parameterIndex: t.getU16(10),
+        },
+      };
+    }
+    return {
+      which,
+      constraint: {
+        which: "unconstrained",
+        anyKind: anyKindName(t.getU16(10)),
+      },
+    };
   }
   return { which };
 }
@@ -509,6 +647,16 @@ function decodeNestedNodes(list: Ptr): NestedNodeAst[] {
   return out;
 }
 
+function decodeParameters(list: Ptr): string[] {
+  if (list.kind !== PtrKind.List) return [];
+  const out: string[] = [];
+  for (let i = 0; i < list.listLen(); i++) {
+    const p = list.listGetp(i);
+    out.push(p.kind === PtrKind.Struct ? p.getText(0) : "");
+  }
+  return out;
+}
+
 /**
  * An interface's methods, in ordinal order. The ordinal is the list
  * index: schema.capnp assigns method @N by position, and that number is
@@ -574,6 +722,7 @@ function decodeNode(n: Ptr): NodeAst {
     which,
     whichTag,
     nestedNodes: decodeNestedNodes(n.getp(1)),
+    parameters: decodeParameters(n.getp(5)),
   };
 
   if (which === "struct") {
@@ -608,17 +757,49 @@ function decodeNode(n: Ptr): NodeAst {
 // Pretty-print (human walk dump)
 // ---------------------------------------------------------------------------
 
+function formatBrand(brand: BrandAst | undefined): string {
+  if (!brand || brand.scopes.length === 0) return "";
+  const scopes = brand.scopes
+    .map((s) => {
+      if (s.which === "inherit") {
+        return `scope(0x${s.scopeId.toString(16)}):inherit`;
+      }
+      const binds = (s.bind ?? [])
+        .map((b) => (b ? formatType(b) : "_"))
+        .join(", ");
+      return `scope(0x${s.scopeId.toString(16)}):[${binds}]`;
+    })
+    .join("; ");
+  return ` brand{${scopes}}`;
+}
+
 /** Format a TypeAst as a short schema-like string. */
 export function formatType(t: TypeAst): string {
   switch (t.which) {
     case "list":
       return `List(${formatType(t.elementType)})`;
     case "enum":
-      return `Enum(0x${t.typeId.toString(16)})`;
+      return `Enum(0x${t.typeId.toString(16)})${formatBrand(t.brand)}`;
     case "struct":
-      return `Struct(0x${t.typeId.toString(16)})`;
+      return `Struct(0x${t.typeId.toString(16)})${formatBrand(t.brand)}`;
     case "interface":
-      return `Interface(0x${t.typeId.toString(16)})`;
+      return `Interface(0x${t.typeId.toString(16)})${formatBrand(t.brand)}`;
+    case "anyPointer":
+      switch (t.constraint.which) {
+        case "unconstrained":
+          return t.constraint.anyKind === "anyPointer"
+            ? "AnyPointer"
+            : `AnyPointer(${t.constraint.anyKind})`;
+        case "parameter":
+          return (
+            `AnyPointer(parameter scope=0x${t.constraint.scopeId.toString(16)}` +
+            ` index=${t.constraint.parameterIndex})`
+          );
+        case "implicitMethodParameter":
+          return `AnyPointer(implicitMethodParameter index=${t.constraint.parameterIndex})`;
+        default:
+          return "AnyPointer";
+      }
     default:
       return t.which;
   }
@@ -630,6 +811,9 @@ export function formatNode(node: NodeAst): string {
   lines.push(
     `${node.which} 0x${node.id.toString(16)} ${node.displayName}`,
   );
+  if (node.parameters && node.parameters.length > 0) {
+    lines.push(`  parameters=${node.parameters.join(",")}`);
+  }
   if (node.struct) {
     const s = node.struct;
     lines.push(
