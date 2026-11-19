@@ -350,7 +350,11 @@ class MembraneHook extends RefHook implements ClientHook {
       return call;
     }
 
-    const inner = routed.target.call(interfaceId, methodId, routed.params, opts);
+    // Crossing a membrane must wrap any returned capabilities and honor
+    // revocation, so do not bypass the membrane with an outer tailHandler.
+    const innerOpts =
+      opts?.tailHandler !== undefined ? { ...opts, tailHandler: undefined } : opts;
+    const inner = routed.target.call(interfaceId, methodId, routed.params, innerOpts);
     routed.target.release();
     const outer = new CallState();
     const flight: Flight = { outer, inner };
