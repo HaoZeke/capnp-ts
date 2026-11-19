@@ -179,5 +179,5 @@ export class StructBuilder {
     const text = `${checked.stdout ?? ""}\n${checked.stderr ?? ""}`;
     expect(text).not.toContain("error TS");
     expect(checked.status).toBe(0);
-  });
+  }, 60_000); // `bunx tsc` exceeds Bun's 5000 ms default on a slow CI runner.
 });
