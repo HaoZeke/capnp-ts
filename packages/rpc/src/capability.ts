@@ -181,6 +181,8 @@ export class CallState {
   pipeline!: PipelineHook;
   released = false;
   onRelease: (() => void) | undefined;
+  /** Bytes the call occupied on the wire, for flow control; zero when it never was sent. */
+  wireSize = 0;
 
   release(): void {
     if (this.released) return;
@@ -200,10 +202,37 @@ export interface ClientHook {
   whenMoreResolved(): Promise<ClientHook> | undefined;
   addRef(): ClientHook;
   release(): void;
+  /**
+   * Make a `-> stream` call. Resolves when the sender may send more, and
+   * rejects once any earlier stream call on this capability has failed.
+   * Hooks without flow control of their own leave this to
+   * `callStreaming()`.
+   */
+  callStreaming?(interfaceId: bigint, methodId: number, params: Payload): Promise<void>;
+  /** Resolves when every stream call made through this hook has returned. */
+  flush?(): Promise<void>;
   /** Identifies which connection or wrapper made this hook. */
   readonly brand: unknown;
   /** The error a broken capability fails with. */
   readonly brokenError: RpcError | undefined;
+}
+
+/** A stream call on a hook with no flow control: resolves when the call returns. */
+export function callStreaming(
+  hook: ClientHook,
+  interfaceId: bigint,
+  methodId: number,
+  params: Payload,
+): Promise<void> {
+  if (hook.callStreaming !== undefined) return hook.callStreaming(interfaceId, methodId, params);
+  const call = hook.call(interfaceId, methodId, params, { streaming: true });
+  return call.result.promise.then(
+    () => call.release(),
+    (e) => {
+      call.release();
+      throw e;
+    },
+  );
 }
 
 export abstract class RefHook {
@@ -543,6 +572,30 @@ export class Client {
     const params = new CallBuilder(paramsDwords, paramsPwords);
     fill?.(params.root, params);
     return new RpcPromise(this.hook.call(interfaceId, methodId, params.toPayload(), opts));
+  }
+
+  /**
+   * Call a `-> stream` method. The promise resolves when the next call
+   * may be made without running too far ahead of the receiver, and
+   * rejects once an earlier call on this capability has failed.
+   */
+  callStreaming(
+    interfaceId: bigint,
+    methodId: number,
+    fill?: (params: StructBuilder, caps: CallBuilder) => void,
+    paramsDwords = 1,
+    paramsPwords = 1,
+  ): Promise<void> {
+    const params = new CallBuilder(paramsDwords, paramsPwords);
+    fill?.(params.root, params);
+    return callStreaming(this.hook, interfaceId, methodId, params.toPayload());
+  }
+
+  /** Resolves when every stream call has returned; rejects with the first failure. */
+  flush(): Promise<void> {
+    let h = this.hook;
+    for (let r = h.getResolved(); r !== undefined; r = h.getResolved()) h = r;
+    return h.flush?.() ?? Promise.resolve();
   }
 
   /** A second handle on the same capability. */
