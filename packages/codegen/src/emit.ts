@@ -998,9 +998,19 @@ function emitStruct(
     if (f.group) {
       // Group field: same Ptr as parent; which/getters live on the group node.
       const gName = ident(f.name);
+      const initFn = `${typeName}_init${gName[0]!.toUpperCase()}${gName.slice(1)}`;
+      const selectGroup =
+        discriminantByte !== undefined && f.discriminant !== NO_DISCRIMINANT
+          ? [`  ptr.setU16(${discriminantByte}, ${f.discriminant});`]
+          : [];
       lines.push(
         `/** Group field \`${f.name}\` — same wire Ptr as parent; see group node helpers. */`,
         `export function ${typeName}_get${gName[0]!.toUpperCase()}${gName.slice(1)}(ptr: Ptr): Ptr {`,
+        `  return ptr;`,
+        `}`,
+        ``,
+        `export function ${initFn}(ptr: StructBuilder): StructBuilder {`,
+        ...selectGroup,
         `  return ptr;`,
         `}`,
         ``,
