@@ -317,3 +317,167 @@ describe("other incoming protocol errors", () => {
     reply.release();
   });
 });
+
+describe("refcount cases", () => {
+  test("releasing the caller's bootstrap Client does not break the next Bootstrap", () => {
+    const server = new Counter();
+    const client = Client.local(server);
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.b, client);
+    client.release();
+    for (const id of [1, 2]) {
+      pair.a.send(
+        frame((root) => {
+          root.setU16(0, Message.bootstrap);
+          root.initStruct(0, BOOTSTRAP_DWORDS, BOOTSTRAP_PWORDS).setU32(0, id);
+        }),
+      );
+      vat.pump();
+      expect(vat.disconnected).toBeUndefined();
+      expect(Message_which(CapnpMessage.fromFlat(pair.a.receive()!).root())).toBe(Message.return);
+    }
+    expect(server.disposed).toBe(0);
+  });
+
+  test("disconnect disposes the bootstrap server", () => {
+    const server = new Counter();
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.b, server);
+    vat.disconnect(new RpcError("bye", "disconnected"));
+    expect(server.disposed).toBe(1);
+  });
+
+  test("disconnect disposes an exported server", () => {
+    const server = new Counter();
+    const pair = new MemoryTransportPair();
+    const a = new RpcConnection(pair.a);
+    a.exportCap(server);
+    expect(server.disposed).toBe(0);
+    a.disconnect(new RpcError("bye", "disconnected"));
+    expect(server.disposed).toBe(1);
+  });
+
+  test("Finish releaseResultCaps drops a returned capability", async () => {
+    const made: Counter[] = [];
+    const factory: RpcServer = {
+      dispatch(_i, _m, _p, _r, ctx) {
+        const counter = new Counter();
+        made.push(counter);
+        ctx.setResultCap(ctx.initResults(0, 1), 0, Client.local(counter).hook);
+      },
+    };
+    const { a, b, ta, settle } = link(undefined, factory);
+    const reply = a.bootstrap().call(IFACE, 0);
+    await settle();
+    await reply;
+    expect(made[0]!.disposed).toBe(0);
+    ta.send(
+      frame((root) => {
+        root.setU16(0, Message.finish);
+        const fin = root.initStruct(0, FINISH_DWORDS, FINISH_PWORDS);
+        fin.setU32(0, 1);
+        fin.setBool(32, true, true);
+      }),
+    );
+    b.pump();
+    expect(b.disconnected).toBeUndefined();
+    expect(made[0]!.disposed).toBe(1);
+  });
+
+  test("Return.releaseParamCaps releases caps sent in the call", () => {
+    const param = new Counter();
+    const pair = new MemoryTransportPair();
+    const a = new RpcConnection(pair.a);
+    const params = new CallBuilder(0, 1);
+    params.setCap(params.root, 0, Client.local(param).hook);
+    a.sendCallTo(
+      (t) => {
+        t.setU16(4, MessageTarget.importedCap);
+        t.setU32(0, 0);
+      },
+      IFACE,
+      0,
+      params.toPayload(),
+    );
+    pair.b.receive();
+    expect(a.liveExports()).toEqual([0]);
+    pair.b.send(
+      frame((root) => {
+        root.setU16(0, Message.return);
+        const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+        ret.setU32(0, 0);
+        ret.setU16(6, Return.results);
+        ret.setBool(32, true, true);
+        ret.initStruct(0, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+      }),
+    );
+    a.pump();
+    expect(a.disconnected).toBeUndefined();
+    expect(a.liveExports()).toEqual([]);
+    expect(param.disposed).toBe(1);
+  });
+
+  test("an Unimplemented echo of a call releases its parameter caps", () => {
+    const param = new Counter();
+    const pair = new MemoryTransportPair();
+    const a = new RpcConnection(pair.a);
+    const params = new CallBuilder(0, 1);
+    params.setCap(params.root, 0, Client.local(param).hook);
+    a.sendCallTo(
+      (t) => {
+        t.setU16(4, MessageTarget.importedCap);
+        t.setU32(0, 0);
+      },
+      IFACE,
+      0,
+      params.toPayload(),
+    );
+    const sent = pair.b.receive();
+    expect(sent).not.toBeNull();
+    pair.b.send(
+      frame((root) => {
+        root.setU16(0, Message.unimplemented);
+        root.setP(0, CapnpMessage.fromFlat(sent!).root());
+      }),
+    );
+    a.pump();
+    expect(a.disconnected).toBeUndefined();
+    expect(a.liveExports()).toEqual([]);
+    expect(param.disposed).toBe(1);
+  });
+
+  test("a receiverHosted export that already points back over the connection embargoes", async () => {
+    let echoed: Client | undefined;
+    let resolveBack!: (c: Client) => void;
+    const server: RpcServer = {
+      dispatch(_i, _m, params, _r, ctx) {
+        echoed = new Client(ctx.getCap(params.getP(0)));
+        const p = Client.fromPromise(new Promise<Client>((r) => (resolveBack = r)));
+        ctx.setResultCap(ctx.initResults(0, 1), 0, p.hook);
+      },
+    };
+    const { a, ta, settle } = link(undefined, server);
+    const boot = a.bootstrap();
+    let resolveLocal!: (c: Client) => void;
+    const localPromise = Client.fromPromise(new Promise<Client>((r) => (resolveLocal = r)));
+    const reply = boot.call(IFACE, 0, (p, cb) => cb.setCap(p, 0, localPromise.hook), 0, 1);
+    await settle();
+    const returned = new Client((await reply).getCap((await reply).content.getP(0)));
+    // A call through the promise, so resolution has to embargo.
+    void returned.call(IFACE, 0, arg(1));
+    await settle();
+    // Resolve A's exported promise to a capability on this same connection,
+    // and do not let B observe that Resolve yet. B still describes the
+    // export as receiverHosted. The export table now holds an ImportClient,
+    // which receiveCap wraps so the resolution is embargoed.
+    resolveLocal(boot.dup());
+    await new Promise((r) => setImmediate(r));
+    const before = ta.sent.filter((name) => name === "disembargo").length;
+    resolveBack(echoed!.dup());
+    await new Promise((r) => setImmediate(r));
+    a.pump();
+    const after = ta.sent.filter((name) => name === "disembargo").length;
+    expect(after).toBeGreaterThan(before);
+    expect(a.disconnected).toBeUndefined();
+  });
+});
