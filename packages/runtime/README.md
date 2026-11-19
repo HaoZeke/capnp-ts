@@ -49,9 +49,10 @@ Subpath entry points (same modules):
 - `@haozeke/capnp/dynamic`: `DynamicStruct`, `DynamicList`, `DynamicEnum`, `DynamicCapability`, `DynamicValue`, `DynamicOrphan`
 - `@haozeke/capnp/text`: `TextCodec`, `prettyPrint`, `stringify`, `encodeText`, `decodeText`, `splitTextMessages`
 - `@haozeke/capnp/json`: `JsonCodec`, `encodeJson`, `decodeJson`, `splitJsonMessages`
+- `@haozeke/capnp/cli`: `runCli`, `convertStream`, `evaluateSchemaPath` (CLI binary `capnp-ts`: `encode`, `decode`, `convert`, `eval`)
 
 Layers: `kinds` → `endian` → `pointer` → `message` / `builder` →
-(`serialize` | `packed` | `canonical` | `schema` → `dynamic` → `text` / `json`). Codegen lives in
+(`serialize` | `packed` | `canonical` | `schema` → `dynamic` → `text` / `json` → `cli`). Codegen lives in
 `@haozeke/capnpc-ts`.
 
 ## Tests
