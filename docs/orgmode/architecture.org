@@ -22,7 +22,8 @@ words (encoding.html). =message= owns segments and far resolution.
 branded reflection graph, and =dynamic= provides runtime =DynamicStruct=,
 =DynamicList=, =DynamicEnum=, and =DynamicCapability= readers and builders.
 =text= layers =TextCodec=, =prettyPrint=, and =stringify= over =dynamic= to
-match =capnp decode= and =capnp encode= text literals.
+match =capnp decode= and =capnp encode= text literals, and =json= implements
+=JsonCodec= matching =capnp/compat/json.h= and =json.capnp= annotations.
 =capnpc-ts= is a =capnp compile -o= plugin that reads =CodeGeneratorRequest=
 with hand schema readers over this runtime (no generated TS bootstrap).
 
