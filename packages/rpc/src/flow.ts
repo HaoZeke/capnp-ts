@@ -10,9 +10,9 @@
  * the receiver without ever waiting a round trip it did not need to.
  *
  * Errors follow the C++ rule. Once any call fails, the controller keeps
- * that error: later sends still go out but their promises reject, and
- * `waitAllAcked` rejects with it, so a caller learns of the failure at its
- * next send or at the end without checking every individual call.
+ * that error and later sends reject with it. `waitAllAcked` still resolves
+ * once every ack has settled: capnp-C++ returns `tasks.onEmpty()`, which
+ * does not reject with the stream error.
  */
 import type { RpcError } from "./capability.ts";
 
@@ -141,7 +141,9 @@ export class WindowFlowController {
         this.failure ??= s.error;
         const waiting = this.blocked.splice(0);
         for (const w of waiting) w.reject(this.failure);
-        for (const w of this.emptied.splice(0)) w.reject(this.failure);
+        // Outstanding waitAllAcked calls resolve when the in-flight bytes
+        // drain. C++ does not reject them with the stream error.
+        if (this.inFlightBytes === 0) for (const w of this.emptied.splice(0)) w.resolve();
         return;
       }
       this.getter.onAck?.(size, this.now() - sentAt, saturated || this.blocked.length > 0);
@@ -158,9 +160,11 @@ export class WindowFlowController {
     return new Promise<void>((resolve, reject) => this.blocked.push({ resolve, reject }));
   }
 
-  /** Resolves when everything sent has been acknowledged. */
+  /**
+   * Resolves when everything sent has been acknowledged. A previous
+   * failure does not reject this promise; later `send` calls do.
+   */
   waitAllAcked(): Promise<void> {
-    if (this.failure !== undefined) return Promise.reject(this.failure);
     if (this.inFlightBytes === 0) return Promise.resolve();
     return new Promise<void>((resolve, reject) => this.emptied.push({ resolve, reject }));
   }
