@@ -209,36 +209,49 @@ interface Flight {
  * First of the stream call and revocation wins. Revocation cancels the
  * call, which is what capnp-C++'s exclusiveJoin does to sendStreaming.
  */
-function joinRevocation(done: StreamingPromise, onRevoked: Promise<unknown>): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    let settled = false;
-    done.then(
-      () => {
-        if (settled) return;
-        settled = true;
-        resolve();
-      },
-      (e) => {
-        if (settled) return;
-        settled = true;
-        reject(toRpcError(e));
-      },
-    );
-    onRevoked.then(
-      () => {
-        if (settled) return;
-        settled = true;
-        done.cancel();
-        reject(new RpcError("onRevoked() resolved; it should only reject"));
-      },
-      (e) => {
-        if (settled) return;
-        settled = true;
-        done.cancel();
-        reject(toRpcError(e));
-      },
-    );
-  });
+function joinRevocation(done: StreamingPromise, onRevoked: Promise<unknown>): StreamingPromise {
+  let settled = false;
+  let resolvePromise!: () => void;
+  let rejectPromise!: (e: RpcError) => void;
+  const promise = new Promise<void>((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  }) as StreamingPromise;
+  const succeed = (): void => {
+    if (settled) return;
+    settled = true;
+    resolvePromise();
+  };
+  const fail = (e: unknown): void => {
+    if (settled) return;
+    settled = true;
+    rejectPromise(toRpcError(e));
+  };
+  done.then(
+    () => succeed(),
+    (e) => fail(e),
+  );
+  onRevoked.then(
+    () => {
+      if (settled) return;
+      settled = true;
+      done.cancel();
+      rejectPromise(new RpcError("onRevoked() resolved; it should only reject"));
+    },
+    (e) => {
+      if (settled) return;
+      settled = true;
+      done.cancel();
+      rejectPromise(toRpcError(e));
+    },
+  );
+  promise.cancel = () => {
+    if (settled) return;
+    settled = true;
+    done.cancel();
+    rejectPromise(new RpcError("canceled"));
+  };
+  return promise;
 }
 
 class MembraneHook extends RefHook implements ClientHook {

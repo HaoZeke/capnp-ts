@@ -501,4 +501,49 @@ describe("membrane C++ semantics", () => {
     expect(policy.revocationWatcherCount()).toBe(0);
     still.release();
   });
+
+  test("revoking the outer membrane cancels a stream inside a nested one", async () => {
+    let aborted = false;
+    const slow: RpcServer = {
+      isStreaming() {
+        return true;
+      },
+      dispatch(_i, _m, _p, _r, ctx) {
+        ctx.allowCancellation();
+        ctx.signal.addEventListener("abort", () => {
+          aborted = true;
+        });
+        return new Promise<void>(() => {});
+      },
+    };
+    const outer = new RevocablePolicy();
+    const inner = new RevocablePolicy();
+    const wrapped = membrane(membrane(Client.local(slow), inner), outer);
+    const pending = wrapped.callStreaming(IFACE, 0);
+    outer.revoke(new RpcError("outer"));
+    await expect(pending).rejects.toThrow("outer");
+    expect(aborted).toBe(true);
+  });
+
+  test("canceling a membrane stream cancels the call inside", async () => {
+    let aborted = false;
+    const slow: RpcServer = {
+      isStreaming() {
+        return true;
+      },
+      dispatch(_i, _m, _p, _r, ctx) {
+        ctx.allowCancellation();
+        ctx.signal.addEventListener("abort", () => {
+          aborted = true;
+        });
+        return new Promise<void>(() => {});
+      },
+    };
+    const policy = new RevocablePolicy();
+    const wrapped = membrane(Client.local(slow), policy);
+    const pending = wrapped.callStreaming(IFACE, 0) as Promise<void> & { cancel(): void };
+    pending.cancel();
+    await expect(pending).rejects.toThrow("canceled");
+    expect(aborted).toBe(true);
+  });
 });
