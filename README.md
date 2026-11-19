@@ -62,6 +62,9 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
 - Cap'n Proto text-format encoder and decoder (`TextCodec`, `prettyPrint`,
   `stringify`, `encodeText`, `decodeText`, `splitTextMessages`) matching
   `capnp decode` pretty/short output and `capnp encode` literal syntax
+- Cap'n Proto compat JSON codec (`JsonCodec`, `encodeJson`, `decodeJson`,
+  `splitJsonMessages`) matching `capnp/compat/json.h` defaults and `$Json`
+  annotations (`name`, `flatten`, `discriminator`, `hex`, `base64`)
 - Traversal word budget (8 Mi words) and nesting depth limit (64), matching
   Cap'n C++ reader defaults (`DEFAULT_TRAVERSAL_WORDS` / `DEFAULT_DEPTH_LIMIT`;
   far hops and `getP` / `listGetP` accumulate depth)
