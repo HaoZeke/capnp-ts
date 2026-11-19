@@ -49,11 +49,15 @@ export interface Link {
 }
 
 /** Two connected vats; `a` has `serverA` as bootstrap and `b` has `serverB`. */
-export function link(serverA?: RpcServer | Client, serverB?: RpcServer | Client): Link {
+export function link(
+  serverA?: RpcServer | Client,
+  serverB?: RpcServer | Client,
+  options?: { streamWindow?: number },
+): Link {
   const pair = new MemoryTransportPair();
   const ta = tap(pair.a);
   const tb = tap(pair.b);
-  const a = new RpcConnection(ta, serverA);
+  const a = new RpcConnection(ta, serverA, undefined, options);
   const b = new RpcConnection(tb, serverB);
   const settle = async (): Promise<void> => {
     for (let quiet = 0; quiet < 3; ) {

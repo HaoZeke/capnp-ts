@@ -18,7 +18,6 @@ import {
   RETURN_PWORDS,
 } from "../src/rpc.capnp.ts";
 
-import { RpcStream, StreamError } from "../src/stream.ts";
 import { MemoryTransportPair } from "../src/transport.ts";
 import { RpcConnection, type RpcServer } from "../src/vat.ts";
 
@@ -111,89 +110,5 @@ describe("client questions", () => {
     // asked, which later pipelining would then trust.
     expect(client.isAnswered(77)).toBe(false);
     expect(client.answerContent(77)).toBeUndefined();
-  });
-});
-
-describe("stream flow control", () => {
-  test("the window bounds how many calls are outstanding at once", () => {
-    const server = new Doubler();
-    const { client, vat } = connectedPair(server);
-    client.sendBootstrap();
-    vat.pump();
-    client.pump();
-
-    const stream = new RpcStream(client, 2);
-    stream.send(0, 0n, 0, (p) => p.setU32(0, 1));
-    stream.send(0, 0n, 0, (p) => p.setU32(0, 2));
-    expect(stream.pending).toBe(2);
-
-    // The third send has to retire one before it can go.
-    vat.pump();
-    stream.send(0, 0n, 0, (p) => p.setU32(0, 3));
-    expect(stream.pending).toBeLessThanOrEqual(2);
-
-    vat.pump();
-    stream.finish();
-    expect(stream.pending).toBe(0);
-    expect(server.calls).toBe(3);
-  });
-
-  test("finish reports a call-level failure after draining the window", () => {
-    const server = new Doubler();
-    server.failFrom = 2;
-    const { client, vat } = connectedPair(server);
-    client.sendBootstrap();
-    vat.pump();
-    client.pump();
-
-    const stream = new RpcStream(client, 4);
-    stream.send(0, 0n, 0, (p) => p.setU32(0, 1));
-    stream.send(0, 0n, 0, (p) => p.setU32(0, 2));
-    stream.send(0, 0n, 0, (p) => p.setU32(0, 3));
-    vat.pump();
-
-    // The window still drains fully; finish is where the failure lands.
-    expect(() => stream.finish()).toThrow(StreamError);
-    expect(stream.pending).toBe(0);
-    expect(stream.isFailed).toBe(true);
-  });
-
-  test("once failed, a later send fails immediately", () => {
-    const server = new Doubler();
-    server.failFrom = 1;
-    const { client, vat } = connectedPair(server);
-    client.sendBootstrap();
-    vat.pump();
-    client.pump();
-
-    const stream = new RpcStream(client, 1);
-    stream.send(0, 0n, 0);
-    vat.pump();
-    // The second send retires the first, which failed.
-    expect(() => stream.send(0, 0n, 0)).toThrow(StreamError);
-    expect(stream.isFailed).toBe(true);
-  });
-
-  test("after finish reports a failure, a further send is refused", () => {
-    const server = new Doubler();
-    server.failFrom = 1;
-    const { client, vat } = connectedPair(server);
-    client.sendBootstrap();
-    vat.pump();
-    client.pump();
-
-    const stream = new RpcStream(client, 4);
-    stream.send(0, 0n, 0);
-    vat.pump();
-    expect(() => stream.finish()).toThrow(StreamError);
-    // The window is empty now, so this refusal can only come from the
-    // stream remembering it failed.
-    expect(stream.pending).toBe(0);
-    expect(() => stream.send(0, 0n, 0)).toThrow(StreamError);
-  });
-
-  test("a window below one is rejected", () => {
-    const { client } = connectedPair(new Doubler());
-    expect(() => new RpcStream(client, 0)).toThrow(StreamError);
   });
 });
