@@ -307,8 +307,37 @@ describe("Field.defaultValue walk", () => {
     );
     expect(src).toContain("ptr.getText(0, SINK_LABEL_DEFAULT)");
     expect(src).toContain("ptr.getData(1, SINK_PAYLOAD_DEFAULT)");
+    expect(src).toContain("const SINK_ORIGIN_DEFAULT_BYTES = new Uint8Array([");
+    expect(src).toContain("const SINK_SCORES_DEFAULT_BYTES = new Uint8Array([");
+    expect(src).toContain("p.kind === PtrKind.Null ? SINK_ORIGIN_DEFAULT_PTR : p");
+    expect(src).toContain("p.kind === PtrKind.Null ? SINK_SCORES_DEFAULT_PTR : p");
     expect(src).toContain("ptr.getF64(");
     expect(src).toContain("ptr.getBool(");
+
+    const scratchDir = join(repoRoot, ".tmp-codegen-tests");
+    mkdirSync(scratchDir, { recursive: true });
+    const outDir = mkdtempSync(join(scratchDir, "kitchen-defaults-"));
+    const outFile = join(outDir, "kitchen.ts");
+    try {
+      writeFileSync(outFile, src, "utf8");
+      const gen = await import(outFile);
+      const builder = new MessageBuilder();
+      builder.initRoot(gen.SINK_DWORDS, gen.SINK_PWORDS);
+      const sink = Message.fromFlat(builder.toFlat()).root();
+      const origin = gen.Sink_getOrigin(sink);
+      expect(origin.kind).toBe(PtrKind.Struct);
+      expect(origin.getF64(0)).toBeCloseTo(1.5);
+      expect(origin.getF64(8)).toBeCloseTo(2.5);
+      expect(origin.getF64(16)).toBeCloseTo(-3.5);
+      const scores = gen.Sink_getScores(sink);
+      expect(scores.kind).toBe(PtrKind.List);
+      expect(scores.listLen()).toBe(3);
+      expect(scores.listGetU16(0)).toBe(0);
+      expect(scores.listGetU16(1)).toBe(0);
+      expect(scores.listGetU16(2)).toBe(0);
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
   });
 
   test("synthetic float32 default emits getF32 with schema dflt", async () => {

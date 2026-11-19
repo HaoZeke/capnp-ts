@@ -355,6 +355,22 @@ function isPointerValue(v: ValueAst): boolean {
   );
 }
 
+function fieldPointerDefaultBytes(field: FieldAst): number[] | undefined {
+  const slot = field.slot;
+  if (!slot || !slot.hadExplicitDefault) return undefined;
+  const dv = slot.defaultValue;
+  if (!dv) return undefined;
+  if (
+    dv.which === "list" ||
+    dv.which === "struct" ||
+    dv.which === "interface" ||
+    dv.which === "anyPointer"
+  ) {
+    return dv.pointerBytes && dv.pointerBytes.length > 0 ? dv.pointerBytes : undefined;
+  }
+  return undefined;
+}
+
 function emitConst(node: NodeAst, lines: string[]): void {
   const c = node.const;
   if (!c) return;
@@ -446,6 +462,7 @@ function emitFieldGetter(
   const dv = field.slot.defaultValue;
   const dfltExpr = scalarDefaultExpr(t.which, dv);
   const byteOff = dataByteOffset(t.which, off);
+  const ptrDefaultBytes = fieldPointerDefaultBytes(field);
   const typeFmt = formatType(t);
   if (
     typeFmt.includes("brand{") ||
@@ -606,12 +623,25 @@ function emitFieldGetter(
         retType = anyTy.typeName;
         if (anyTy.genericParam) generic = `<${anyTy.genericParam}>`;
       }
-      lines.push(
-        `export function ${fn}${generic}(ptr: Ptr): ${retType} {`,
-        `  return ptr.getP(${off}) as ${retType};`,
-        `}`,
-        ``,
-      );
+      if (ptrDefaultBytes && ptrDefaultBytes.length > 0) {
+        const dflt = `${upperSnake(typeName)}_${upperSnake(fname)}_DEFAULT`;
+        lines.push(
+          `const ${dflt}_BYTES = new Uint8Array([${ptrDefaultBytes.join(", ")}]);`,
+          `const ${dflt}_PTR = Message.fromFlat(${dflt}_BYTES).root();`,
+          `export function ${fn}${generic}(ptr: Ptr): ${retType} {`,
+          `  const p = ptr.getP(${off});`,
+          `  return (p.kind === PtrKind.Null ? ${dflt}_PTR : p) as ${retType};`,
+          `}`,
+          ``,
+        );
+      } else {
+        lines.push(
+          `export function ${fn}${generic}(ptr: Ptr): ${retType} {`,
+          `  return ptr.getP(${off}) as ${retType};`,
+          `}`,
+          ``,
+        );
+      }
       if (t.which === "list") {
         // Element access helpers for List(Struct|Text|Data).
         const elem = t.elementType;
@@ -628,11 +658,11 @@ function emitFieldGetter(
                 : "Ptr";
           lines.push(
             `export function ${fn}Len(ptr: Ptr): number {`,
-            `  return ptr.getP(${off}).listLen();`,
+            `  return ${fn}(ptr).listLen();`,
             `}`,
             ``,
             `export function ${fn}At(ptr: Ptr, index: number): ${elemType} {`,
-            `  return ptr.getP(${off}).listGetP(index) as ${elemType};`,
+            `  return ${fn}(ptr).listGetP(index) as ${elemType};`,
             `}`,
             ``,
           );
@@ -641,11 +671,11 @@ function emitFieldGetter(
           // downgrade (list evolution); never listGetP(i).getText(0).
           lines.push(
             `export function ${fn}Len(ptr: Ptr): number {`,
-            `  return ptr.getP(${off}).listLen();`,
+            `  return ${fn}(ptr).listLen();`,
             `}`,
             ``,
             `export function ${fn}At(ptr: Ptr, index: number): string {`,
-            `  return ptr.getP(${off}).listGetText(index);`,
+            `  return ${fn}(ptr).listGetText(index);`,
             `}`,
             ``,
           );
@@ -1070,9 +1100,17 @@ export function emitModuleSource(
     importAliases,
   };
 
-  const needsMessageImport = nodes.some(
-    (n) => n.which === "const" && !!n.const && isPointerValue(n.const.value),
+  const hasPointerFieldDefaults = nodes.some(
+    (n) =>
+      n.which === "struct" &&
+      (n.struct?.fields ?? []).some((f) => !!fieldPointerDefaultBytes(f)),
   );
+  const needsMessageImport =
+    hasPointerFieldDefaults ||
+    nodes.some(
+      (n) => n.which === "const" && !!n.const && isPointerValue(n.const.value),
+    );
+  const needsPtrKindImport = hasPointerFieldDefaults;
   const needsAnyPointerWrappers = nodes.some(
     (n) =>
       n.which === "struct" &&
@@ -1107,8 +1145,13 @@ export function emitModuleSource(
       ? `import type { Ptr, StructBuilder } from "@haozeke/capnp";`
       : `import type { Ptr } from "@haozeke/capnp";`,
   );
-  if (needsMessageImport) {
-    lines.push(`import { Message } from "@haozeke/capnp";`);
+  const runtimeValueImports: string[] = [];
+  if (needsMessageImport) runtimeValueImports.push("Message");
+  if (needsPtrKindImport) runtimeValueImports.push("PtrKind");
+  if (runtimeValueImports.length > 0) {
+    lines.push(
+      `import { ${runtimeValueImports.join(", ")} } from "@haozeke/capnp";`,
+    );
   }
   for (const imp of externalImports) {
     lines.push(
