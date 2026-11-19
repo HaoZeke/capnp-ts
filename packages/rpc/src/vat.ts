@@ -1946,8 +1946,12 @@ export class RpcConnection implements RemoteHost {
     this.gone = error.type === "disconnected" ? error : new RpcError(error.message, "disconnected");
     const reason = this.gone;
 
+    // A Return can set `returned` and then abort before the promise is
+    // settled (a tail call answered with `results`, for example). C++
+    // rejects every question that still has a fulfiller, and the protocol
+    // says every outstanding question fails on disconnect.
     for (const q of this.questions.values()) {
-      if (!q.returned) this.failQuestion(q, reason);
+      if (q.call.result.state === "pending") this.failQuestion(q, reason);
     }
     for (const embargo of this.embargoes.values()) embargo.reject(reason);
     this.embargoes.clear();
