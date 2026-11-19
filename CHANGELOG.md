@@ -19,22 +19,26 @@ Pre-1.0 minor releases may include breaking API changes.
   methods return promises, and `StreamError` is gone: a failed stream
   call rejects with the call's own error.
 - A `senderLoopback` `Disembargo` aimed at an object that does not point
-  back at the sender now aborts the connection, as the protocol says,
-  instead of being echoed.
+  back at the sender, an unknown `receiverLoopback` embargo id, and
+  over-releasing an export now abort the connection, as capnp-C++ does.
 
 ### Added
 
 - RPC: `Client`, `RpcPromise`, local, queued and broken capabilities,
   promise pipelining on local and remote calls, `Resolve` and `Disembargo`
   in both directions, call cancellation (`Finish`, `allowCancellation`,
-  `CallContext.signal`), `Abort` and disconnect handling,
-  `takeFromOtherQuestion`, `Unimplemented` handling, `sendJoin`.
-- RPC streaming: a byte-window flow controller, serialised server-side
-  stream calls that break the capability on failure, and error
-  propagation, after capnp-C++.
-- RPC membranes, ported from `capnp/membrane.h`: `membrane`,
-  `reverseMembrane`, `MembranePolicy`, `RevocablePolicy`,
-  `copyIntoMembrane` and `copyOutOfMembrane`.
+  `CallContext.signal`, `Return.canceled`), `Abort` and disconnect handling,
+  outgoing and incoming tail calls (`CallContext.tailCall`,
+  `sendResultsTo.yourself`, `takeFromOtherQuestion`), `Unimplemented`
+  handling, `sendJoin`.
+- RPC streaming: an adaptive byte-window flow controller
+  (`AdaptiveStreamWindow`, `WindowGetter`, `Transport.getSendBufferSize`),
+  serialised server-side stream calls that break the capability on failure,
+  and error propagation, after capnp-C++.
+- RPC membranes, ported from `capnp/membrane.h` with the C++
+  `membrane-test.c++` suite: `membrane`, `reverseMembrane`,
+  `MembranePolicy`, `RevocablePolicy`, `copyIntoMembrane` and
+  `copyOutOfMembrane`.
 - RPC level 2: `savePersistent` and `servePersistent` for capnp-C++'s
   `Persistent` interface; the docs state what C++ leaves unimplemented at
   levels 2, 3 and 4.
