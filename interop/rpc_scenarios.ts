@@ -65,6 +65,15 @@ const scenarios: Record<string, () => Promise<void>> = {
     counter.release();
   },
 
+  async nullpipeline() {
+    // Pipelining onto a null capability must fail cleanly without sending a
+    // Disembargo that would make capnp-C++ abort the connection.
+    const missing = echo(M.echoCap, undefined, 0, 1).pipeline(0);
+    await assert.rejects(Promise.resolve(inc(missing, 1)));
+    assert.equal(await u32(echo(M.ping, arg(10), 1, 0)), 11);
+    missing.release();
+  },
+
   async promise() {
     const reply = echo(M.makePromise);
     const results = await reply;
@@ -255,6 +264,30 @@ const scenarios: Record<string, () => Promise<void>> = {
       Promise.resolve(sink.call(SINK_INTERFACE_ID, Sink_methods.done.ordinal, undefined, 0, 0)),
       /sink full/,
     );
+    sink.release();
+  },
+
+  async pipelinedstream() {
+    // Stream through a pipelined Sink before openSink resolves; errors must
+    // survive PromiseClient resolution onto the ImportClient.
+    const sink = echo(
+      M.openSink,
+      ((p: StructBuilder) => p.setU32(0, 3)) as never,
+      1,
+      0,
+    ).pipeline(0);
+    const stream = new RpcStream(sink);
+    const sends = Array.from({ length: 12 }, () =>
+      stream.send(
+        SINK_INTERFACE_ID,
+        Sink_methods.write.ordinal,
+        (p) => p.setData(0, new Uint8Array(64)),
+        0,
+        1,
+      ),
+    );
+    await Promise.allSettled(sends);
+    await assert.rejects(stream.finish(), /sink full/);
     sink.release();
   },
 
