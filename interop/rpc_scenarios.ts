@@ -9,7 +9,7 @@ import { connect, type Socket } from "node:net";
 import { strict as assert } from "node:assert";
 import type { StructBuilder } from "@haozeke/capnp";
 
-import { Client, RpcError, RpcStream, type RpcConnection } from "../packages/rpc/src/index.ts";
+import { Client, membrane, RevocablePolicy, RpcError, RpcStream, type RpcConnection } from "../packages/rpc/src/index.ts";
 import type { ImportClient } from "../packages/rpc/src/remote.ts";
 import {
   attach,
@@ -255,6 +255,52 @@ const scenarios: Record<string, () => Promise<void>> = {
       /sink full/,
     );
     sink.release();
+  },
+
+  async membrane() {
+    // A membrane around the C++ peer's bootstrap capability.
+    const policy = new RevocablePolicy();
+    const outside = membrane(boot.dup(), policy);
+    const call = (c: Client, m: { ordinal: number }, fill?: (p: StructBuilder) => void, dw = 0, pw = 0) =>
+      c.call(ECHO_INTERFACE_ID, m.ordinal, fill as never, dw, pw);
+
+    assert.equal(await u32(call(outside, M.ping, arg(1), 1, 0)), 2);
+
+    // A capability that comes back through the wire is the original.
+    const mine = Client.local(new CounterImpl());
+    const echoed = await call(
+      outside,
+      M.echoCap,
+      ((p: StructBuilder, b: { setCap(s: StructBuilder, i: number, h: unknown): void }) =>
+        b.setCap(p, 0, mine.hook.addRef())) as never,
+      0,
+      1,
+    );
+    assert.equal(echoed.getCap(echoed.content.getP(0)), mine.hook);
+
+    // A capability the peer returns is behind the membrane too.
+    const made = await call(outside, M.makeCounter);
+    const counter = new Client(made.getCap(made.content.getP(0)));
+    assert.equal(await u32(inc(counter, 1)), 2);
+
+    // Revocation cancels what is in flight, across the wire, and cuts
+    // every capability that came through.
+    const before = (await echo(M.stats)).content.getU32(0);
+    const pending = call(outside, M.slow);
+    await u32(echo(M.ping, arg(0), 1, 0));
+    policy.revoke("access withdrawn");
+    await assert.rejects(Promise.resolve(pending), /access withdrawn/);
+    await assert.rejects(Promise.resolve(inc(counter, 2)), /access withdrawn/);
+    await assert.rejects(Promise.resolve(call(outside, M.ping, arg(1), 1, 0)), /access withdrawn/);
+    let cancelled = before;
+    for (let i = 0; i < 50 && cancelled === before; i++) {
+      await wait(10);
+      cancelled = (await echo(M.stats)).content.getU32(0);
+    }
+    assert.equal(cancelled, before + 1, "the peer never saw the revoked call canceled");
+    await u32(echo(M.unblock));
+    // The peer is still usable through the unwrapped capability.
+    assert.equal(await u32(echo(M.ping, arg(5), 1, 0)), 6);
   },
 
   async disconnect() {
