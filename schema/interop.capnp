@@ -32,7 +32,8 @@ interface Echo {
   # Blocks until unblock and cannot be canceled.
   slowUncancelable @15 () -> (n :UInt32);
   die @16 ();
-  openSink @17 () -> (sink :Sink);
+  # failAfter writes succeed, then every write fails; 0 never fails.
+  openSink @17 (failAfter :UInt32) -> (sink :Sink);
 }
 
 interface Sink {

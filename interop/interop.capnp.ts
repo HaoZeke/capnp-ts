@@ -181,7 +181,7 @@ export const Echo_methods = {
   resolveHeld: { ordinal: 14, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0 },
   slowUncancelable: { ordinal: 15, paramsDwords: 0, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0 },
   die: { ordinal: 16, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0 },
-  openSink: { ordinal: 17, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1 },
+  openSink: { ordinal: 17, paramsDwords: 1, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1 },
 } as const;
 
 /** Calls Echo methods on an imported capability. */
