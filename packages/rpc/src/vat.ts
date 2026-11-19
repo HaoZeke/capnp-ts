@@ -41,7 +41,7 @@ import {
   type TailHandler,
   toRpcError,
 } from "./capability.ts";
-import { DEFAULT_STREAM_WINDOW } from "./flow.ts";
+import { AdaptiveStreamWindow, WindowFlowController, type WindowGetter } from "./flow.ts";
 import {
   ImportClient,
   PipelineClient,
@@ -436,19 +436,50 @@ export class RpcConnection implements RemoteHost {
   private nextEmbargoId = 0;
   private gone: RpcError | undefined;
 
-  /** Bytes of stream calls in flight per capability before a sender must wait. */
-  readonly streamWindow: number;
+  private readonly windowGetter: WindowGetter;
 
   constructor(
     private readonly transport: Transport,
     bootstrap?: RpcServer | Client,
     vat?: Vat,
-    options: { streamWindow?: number } = {},
+    options: { streamWindow?: number | (() => number) | WindowGetter } = {},
   ) {
     this.vat = vat ?? new Vat();
-    this.streamWindow = options.streamWindow ?? DEFAULT_STREAM_WINDOW;
+    const w = options.streamWindow;
+    if (typeof w === "number") {
+      this.windowGetter = { getWindow: () => w };
+    } else if (typeof w === "function") {
+      this.windowGetter = { getWindow: w };
+    } else if (w !== undefined) {
+      this.windowGetter = w;
+    } else {
+      const adaptive = new AdaptiveStreamWindow();
+      let useTransportBuf = transport.getSendBufferSize !== undefined;
+      this.windowGetter = {
+        getWindow: () => {
+          if (useTransportBuf) {
+            const buf = transport.getSendBufferSize?.();
+            if (buf !== undefined && buf > 0) return buf;
+            useTransportBuf = false;
+          }
+          return adaptive.getWindow();
+        },
+        onAck: (bytes, rttMs, saturated) => {
+          if (!useTransportBuf) adaptive.onAck(bytes, rttMs, saturated);
+        },
+      };
+    }
     if (bootstrap instanceof Client) this.bootstrapHook = bootstrap.hook;
     else if (bootstrap !== undefined) this.bootstrapHook = this.hookFor(bootstrap);
+  }
+
+  /** Current stream window in bytes before a sender must wait. */
+  get streamWindow(): number {
+    return this.windowGetter.getWindow();
+  }
+
+  createFlowController(): WindowFlowController {
+    return new WindowFlowController(this.windowGetter);
   }
 
   get disconnected(): RpcError | undefined {
