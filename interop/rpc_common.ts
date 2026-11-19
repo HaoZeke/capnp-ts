@@ -173,10 +173,12 @@ export class EchoImpl implements RpcServer {
       case m.callBack.ordinal: {
         const cap = new Client(ctx.getCap(params.getP(0)));
         const n = params.getU32(0);
-        return cap.call(COUNTER_INTERFACE_ID, 0, (p) => p.setU32(0, n)).then((out) => {
-          results.setU32(0, out.content.getU32(0));
-          cap.release();
-        });
+        return cap
+          .call(COUNTER_INTERFACE_ID, 0, (p) => p.setU32(0, n))
+          .then((out) => {
+            results.setU32(0, out.content.getU32(0));
+          })
+          .finally(() => cap.release());
       }
       case m.echoCap.ordinal:
         ctx.setResultCap(ctx.initResults(0, 1), 0, ctx.getCap(params.getP(0)));
@@ -196,9 +198,7 @@ export class EchoImpl implements RpcServer {
         return;
       case m.callHeld.ordinal: {
         const n = params.getU32(0);
-        return this.held!.call(COUNTER_INTERFACE_ID, 0, (p) => p.setU32(0, n)).then((out) => {
-          results.setU32(0, out.content.getU32(0));
-        });
+        return ctx.tailCall(this.held!, COUNTER_INTERFACE_ID, 0, (p) => p.setU32(0, n), 1, 0);
       }
       case m.promiseOfHeld.ordinal: {
         const promise = Client.fromPromise(
