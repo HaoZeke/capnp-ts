@@ -23,6 +23,7 @@ import {
   Message,
   Message_getFinish,
   Message_getReturn,
+  Message_which,
   MessageTarget,
   PAYLOAD_DWORDS,
   PAYLOAD_PWORDS,
@@ -575,5 +576,57 @@ describe("results sent elsewhere", () => {
     expect(a.isAnswered(mine)).toBe(true);
     expect(a.isFailed(mine)).toBe(false);
     expect(a.answerContent(mine)?.getU32(0)).toBe(21);
+  });
+});
+
+describe("malformed input", () => {
+  test("a frame that cannot be read aborts the connection instead of throwing", () => {
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.b, new Counter());
+    pair.a.send(new Uint8Array([1, 2, 3]));
+    expect(() => vat.pump()).not.toThrow();
+    expect(vat.disconnected?.message).toContain("protocol error");
+    expect(Message_which(CapnpMessage.fromFlat(pair.a.receive()!).root())).toBe(Message.abort);
+  });
+});
+
+describe("promise chains shorten", () => {
+  test("a promise that resolves to another promise ends at the real target", async () => {
+    const target = new Counter();
+    let resolveFirst!: (c: Client) => void;
+    let resolveSecond!: (c: Client) => void;
+    const second = Client.fromPromise(new Promise<Client>((r) => (resolveSecond = r)));
+    const server: RpcServer = {
+      dispatch(_i, _m, _p, _r, ctx) {
+        const first = Client.fromPromise(new Promise<Client>((r) => (resolveFirst = r)));
+        ctx.setResultCap(ctx.initResults(0, 1), 0, first.hook);
+      },
+    };
+    const { a, b, ta, tb, settle } = link(undefined, server);
+    const reply = a.bootstrap().call(IFACE, 0);
+    await settle();
+    const results = await reply;
+    const promise = new Client(results.getCap(results.content.getP(0)));
+    const early = promise.call(IFACE, 0, arg(1));
+
+    resolveFirst(second);
+    await settle();
+    resolveSecond(Client.local(target));
+    await settle();
+    await promise.whenResolved();
+    await early;
+
+    // The chain collapsed: what we hold now is the import of the target,
+    // not a promise standing in front of another promise.
+    const end = promise.resolved();
+    expect(end.getResolved()).toBeUndefined();
+    expect(end.whenMoreResolved()).toBeUndefined();
+    expect(target.seen).toEqual([1]);
+    const late = promise.call(IFACE, 0, arg(2));
+    await settle();
+    expect((await late).content.getU32(0)).toBe(3);
+    expect(tb.sent.filter((k) => k === "resolve").length).toBe(2);
+    expect(ta.sent).not.toContain("abort");
+    expect(b.disconnected).toBeUndefined();
   });
 });
