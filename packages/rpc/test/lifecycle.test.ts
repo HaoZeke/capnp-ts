@@ -633,6 +633,57 @@ describe("protocol errors", () => {
     expect(b.disconnected).toBeInstanceOf(RpcError);
     expect(a.disconnected?.type).toBe("disconnected");
   });
+
+  test("releasing an unknown export id aborts the connection", async () => {
+    const { a, b, tb, settle } = link(undefined, new Counter());
+    a.bootstrap();
+    await settle();
+    a.sendRelease(99, 1);
+    await settle();
+    expect(tb.sent).toContain("abort");
+    expect(b.disconnected?.message).toMatch(/invalid export/i);
+    expect(a.disconnected?.type).toBe("disconnected");
+  });
+
+  test("dropping an export refcount below zero aborts the connection", async () => {
+    const { a, b, tb, settle } = link(undefined, new Counter());
+    const boot = a.bootstrap();
+    await settle();
+    // Export 0 has refcount 1; releasing 2 is a protocol error.
+    a.sendRelease(0, 2);
+    await settle();
+    expect(tb.sent).toContain("abort");
+    expect(b.disconnected?.message).toMatch(/below zero/i);
+    expect(a.disconnected?.type).toBe("disconnected");
+    boot.release();
+  });
+
+  test("double-releasing via Release and Finish(releaseResultCaps=true) aborts", () => {
+    const pair = new MemoryTransportPair();
+    const server = new Factory();
+    const vat = new RpcConnection(pair.b, server);
+    const peer = new RpcConnection(pair.a);
+    const qBoot = peer.sendBootstrap();
+    vat.pump();
+    peer.pump();
+    const qCall = peer.sendCall(peer.answerCapId(qBoot), IFACE, 0);
+    vat.pump();
+    peer.pump();
+    const capId = peer.answerCapId(qCall);
+    // Explicitly release the returned cap AND send Finish with releaseResultCaps = true.
+    peer.sendRelease(capId, 1);
+    const b = new MessageBuilder();
+    const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+    root.setU16(0, Message.finish);
+    const fin = root.initStruct(0, 1, 0);
+    fin.setU32(0, qCall);
+    fin.setBool(32, true, true); // releaseResultCaps = true
+    pair.a.send(b.toFlat());
+    vat.pump();
+    expect(vat.disconnected?.message).toMatch(/invalid export|below zero/i);
+    const reply = CapnpMessage.fromFlat(pair.a.receive()!).root();
+    expect(Message_which(reply)).toBe(Message.abort);
+  });
 });
 
 describe("shutdown", () => {
