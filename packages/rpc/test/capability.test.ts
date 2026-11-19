@@ -152,6 +152,21 @@ describe("promise pipelining on local calls", () => {
     release();
     expect((await out).content.getU32(0)).toBe(5);
   });
+
+  test("local tailCall forwards results and pipelined capabilities", async () => {
+    const factory = new Factory();
+    const proxy: RpcServer = {
+      dispatch(_i, _m, _p, _r, ctx) {
+        const target = Client.local(factory);
+        return ctx.tailCall(target, IFACE, 0).finally(() => target.release());
+      },
+    };
+    const p = Client.local(proxy);
+    const counter = p.call(IFACE, 0).pipeline(0);
+    const out = await counter.call(IFACE, 0, arg(11));
+    expect(out.content.getU32(0)).toBe(12);
+    expect(factory.made[0]!.seen).toEqual([11]);
+  });
 });
 
 describe("broken capabilities", () => {

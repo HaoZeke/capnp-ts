@@ -184,6 +184,10 @@ export class ImportClient extends RefHook implements RpcClientHook {
   }
 
   call(interfaceId: bigint, methodId: number, params: Payload, opts?: CallOptions): CallState {
+    if (opts?.tailHandler !== undefined && !opts.sendResultsToYourself) {
+      const tail = opts.tailHandler.tryTailCall(this, interfaceId, methodId, params);
+      if (tail !== undefined) return tail;
+    }
     return this.host.sendCallTo((t) => this.writeTarget(t), interfaceId, methodId, params, opts);
   }
 
@@ -267,6 +271,10 @@ export class PipelineClient extends RefHook implements RpcClientHook {
   }
 
   call(interfaceId: bigint, methodId: number, params: Payload, opts?: CallOptions): CallState {
+    if (opts?.tailHandler !== undefined && !opts.sendResultsToYourself) {
+      const tail = opts.tailHandler.tryTailCall(this, interfaceId, methodId, params);
+      if (tail !== undefined) return tail;
+    }
     return this.host.sendCallTo((t) => this.writeTarget(t), interfaceId, methodId, params, opts);
   }
 
@@ -356,6 +364,10 @@ export class PromiseClient extends RefHook implements RpcClientHook {
 
   call(interfaceId: bigint, methodId: number, params: Payload, opts?: CallOptions): CallState {
     this.receivedCall = true;
+    if (!this.resolved && opts?.tailHandler !== undefined && !opts.sendResultsToYourself) {
+      const tail = opts.tailHandler.tryTailCall(this, interfaceId, methodId, params);
+      if (tail !== undefined) return tail;
+    }
     return this.cap.call(interfaceId, methodId, params, opts);
   }
 
