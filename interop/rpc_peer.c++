@@ -33,6 +33,30 @@ public:
 	}
 };
 
+class SinkImpl final : public Sink::Server {
+public:
+	SinkImpl(uint32_t failAfter) : failAfter(failAfter) {}
+
+	kj::Promise<void> write(WriteContext ctx) override {
+		++count;
+		if (failAfter > 0 && count > failAfter) {
+			kj::throwFatalException(KJ_EXCEPTION(OVERLOADED, "sink full"));
+		}
+		total += ctx.getParams().getData().size();
+		return kj::READY_NOW;
+	}
+
+	kj::Promise<void> done(DoneContext ctx) override {
+		ctx.getResults().setTotal(total);
+		return kj::READY_NOW;
+	}
+
+private:
+	uint32_t failAfter;
+	uint32_t count = 0;
+	uint64_t total = 0;
+};
+
 class EchoImpl final : public Echo::Server {
 public:
 	kj::Promise<void> ping(PingContext ctx) override {
@@ -140,6 +164,11 @@ public:
 			(*f)->fulfill(kj::cp(held));
 			heldFulfiller = nullptr;
 		}
+		return kj::READY_NOW;
+	}
+
+	kj::Promise<void> openSink(OpenSinkContext ctx) override {
+		ctx.getResults().setSink(kj::heap<SinkImpl>(ctx.getParams().getFailAfter()));
 		return kj::READY_NOW;
 	}
 
@@ -287,6 +316,49 @@ void runClient(const std::string &addr, const std::vector<std::string> &only) {
 		secondP.wait(ws);
 		KJ_REQUIRE(seen[0] == 1 && seen[1] == 2, "calls through a resolving promise reordered");
 		ok("embargo");
+	}
+
+	if (wants(only, "stream")) {
+		auto open = echo.openSinkRequest();
+		open.setFailAfter(0);
+		auto sink = open.send().getSink();
+		std::vector<unsigned char> block(4096, 7);
+		const unsigned writes = 500;
+		for (unsigned i = 0; i < writes; i++) {
+			auto w = sink.writeRequest();
+			w.setData(kj::ArrayPtr<const unsigned char>(block.data(), block.size()));
+			w.send().wait(ws);
+		}
+		KJ_REQUIRE(sink.doneRequest().send().wait(ws).getTotal() == uint64_t(writes) * block.size());
+		ok("stream");
+	}
+
+	if (wants(only, "streamfail")) {
+		auto open = echo.openSinkRequest();
+		open.setFailAfter(10);
+		auto sink = open.send().getSink();
+		std::vector<unsigned char> block(64, 1);
+		bool sendFailed = false;
+		KJ_IF_MAYBE(e, kj::runCatchingExceptions([&]() {
+			for (unsigned i = 0; i < 100; i++) {
+				auto w = sink.writeRequest();
+				w.setData(kj::ArrayPtr<const unsigned char>(block.data(), block.size()));
+				w.send().wait(ws);
+				// Let the event loop run so the Returns can arrive.
+				if (i % 10 == 9) echo.pingRequest().send().wait(ws);
+			}
+		})) {
+			sendFailed = true;
+			KJ_REQUIRE(std::string(e->getDescription().cStr()).find("sink full") != std::string::npos,
+			           e->getDescription());
+		}
+		KJ_REQUIRE(sendFailed, "writes kept succeeding after the sink failed");
+		bool doneFailed = false;
+		KJ_IF_MAYBE(e, kj::runCatchingExceptions([&]() { sink.doneRequest().send().wait(ws); })) {
+			doneFailed = true;
+		}
+		KJ_REQUIRE(doneFailed, "done() succeeded on a failed stream");
+		ok("streamfail");
 	}
 
 	if (wants(only, "abort")) {

@@ -9,11 +9,14 @@ import { connect, type Socket } from "node:net";
 import { strict as assert } from "node:assert";
 import type { StructBuilder } from "@haozeke/capnp";
 
-import { Client, RpcError, type RpcConnection } from "../packages/rpc/src/index.ts";
+import { Client, RpcError, RpcStream, type RpcConnection } from "../packages/rpc/src/index.ts";
+import type { ImportClient } from "../packages/rpc/src/remote.ts";
 import {
   attach,
   COUNTER_INTERFACE_ID,
   CounterImpl,
+  SINK_INTERFACE_ID,
+  Sink_methods,
   Echo_methods as M,
   ECHO_INTERFACE_ID,
 } from "./rpc_common.ts";
@@ -186,6 +189,72 @@ const scenarios: Record<string, () => Promise<void>> = {
     const second = inc(promise, 2);
     await Promise.all([first, second]);
     assert.deepEqual(order, [1, 2], "calls through a resolving promise reordered");
+  },
+
+  async stream() {
+    const results = await echo(
+      M.openSink,
+      ((p: StructBuilder) => p.setU32(0, 0)) as never,
+      1,
+      0,
+    );
+    const sink = new Client(results.getCap(results.content.getP(0)));
+    const stream = new RpcStream(sink);
+    const block = new Uint8Array(4096).fill(7);
+    const writes = 500;
+    for (let i = 0; i < writes; i++) {
+      await stream.send(
+        SINK_INTERFACE_ID,
+        Sink_methods.write.ordinal,
+        (p) => p.setData(0, block),
+        0,
+        1,
+      );
+    }
+    await stream.finish();
+    const total = await sink.call(SINK_INTERFACE_ID, Sink_methods.done.ordinal, undefined, 0, 0);
+    assert.equal(total.content.getU64(0), BigInt(writes * block.length));
+
+    // The sender paced itself to the receiver rather than queueing 2 MB.
+    const flow = (sink.resolved() as ImportClient).flow;
+    assert.ok(flow.waits > 0, "the window never filled");
+    assert.ok(flow.peakInFlight <= conn.streamWindow + 2 * 4200, `peak ${flow.peakInFlight}`);
+    sink.release();
+  },
+
+  async streamfail() {
+    const results = await echo(
+      M.openSink,
+      ((p: StructBuilder) => p.setU32(0, 10)) as never,
+      1,
+      0,
+    );
+    const sink = new Client(results.getCap(results.content.getP(0)));
+    const stream = new RpcStream(sink);
+    let failure: unknown;
+    try {
+      for (let i = 0; i < 200 && failure === undefined; i++) {
+        await stream.send(
+          SINK_INTERFACE_ID,
+          Sink_methods.write.ordinal,
+          (p) => p.setData(0, new Uint8Array(64)),
+          0,
+          1,
+        );
+        if (i % 20 === 19) await wait(10);
+      }
+    } catch (e) {
+      failure = e;
+    }
+    assert.ok(failure instanceof RpcError, "writes kept succeeding after the sink failed");
+    assert.match((failure as RpcError).message, /sink full/);
+    assert.equal((failure as RpcError).type, "overloaded");
+    await assert.rejects(stream.finish(), /sink full/);
+    await assert.rejects(
+      Promise.resolve(sink.call(SINK_INTERFACE_ID, Sink_methods.done.ordinal, undefined, 0, 0)),
+      /sink full/,
+    );
+    sink.release();
   },
 
   async disconnect() {
