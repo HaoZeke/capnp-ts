@@ -59,6 +59,9 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
 - Canonical form (`canonicalize` / `canonicalizeFlat`) byte-identical to
   `capnp convert binary:canonical` on AddressBook
   (`canonicalizeFlat(addressbook.bin) == addressbook.canonical.bin`, 272 B)
+- Cap'n Proto text-format encoder and decoder (`TextCodec`, `prettyPrint`,
+  `stringify`, `encodeText`, `decodeText`, `splitTextMessages`) matching
+  `capnp decode` pretty/short output and `capnp encode` literal syntax
 - Traversal word budget (8 Mi words) and nesting depth limit (64), matching
   Cap'n C++ reader defaults (`DEFAULT_TRAVERSAL_WORDS` / `DEFAULT_DEPTH_LIMIT`;
   far hops and `getP` / `listGetP` accumulate depth)
