@@ -560,7 +560,7 @@ function decodeValue(v: Ptr): ValueAst {
     case TYPE_INT32:
       return { which: "int32", value: v.getU32(4) | 0 };
     case TYPE_INT64:
-      return { which: "int64", value: v.getU64(8) };
+      return { which: "int64", value: BigInt.asIntN(64, v.getU64(8)) };
     case TYPE_UINT8:
       return { which: "uint8", value: v.getU8(2) };
     case TYPE_UINT16:
