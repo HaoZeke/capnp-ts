@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -518,6 +518,27 @@ describe("CLI empty input, multi-message flat, and eval annotations", () => {
     "eval -ojson drops annotations and convert applies them",
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "capnp-ann-"));
+      const importRoot = join(dir, "imports");
+      mkdirSync(join(importRoot, "capnp", "compat"), { recursive: true });
+      // Distro capnproto 1.1.0 ships no standard schemas. `capnp eval` drops
+      // annotations and still exits 0, but `capnp compile` and `capnp convert`
+      // need /capnp/compat/json.capnp. This CLI compiles. Give both tools the
+      // same import root, with the annotation ids the JSON codec looks up, so
+      // the comparison does not depend on the distro layout.
+      writeFileSync(
+        join(importRoot, "capnp", "c++.capnp"),
+        `@0xbdf87d7bb8304e81;
+annotation namespace(file): Text;
+`,
+      );
+      writeFileSync(
+        join(importRoot, "capnp", "compat", "json.capnp"),
+        `@0x8ef99297a43a5e34;
+$import "/capnp/c++.capnp".namespace("capnp::json");
+annotation name @0xfa5b1fd61c2e7c3d (field, enumerant, method, group, union) :Text;
+annotation hex @0xf061e22f0ae5c7b5 (field) :Void;
+`,
+      );
       const schemaPath = join(dir, "ann.capnp");
       writeFileSync(
         schemaPath,
@@ -530,19 +551,20 @@ struct Box {
 const sample :Box = (renamed = "hi", blob = 0x"dead");
 `,
       );
+      const withImport = (args: string[]): string[] => [`-I${importRoot}`, ...args];
       try {
         const text = new TextEncoder().encode(
           '(renamed = "hi", blob = 0x"dead")\n',
         );
         const cases: { args: string[]; stdin?: Uint8Array }[] = [
-          { args: ["eval", "-ojson", schemaPath, "sample"] },
-          { args: ["eval", "--short", "-ojson", schemaPath, "sample"] },
+          { args: withImport(["eval", "-ojson", schemaPath, "sample"]) },
+          { args: withImport(["eval", "--short", "-ojson", schemaPath, "sample"]) },
           {
-            args: ["convert", "text:json", schemaPath, "Box"],
+            args: withImport(["convert", "text:json", schemaPath, "Box"]),
             stdin: text,
           },
           {
-            args: ["convert", "--short", "text:json", schemaPath, "Box"],
+            args: withImport(["convert", "--short", "text:json", schemaPath, "Box"]),
             stdin: text,
           },
         ];
@@ -554,13 +576,13 @@ const sample :Box = (renamed = "hi", blob = 0x"dead");
           expect(ours.stdout).toEqual(ref.stdout);
         }
         const evalJson = new TextDecoder().decode(
-          (await execCliInMemory(["eval", "-ojson", schemaPath, "sample"]))
+          (await execCliInMemory(withImport(["eval", "-ojson", schemaPath, "sample"])))
             .stdout,
         );
         const convertJson = new TextDecoder().decode(
           (
             await execCliInMemory(
-              ["convert", "text:json", schemaPath, "Box"],
+              withImport(["convert", "text:json", schemaPath, "Box"]),
               text,
             )
           ).stdout,
