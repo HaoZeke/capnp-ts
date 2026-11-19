@@ -292,6 +292,74 @@ void runClient(const std::string &addr, const std::vector<std::string> &only) {
 		ok("callback");
 	}
 
+	if (wants(only, "capfail")) {
+		// Pass a capability parameter to a call that throws on the server,
+		// then verify the connection is still healthy (no double-release abort).
+		class Throwing final : public Counter::Server {
+		public:
+			kj::Promise<void> inc(IncContext) override {
+				kj::throwFatalException(KJ_EXCEPTION(OVERLOADED, "counter busy"));
+			}
+		};
+		bool failed = false;
+		KJ_IF_MAYBE(e, kj::runCatchingExceptions([&]() {
+			auto req = echo.callBackRequest();
+			req.setCap(kj::heap<Throwing>());
+			req.setN(1);
+			req.send().wait(ws);
+		})) {
+			failed = true;
+			KJ_REQUIRE(e->getType() == kj::Exception::Type::OVERLOADED, e->getType());
+		}
+		KJ_REQUIRE(failed, "callBack with throwing cap did not fail");
+		auto ping = echo.pingRequest();
+		ping.setN(10);
+		KJ_REQUIRE(ping.send().wait(ws).getN() == 11);
+		ok("capfail");
+	}
+
+	if (wants(only, "tailcall")) {
+		// Server forwards callHeld() via ctx.tailCall (sendResultsTo.yourself +
+		// takeFromOtherQuestion) back to our local Counter, on success and failure.
+		class Mine final : public Counter::Server {
+		public:
+			kj::Promise<void> inc(IncContext ctx) override {
+				ctx.getResults().setN(ctx.getParams().getN() + 100);
+				return kj::READY_NOW;
+			}
+		};
+		auto hold = echo.holdRequest();
+		hold.setCap(kj::heap<Mine>());
+		hold.send().wait(ws);
+		auto call = echo.callHeldRequest();
+		call.setN(4);
+		KJ_REQUIRE(call.send().wait(ws).getN() == 104);
+
+		class Failing final : public Counter::Server {
+		public:
+			kj::Promise<void> inc(IncContext) override {
+				kj::throwFatalException(KJ_EXCEPTION(OVERLOADED, "tail boom"));
+			}
+		};
+		auto hold2 = echo.holdRequest();
+		hold2.setCap(kj::heap<Failing>());
+		hold2.send().wait(ws);
+		bool failed = false;
+		KJ_IF_MAYBE(e, kj::runCatchingExceptions([&]() {
+			auto c2 = echo.callHeldRequest();
+			c2.setN(5);
+			c2.send().wait(ws);
+		})) {
+			failed = true;
+			KJ_REQUIRE(e->getType() == kj::Exception::Type::OVERLOADED, e->getType());
+		}
+		KJ_REQUIRE(failed, "failing tail call did not fail");
+		auto ping = echo.pingRequest();
+		ping.setN(20);
+		KJ_REQUIRE(ping.send().wait(ws).getN() == 21);
+		ok("tailcall");
+	}
+
 	if (wants(only, "cancel")) {
 		{
 			auto pending = echo.slowRequest().send();
