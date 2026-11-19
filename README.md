@@ -223,9 +223,10 @@ const unpacked = unpack(packed); // same bytes as framed input
 const canonical = canonicalizeFlat(bytes); // single-segment preorder form
 ```
 
-For stream-framed message input, `pack()` mirrors `capnp convert binary:packed`
-behavior by compacting reachable objects to a single segment before encoding.
-Use `pack(bytes, { compactFramed: false })` for raw word-stream packing.
+`pack()` encodes the buffer it is given, so `unpack(pack(x))` is the same
+bytes as `x`. Pass `{ compactFramed: true }` to compact a stream-framed
+message into one segment first, which is what `capnp convert binary:packed`
+does. That option changes the unpacked bytes of a multi-segment frame.
 
 Regenerate goldens (needs system `capnp` 1.4.*):
 

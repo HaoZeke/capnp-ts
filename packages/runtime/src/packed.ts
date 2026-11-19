@@ -21,9 +21,9 @@ export const MAX_UNPACKED_WORDS = DEFAULT_TRAVERSAL_WORDS;
 
 export interface PackOptions {
   /**
-   * When true (default), treat stream-framed message input like `capnp convert`:
+   * When true, treat stream-framed message input like `capnp convert`:
    * parse, compact reachable objects into one segment, then pack.
-   * Disable for raw word-stream packing with `compactFramed: false`.
+   * Default is false, so `unpack(pack(x))` keeps the input bytes.
    */
   compactFramed?: boolean;
 }
@@ -61,7 +61,7 @@ export function pack(input: Uint8Array, opts?: PackOptions): Uint8Array {
   if (input.length % WORD_BYTES !== 0) {
     throw new CapnpError("ARG", "pack input length must be multiple of 8");
   }
-  const source = opts?.compactFramed === false ? input : compactFramedMessage(input);
+  const source = opts?.compactFramed ? compactFramedMessage(input) : input;
   if (source.length % WORD_BYTES !== 0) {
     throw new CapnpError("ARG", "pack source length must be multiple of 8");
   }

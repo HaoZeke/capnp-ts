@@ -52,13 +52,22 @@ describe("packed codec", () => {
     expect([...unpack(packed)]).toEqual([...bin]);
   });
 
-  test.skipIf(!hasCapnp())("multi-segment framed pack matches capnp convert", () => {
+  test("default pack round-trips a multi-segment frame", () => {
+    const frame = buildMultiSegmentTextFrame();
+    const packed = pack(frame);
+    expect([...unpack(packed)]).toEqual([...frame]);
+  });
+
+  test.skipIf(!hasCapnp())("compactFramed pack matches capnp convert", () => {
     const frame = buildMultiSegmentTextFrame();
     const expected = capnpConvert("binary:packed", frame);
-    expect([...pack(frame)]).toEqual([...expected]);
-    // Raw packing diverges because capnp convert compacts framed messages
-    // before writing packed output.
-    expect([...pack(frame, { compactFramed: false })]).not.toEqual([...expected]);
+    expect([...pack(frame, { compactFramed: true })]).toEqual([...expected]);
+    // Default packing keeps the framed bytes, so it diverges from convert
+    // when the frame has more than one segment.
+    const raw = pack(frame);
+    expect([...unpack(raw)]).toEqual([...frame]);
+    expect([...raw]).not.toEqual([...expected]);
+    expect(frame.length).toBeGreaterThan(unpack(expected).length);
   });
 
   test("unpack rejects packed amplification bomb with PACKED", () => {
