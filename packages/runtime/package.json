@@ -36,6 +36,12 @@
       "import": "./dist/dynamic.js",
       "default": "./dist/dynamic.js"
     },
+    "./text": {
+      "bun": "./src/text.ts",
+      "types": "./dist/text.d.ts",
+      "import": "./dist/text.js",
+      "default": "./dist/text.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

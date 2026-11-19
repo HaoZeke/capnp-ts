@@ -21,6 +21,8 @@ words (encoding.html). =message= owns segments and far resolution.
 =schema= loads =CodeGeneratorRequest= or individual =Node= structures into a
 branded reflection graph, and =dynamic= provides runtime =DynamicStruct=,
 =DynamicList=, =DynamicEnum=, and =DynamicCapability= readers and builders.
+=text= layers =TextCodec=, =prettyPrint=, and =stringify= over =dynamic= to
+match =capnp decode= and =capnp encode= text literals.
 =capnpc-ts= is a =capnp compile -o= plugin that reads =CodeGeneratorRequest=
 with hand schema readers over this runtime (no generated TS bootstrap).
 
