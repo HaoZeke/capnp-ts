@@ -33,8 +33,10 @@ export type TargetWriter = (target: StructBuilder) => void;
 export interface RemoteHost {
   /** Set once the connection is gone; every remote capability then fails. */
   readonly disconnected: RpcError | undefined;
-  /** Bytes of stream calls a sender may have in flight on one capability. */
+  /** Current stream window in bytes for this connection. */
   readonly streamWindow: number;
+  /** Create a stream flow controller backed by this connection's window policy. */
+  createFlowController(): WindowFlowController;
   sendCallTo(
     write: TargetWriter,
     interfaceId: bigint,
@@ -131,7 +133,7 @@ export class ImportClient extends RefHook implements RpcClientHook {
     readonly importId: number,
   ) {
     super();
-    this.flow = new WindowFlowController(() => host.streamWindow);
+    this.flow = host.createFlowController();
   }
 
   adoptFlow(incoming: WindowFlowController): void {
@@ -218,7 +220,7 @@ export class PipelineClient extends RefHook implements RpcClientHook {
     private readonly ops: readonly number[],
   ) {
     super();
-    this.flow = new WindowFlowController(() => host.streamWindow);
+    this.flow = host.createFlowController();
   }
 
   adoptFlow(incoming: WindowFlowController): void {

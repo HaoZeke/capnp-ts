@@ -35,7 +35,14 @@ export class StreamTransport implements Transport {
   private readonly inbox: Uint8Array[] = [];
   private shut = false;
 
-  constructor(private readonly write: (bytes: Uint8Array) => void) {}
+  constructor(
+    private readonly write: (bytes: Uint8Array) => void,
+    private readonly sendBufferSize?: () => number | undefined,
+  ) {}
+
+  getSendBufferSize(): number | undefined {
+    return this.sendBufferSize?.();
+  }
 
   /** Take bytes off the stream; complete frames become receivable. */
   feed(chunk: Uint8Array): void {
