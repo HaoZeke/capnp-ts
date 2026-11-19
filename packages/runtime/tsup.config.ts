@@ -9,6 +9,7 @@ export default defineConfig({
     index: "src/index.ts",
     packed: "src/packed.ts",
     canonical: "src/canonical.ts",
+    schema: "src/schema.ts",
   },
   format: ["esm"],
   target: "es2022",
