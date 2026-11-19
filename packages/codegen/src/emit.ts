@@ -54,6 +54,20 @@ export function shortTypeName(displayName: string): string {
   return bare.replace(/\./g, "_").replace(/[^A-Za-z0-9_]/g, "_");
 }
 
+/**
+ * File stem from `dir/other.capnp:Slot`. capnpc-c++ puts that file in its
+ * own namespace so the name cannot collide with a type in this file.
+ */
+function schemaFileStem(displayName: string): string {
+  const colon = displayName.lastIndexOf(":");
+  const path = colon >= 0 ? displayName.slice(0, colon) : displayName;
+  const base = path.includes("/") ? path.slice(path.lastIndexOf("/") + 1) : path;
+  const stem = base.endsWith(".capnp") ? base.slice(0, -".capnp".length) : base;
+  let safe = stem.replace(/[^A-Za-z0-9_]/g, "_");
+  if (!safe || /^[0-9]/.test(safe)) safe = `_${safe}`;
+  return safe || "external";
+}
+
 /** Safe identifier for a field / enumerant name (already schema identifiers). */
 function ident(name: string): string {
   if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return name;
@@ -219,6 +233,8 @@ type ModuleEmitContext = {
   ownerFileByNodeId: Map<bigint, bigint>;
   currentFileId: bigint;
   importAliases: Map<bigint, string>;
+  /** Disambiguated stub name for a type whose file was not requested. */
+  externalAliasNames: Map<bigint, string>;
 };
 
 function buildOwnerFileMap(ast: CgrAst, byId: Map<bigint, NodeAst>): Map<bigint, bigint> {
@@ -397,8 +413,10 @@ function ptrTypeForStruct(
 ): string {
   const n = ctx.byId.get(typeId);
   if (!n) return "Ptr";
-  const base = `${shortTypeName(n.displayName)}_Ptr`;
   const args = owner ? brandArgList(typeId, brand, ctx, owner) : "";
+  const external = ctx.externalAliasNames.get(typeId);
+  if (external) return external + args;
+  const base = `${shortTypeName(n.displayName)}_Ptr`;
   const fileId = ctx.ownerFileByNodeId.get(typeId) ?? ctx.currentFileId;
   if (fileId === ctx.currentFileId) return base + args;
   const alias = ctx.importAliases.get(fileId);
@@ -413,8 +431,10 @@ function ptrTypeForInterface(
 ): string {
   const n = ctx.byId.get(typeId);
   if (!n) return "Ptr";
-  const base = `${shortTypeName(n.displayName)}_Capability`;
   const args = owner ? brandArgList(typeId, brand, ctx, owner) : "";
+  const external = ctx.externalAliasNames.get(typeId);
+  if (external) return external + args;
+  const base = `${shortTypeName(n.displayName)}_Capability`;
   const fileId = ctx.ownerFileByNodeId.get(typeId) ?? ctx.currentFileId;
   if (fileId === ctx.currentFileId) return base + args;
   const alias = ctx.importAliases.get(fileId);
@@ -1368,9 +1388,22 @@ export function emitModuleSource(
   }
 
   // A type from a file that was not requested has no module to import.
-  // Declare the pointer alias here so the reference type-checks.
+  // Declare the pointer alias here so the reference type-checks. The short
+  // name is the one capnpc-c++ would use inside that file's namespace. If
+  // this file already has that name, qualify with the other file's stem,
+  // then append "_" until the identifier is free (the keyword rename).
   const localExternalAliases: string[] = [];
-  const seenLocalAlias = new Set<string>();
+  const externalAliasNames = new Map<bigint, string>();
+  const usedAliasNames = new Set<string>();
+  for (const n of nodes) {
+    const short = shortTypeName(n.displayName);
+    if (!short) continue;
+    usedAliasNames.add(short);
+    usedAliasNames.add(`${short}_Ptr`);
+    usedAliasNames.add(`${short}_Capability`);
+    usedAliasNames.add(`${short}Client`);
+    usedAliasNames.add(`${short}Server`);
+  }
   const emittedIds = new Set(nodes.map((n) => n.id));
   let needsLocalGenericAlias = false;
   for (const typeId of referencedTypeIds) {
@@ -1381,9 +1414,14 @@ export function emitModuleSource(
     if (owner === resolvedId) continue;
     if (owner !== 0n && importAliases.has(owner)) continue;
     const suffix = n.which === "interface" ? "_Capability" : "_Ptr";
-    const key = `${shortTypeName(n.displayName)}${suffix}`;
-    if (seenLocalAlias.has(key)) continue;
-    seenLocalAlias.add(key);
+    const short = shortTypeName(n.displayName);
+    let key = `${short}${suffix}`;
+    if (usedAliasNames.has(key)) {
+      key = `${schemaFileStem(n.displayName)}_${key}`;
+      while (usedAliasNames.has(key)) key = `${key}_`;
+    }
+    usedAliasNames.add(key);
+    externalAliasNames.set(typeId, key);
     const names = paramNames(n);
     if (names.length > 0) {
       needsLocalGenericAlias = true;
@@ -1404,6 +1442,7 @@ export function emitModuleSource(
     ownerFileByNodeId,
     currentFileId: resolvedId,
     importAliases,
+    externalAliasNames,
   };
 
   const hasPointerFieldDefaults = nodes.some(
