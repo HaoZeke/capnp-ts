@@ -780,13 +780,20 @@ function emitFieldGetter(
               : elem.which === "interface"
                 ? ptrTypeForInterface(elem.typeId, ctx, elem.brand, owner)
                 : "Ptr";
+          // Struct elements upgrade from primitive, text, and void lists.
+          // List and interface elements are pointer 0 of that struct, which
+          // is also how a composite list downgrades to a pointer list.
+          const read =
+            elem.which === "struct"
+              ? `listGetStruct(index) as ${elemType}`
+              : `listGetStruct(index).getP(0) as ${elemType}`;
           lines.push(
             `export function ${fn}Len${generic}(${recv}): number {`,
             `  return ${fn}(ptr).listLen();`,
             `}`,
             ``,
             `export function ${fn}At${generic}(${recv}, index: number): ${elemType} {`,
-            `  return ${fn}(ptr).listGetP(index) as ${elemType};`,
+            `  return ${fn}(ptr).${read};`,
             `}`,
             ``,
           );
