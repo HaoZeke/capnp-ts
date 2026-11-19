@@ -47,9 +47,10 @@ Subpath entry points (same modules):
 - `@haozeke/capnp/canonical` — `canonicalize` / `canonicalizeFlat`
 - `@haozeke/capnp/schema`: `SchemaLoader`, `StructSchema`, `EnumSchema`, `InterfaceSchema`, `ConstSchema`, `AnnotationSchema`, `ListSchema`, `Type`
 - `@haozeke/capnp/dynamic`: `DynamicStruct`, `DynamicList`, `DynamicEnum`, `DynamicCapability`, `DynamicValue`, `DynamicOrphan`
+- `@haozeke/capnp/text`: `TextCodec`, `prettyPrint`, `stringify`, `encodeText`, `decodeText`, `splitTextMessages`
 
 Layers: `kinds` → `endian` → `pointer` → `message` / `builder` →
-(`serialize` | `packed` | `canonical` | `schema` → `dynamic`). Codegen lives in
+(`serialize` | `packed` | `canonical` | `schema` → `dynamic` → `text`). Codegen lives in
 `@haozeke/capnpc-ts`.
 
 ## Tests

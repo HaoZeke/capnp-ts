@@ -48,6 +48,9 @@ Pre-1.0 minor releases may include breaking API changes.
   cancellation, streaming, membrane and persistence scenarios against
   capnp-C++ in both directions.
 - `docs/orgmode/rpc.org`.
+- Cap'n Proto text-format encoder and decoder (`TextCodec`, `prettyPrint`,
+  `stringify`, `encodeText`, `decodeText`, `splitTextMessages`) matching
+  `capnp decode` pretty/short formatting and `capnp encode` input syntax.
 - Runtime schema reflection (`SchemaLoader`, `Schema`, `StructSchema`,
   `EnumSchema`, `InterfaceSchema`, `ConstSchema`, `AnnotationSchema`,
   `ListSchema`, `Type`, generic `Brand` substitution, annotation inspection) and

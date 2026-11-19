@@ -76,6 +76,8 @@ export type CapnpErrorCode =
   | "TRAVERSAL"
   | "PACKED"
   | "CANONICAL"
+  | "TEXT"
+  | "JSON"
   | "UNSUPPORTED";
 
 export class CapnpError extends Error {
