@@ -202,12 +202,7 @@ function writeListToSlot(
   }
 
   if (esize === ElemSize.Pointer) {
-    let listStart: number;
-    if (n > 0) {
-      listStart = b.alloc(n);
-    } else {
-      listStart = slotWord + 1;
-    }
+    const listStart = b.alloc(n);
     const off = listStart - slotWord - 1;
     b.storeWord(slotWord, wpMakeList(off, ElemSize.Pointer, n));
     for (let i = 0; i < n; i++) {
@@ -224,17 +219,14 @@ function writeListToSlot(
   const bits = stepBits === 0 ? 0 : stepBits === 1 ? n : n * stepBits;
   const nbytes = (bits + 7) >>> 3;
   const nwords = (nbytes + 7) >>> 3;
-  let start: number;
+  const start = b.alloc(nwords);
   if (nwords > 0) {
-    start = b.alloc(nwords);
     const seg = list.msg.segs[list.seg]!;
     const srcOff = list.word * WORD_BYTES;
     b.data.set(
       seg.data.subarray(srcOff, srcOff + nbytes),
       start * WORD_BYTES,
     );
-  } else {
-    start = slotWord + 1;
   }
   const off = start - slotWord - 1;
   b.storeWord(slotWord, wpMakeList(off, esize, n));
