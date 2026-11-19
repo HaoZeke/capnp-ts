@@ -44,7 +44,7 @@ Defensive defaults: 8 Mi word traversal limit, depth 64, segment caps,
 * Non-goals (v1)
 
 - RPC inside the runtime package (it ships separately, as
-  =@haozeke/capnp-rpc=, covering levels 1 through 4)
+  =@haozeke/capnp-rpc=; see the RPC page for what it covers)
 - libcapnp / node-capnp FFI
 - Cap'n Web
 - Undocumented builder alloc order as a byte-identity claim
