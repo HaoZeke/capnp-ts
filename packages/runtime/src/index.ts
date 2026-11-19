@@ -15,3 +15,4 @@ export * from "./packed.ts";
 export * from "./canonical.ts";
 export * from "./builder.ts";
 export * from "./copy.ts";
+export * from "./schema.ts";
