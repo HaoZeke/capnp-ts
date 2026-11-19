@@ -1251,6 +1251,13 @@ export class RpcConnection implements RemoteHost {
         this.abort(new RpcError("Unknown 'Return' type."));
         return;
     }
+    // Finish already told the peer this question is done. The Return is
+    // still the acknowledgement a streaming flow controller waits on;
+    // leaving the result pending keeps those bytes in the window and
+    // flush() never resolves.
+    if (q.finished && q.call.result.state === "pending") {
+      q.call.result.resolve(emptyPayload());
+    }
     if (q.finished) this.questions.delete(answerId);
   }
 

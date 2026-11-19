@@ -339,4 +339,31 @@ describe("streaming over a connection", () => {
     await stream.finish();
     await expect(stream.send(IFACE, WRITE, chunk(4, 16), 1, 1)).rejects.toThrow("disk full");
   });
+
+  test("Return.canceled after a stream cancel frees the flow window", async () => {
+    const hang: RpcServer = {
+      isStreaming() {
+        return true;
+      },
+      dispatch(_i, _m, _p, _r, ctx) {
+        ctx.allowCancellation();
+        return new Promise<void>(() => {});
+      },
+    };
+    const { a, settle } = link(undefined, hang, { streamWindow: 1 << 20 });
+    const client = a.bootstrap();
+    await settle();
+    const pending = client.callStreaming(IFACE, WRITE, chunk(1, 8), 1, 1) as Promise<void> & {
+      cancel(): void;
+    };
+    await settle();
+    const flow = (client.resolved() as ImportClient).flow;
+    expect(flow.inFlight).toBeGreaterThan(0);
+    const flushing = client.flush();
+    pending.cancel();
+    await settle();
+    expect(flow.inFlight).toBe(0);
+    await flushing;
+    expect(flow.failed).toBe(false);
+  });
 });
