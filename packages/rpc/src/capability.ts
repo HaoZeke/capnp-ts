@@ -102,7 +102,7 @@ export class Payload {
 
   /** The hook a capability pointer inside this payload names. */
   getCap(ptr: Ptr): ClientHook {
-    if (ptr.kind !== PtrKind.Cap) return new BrokenClient(new RpcError("called null capability"));
+    if (ptr.kind !== PtrKind.Cap) return newNullCap();
     const hook = this.caps[ptr.count];
     if (hook === undefined) {
       return new BrokenClient(new RpcError("capability index is outside the cap table"));
@@ -252,7 +252,7 @@ export abstract class RefHook {
   protected abstract dispose(): void;
 }
 
-function failedCall(error: RpcError): CallState {
+export function failedCall(error: RpcError): CallState {
   const state = new CallState();
   state.result.reject(error);
   state.pipeline = { getPipelinedCap: () => new BrokenClient(error) };
@@ -262,7 +262,11 @@ function failedCall(error: RpcError): CallState {
 /** A capability that fails every call with one error. */
 export class BrokenClient extends RefHook implements ClientHook {
   readonly brand = BrokenClient;
-  constructor(readonly error: RpcError) {
+  constructor(
+    readonly error: RpcError,
+    /** True for the capability a null pointer names, which membranes leave alone. */
+    readonly isNull = false,
+  ) {
     super();
   }
 
@@ -288,6 +292,15 @@ export class BrokenClient extends RefHook implements ClientHook {
 
 export function newBrokenCap(error: unknown): ClientHook {
   return new BrokenClient(toRpcError(error));
+}
+
+/** The capability a null pointer stands for: every call fails. */
+export function newNullCap(): ClientHook {
+  return new BrokenClient(new RpcError("called null capability"), true);
+}
+
+export function isNullCap(hook: ClientHook): boolean {
+  return hook instanceof BrokenClient && hook.isNull;
 }
 
 /** What a server's `dispatch` may return besides nothing. */
@@ -405,6 +418,11 @@ export class LocalClient extends RefHook implements ClientHook {
     }
     const ctx = new LocalCallContext(params);
     const state = new CallState();
+    // A running call keeps the capability alive, so dropping the last
+    // reference while a call is queued or in flight does not dispose the
+    // server underneath it.
+    this.addRef();
+    state.result.onSettled(() => this.release());
     state.pipeline = new LocalPipeline(state.result);
     state.onRelease = () => {
       ctx.cancelRequested = true;

@@ -5,6 +5,14 @@
  */
 export { MemoryTransportPair, type Transport } from "./transport.ts";
 export { frameLength, StreamTransport } from "./socket.ts";
+export {
+  copyIntoMembrane,
+  copyOutOfMembrane,
+  MembranePolicy,
+  membrane,
+  RevocablePolicy,
+  reverseMembrane,
+} from "./membrane.ts";
 export { DEFAULT_STREAM_WINDOW, WindowFlowController } from "./flow.ts";
 export { RpcStream } from "./stream.ts";
 export {
