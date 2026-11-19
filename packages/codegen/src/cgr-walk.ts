@@ -699,6 +699,15 @@ function decodeStructFields(list: Ptr): FieldAst[] {
   return out;
 }
 
+/** Twelve Node.annotation target flags, targetsFile in the low bit. */
+function annotationTargetsMask(n: Ptr): number {
+  let mask = 0;
+  for (let bit = 0; bit < 12; bit++) {
+    if (n.getBool(112 + bit)) mask |= 1 << bit;
+  }
+  return mask >>> 0;
+}
+
 function decodeNode(n: Ptr): NodeAst {
   if (n.kind !== PtrKind.Struct) {
     return {
@@ -746,7 +755,11 @@ function decodeNode(n: Ptr): NodeAst {
   } else if (which === "annotation") {
     base.annotation = {
       type: decodeType(n.getp(3)),
-      targetsMask: n.getU32(8) >>> 0,
+      // schema.capnp Node.annotation targetsFile@19 .. targetsAnnotation@30
+      // are bools at data bits 112..123 (capnp 1.4.0 schema.capnp.h).
+      // Bit 0 of the mask is targetsFile. displayNamePrefixLength also lives
+      // at byte 8 and must not be reused here.
+      targetsMask: annotationTargetsMask(n),
     };
   }
 
