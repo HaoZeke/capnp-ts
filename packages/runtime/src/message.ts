@@ -780,10 +780,13 @@ export class Ptr {
     assertCapnp(index >= 0, "BOUNDS");
     if (index >= this.count) return dflt;
     if (this.esize === ElemSize.Byte) return this.listElemBytes(index, 1)[0]!;
+    if (this.esize === ElemSize.Bit) return dflt;
     if (this.esize === ElemSize.Composite && this.dwords >= 1) {
       return this.compositeElemData(index)[0]!;
     }
-    return dflt;
+    const el = this.listGetStruct(index);
+    if (8 > el.dataBitCount()) return dflt;
+    return el.dataBytes()[0]!;
   }
 
   listGetU16(index: number, dflt = 0): number {
@@ -793,10 +796,13 @@ export class Ptr {
     if (this.esize === ElemSize.TwoBytes) {
       return loadU16(this.listElemBytes(index, 2), 0);
     }
+    if (this.esize === ElemSize.Bit) return dflt;
     if (this.esize === ElemSize.Composite && this.dwords >= 1) {
       return loadU16(this.compositeElemData(index), 0);
     }
-    return dflt;
+    const el = this.listGetStruct(index);
+    if (16 > el.dataBitCount()) return dflt;
+    return loadU16(el.dataBytes(), 0);
   }
 
   listGetU32(index: number, dflt = 0): number {
@@ -806,10 +812,13 @@ export class Ptr {
     if (this.esize === ElemSize.FourBytes) {
       return loadU32(this.listElemBytes(index, 4), 0);
     }
+    if (this.esize === ElemSize.Bit) return dflt;
     if (this.esize === ElemSize.Composite && this.dwords >= 1) {
       return loadU32(this.compositeElemData(index), 0);
     }
-    return dflt;
+    const el = this.listGetStruct(index);
+    if (32 > el.dataBitCount()) return dflt;
+    return loadU32(el.dataBytes(), 0);
   }
 
   listGetU64(index: number, dflt = 0n): bigint {
@@ -819,10 +828,13 @@ export class Ptr {
     if (this.esize === ElemSize.EightBytes) {
       return loadU64(this.listElemBytes(index, 8), 0);
     }
+    if (this.esize === ElemSize.Bit) return dflt;
     if (this.esize === ElemSize.Composite && this.dwords >= 1) {
       return loadU64(this.compositeElemData(index), 0);
     }
-    return dflt;
+    const el = this.listGetStruct(index);
+    if (64 > el.dataBitCount()) return dflt;
+    return loadU64(el.dataBytes(), 0);
   }
 
   listGetF64(index: number, dflt = 0): number {
@@ -832,10 +844,13 @@ export class Ptr {
     if (this.esize === ElemSize.EightBytes) {
       return loadF64(this.listElemBytes(index, 8), 0);
     }
+    if (this.esize === ElemSize.Bit) return dflt;
     if (this.esize === ElemSize.Composite && this.dwords >= 1) {
       return loadF64(this.compositeElemData(index), 0);
     }
-    return dflt;
+    const el = this.listGetStruct(index);
+    if (64 > el.dataBitCount()) return dflt;
+    return loadF64(el.dataBytes(), 0);
   }
 
   listGetBool(index: number, dflt = false): boolean {
