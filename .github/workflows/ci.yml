@@ -28,11 +28,20 @@ jobs:
 
       # Install before tests: live capnp compile paths use test.skipIf(!hasCapnp).
       # Critical codegen suites use offline CGR fixtures and must not soft-pass.
-      - name: Install capnproto (tests + fixture regen + codegen smoke)
+      # Ubuntu's capnproto package is 1.1.0; goldens and the suite target 1.4.0.
+      # The prefix is cached by that version so a hit skips the rebuild.
+      - name: Cache Cap'n Proto 1.4.0
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.tool_cache }}/capnproto-1.4.0
+          key: capnproto-1.4.0-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install Cap'n Proto 1.4.0
         run: |
-          sudo apt-get update
-          sudo apt-get install -y capnproto
-          capnp --version
+          prefix="${{ runner.tool_cache }}/capnproto-1.4.0"
+          bash scripts/install-capnproto.sh "$prefix"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          "$prefix/bin/capnp" --version
 
       # packages/runtime/test/pycapnp-interop.test.ts asserts this venv is
       # present rather than skipping, so bidirectional interop against the
