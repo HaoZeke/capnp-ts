@@ -44,6 +44,8 @@ export interface RemoteHost {
   ): CallState;
   /** The last reference to import `importId` has gone. */
   importDropped(importId: number, client: ClientHook): void;
+  /** The last reference to a PromiseClient riding on `importId` has gone. */
+  promiseDropped(importId: number, client: ClientHook): void;
   /** Send a Disembargo on `target`; settles when it comes back. */
   startEmbargo(target: RpcClientHook): Settle<void>;
 }
@@ -54,6 +56,8 @@ export interface RpcClientHook extends ClientHook {
   writeDescriptor(desc: StructBuilder): void;
   /** Fill in a `MessageTarget` that addresses this capability. */
   writeTarget(target: StructBuilder): void;
+  /** Adopt an existing flow controller when a promise resolves onto this capability. */
+  adoptFlow(flow: WindowFlowController): void;
 }
 
 /** Send one stream call through `flow`, finishing the question once it returns. */
@@ -119,7 +123,8 @@ const RECEIVER_HOSTED = 3;
 const RECEIVER_ANSWER = 4;
 
 export class ImportClient extends RefHook implements RpcClientHook {
-  readonly flow: WindowFlowController;
+  flow: WindowFlowController;
+  readonly adoptedFlows: WindowFlowController[] = [];
 
   constructor(
     private readonly host: RemoteHost,
@@ -129,7 +134,21 @@ export class ImportClient extends RefHook implements RpcClientHook {
     this.flow = new WindowFlowController(() => host.streamWindow);
   }
 
+  adoptFlow(incoming: WindowFlowController): void {
+    if (this.flow.peakInFlight === 0 && !this.flow.failed) {
+      this.flow = incoming;
+    } else {
+      this.adoptedFlows.push(incoming);
+    }
+  }
+
   callStreaming(interfaceId: bigint, methodId: number, params: Payload): Promise<void> {
+    for (const f of this.adoptedFlows) {
+      if (f.failureError !== undefined) {
+        params.release();
+        return Promise.reject(f.failureError);
+      }
+    }
     return sendStreaming(
       this.host,
       this.flow,
@@ -141,7 +160,11 @@ export class ImportClient extends RefHook implements RpcClientHook {
   }
 
   flush(): Promise<void> {
-    return this.flow.waitAllAcked();
+    if (this.adoptedFlows.length === 0) return this.flow.waitAllAcked();
+    return Promise.all([
+      this.flow.waitAllAcked(),
+      ...this.adoptedFlows.map((f) => f.waitAllAcked()),
+    ]).then(() => {});
   }
 
   get brand(): unknown {
@@ -181,7 +204,8 @@ export class ImportClient extends RefHook implements RpcClientHook {
 
 /** A capability inside an answer that has not come back yet. */
 export class PipelineClient extends RefHook implements RpcClientHook {
-  readonly flow: WindowFlowController;
+  flow: WindowFlowController;
+  readonly adoptedFlows: WindowFlowController[] = [];
 
   constructor(
     private readonly host: RemoteHost,
@@ -193,7 +217,21 @@ export class PipelineClient extends RefHook implements RpcClientHook {
     this.flow = new WindowFlowController(() => host.streamWindow);
   }
 
+  adoptFlow(incoming: WindowFlowController): void {
+    if (this.flow.peakInFlight === 0 && !this.flow.failed) {
+      this.flow = incoming;
+    } else {
+      this.adoptedFlows.push(incoming);
+    }
+  }
+
   callStreaming(interfaceId: bigint, methodId: number, params: Payload): Promise<void> {
+    for (const f of this.adoptedFlows) {
+      if (f.failureError !== undefined) {
+        params.release();
+        return Promise.reject(f.failureError);
+      }
+    }
     return sendStreaming(
       this.host,
       this.flow,
@@ -205,7 +243,11 @@ export class PipelineClient extends RefHook implements RpcClientHook {
   }
 
   flush(): Promise<void> {
-    return this.flow.waitAllAcked();
+    if (this.adoptedFlows.length === 0) return this.flow.waitAllAcked();
+    return Promise.all([
+      this.flow.waitAllAcked(),
+      ...this.adoptedFlows.map((f) => f.waitAllAcked()),
+    ]).then(() => {});
   }
 
   get brand(): unknown {
@@ -248,12 +290,15 @@ export class PipelineClient extends RefHook implements RpcClientHook {
  * target is hosted here and calls were already in flight through the
  * peer, an embargo holds new calls back until the peer has echoed ours.
  */
+type ResolutionType = "unresolved" | "remote" | "reflected" | "merged" | "broken";
+
 export class PromiseClient extends RefHook implements RpcClientHook {
   private cap: RpcClientHook | ClientHook;
-  private resolved = false;
+  private resolutionType: ResolutionType = "unresolved";
   private receivedCall = false;
   private disposed = false;
   private readonly more = new Settle<ClientHook>();
+  private readonly adoptedFlows: WindowFlowController[] = [];
 
   constructor(
     private readonly host: RemoteHost,
@@ -270,6 +315,10 @@ export class PromiseClient extends RefHook implements RpcClientHook {
     });
   }
 
+  private get resolved(): boolean {
+    return this.resolutionType !== "unresolved";
+  }
+
   get brand(): unknown {
     return this.host;
   }
@@ -282,8 +331,27 @@ export class PromiseClient extends RefHook implements RpcClientHook {
     return this.resolved ? this.cap : undefined;
   }
 
+  /**
+   * Underlying capability for export-table resolution: strips unresolved
+   * PromiseClient layers to reach their backing ImportClient/PipelineClient
+   * so Disembargo bounces back on the original wire identity.
+   */
+  getInnermostClient(): ClientHook {
+    this.receivedCall = true;
+    if (this.cap instanceof PromiseClient) return this.cap.getInnermostClient();
+    return this.cap;
+  }
+
   whenMoreResolved(): Promise<ClientHook> {
     return this.more.promise;
+  }
+
+  adoptFlow(incoming: WindowFlowController): void {
+    if (this.cap.brand === this.host) {
+      (this.cap as RpcClientHook).adoptFlow(incoming);
+    } else {
+      this.adoptedFlows.push(incoming);
+    }
   }
 
   call(interfaceId: bigint, methodId: number, params: Payload, opts?: CallOptions): CallState {
@@ -293,11 +361,19 @@ export class PromiseClient extends RefHook implements RpcClientHook {
 
   callStreaming(interfaceId: bigint, methodId: number, params: Payload): Promise<void> {
     this.receivedCall = true;
+    for (const f of this.adoptedFlows) {
+      if (f.failureError !== undefined) {
+        params.release();
+        return Promise.reject(f.failureError);
+      }
+    }
     return callStreaming(this.cap, interfaceId, methodId, params);
   }
 
   flush(): Promise<void> {
-    return this.cap.flush?.() ?? Promise.resolve();
+    const inner = this.cap.flush?.() ?? Promise.resolve();
+    if (this.adoptedFlows.length === 0) return inner;
+    return Promise.all([inner, ...this.adoptedFlows.map((f) => f.waitAllAcked())]).then(() => {});
   }
 
   writeTarget(target: StructBuilder): void {
@@ -316,31 +392,77 @@ export class PromiseClient extends RefHook implements RpcClientHook {
       return;
     }
     const previous = this.cap;
-    const local = replacement.brand !== this.host;
-    if (local && this.receivedCall && !isError && this.host.disconnected === undefined) {
+    let target = replacement;
+    const isSameConnection = target.brand === this.host;
+
+    if (isSameConnection) {
+      if (target instanceof PromiseClient) {
+        while (target instanceof PromiseClient && target.resolutionType === "merged") {
+          const next = target.cap.addRef();
+          target.release();
+          target = next;
+        }
+        if (target instanceof PromiseClient) {
+          if (target.resolved) {
+            this.resolutionType = target.resolutionType;
+          } else {
+            target.receivedCall = target.receivedCall || this.receivedCall;
+            this.resolutionType = "merged";
+          }
+        } else {
+          this.resolutionType = "remote";
+        }
+      } else {
+        this.resolutionType = "remote";
+      }
+    } else if (isError || target.brand === BrokenClient) {
+      // Null and broken capabilities do not represent one of our own exports
+      // and never need a Disembargo (sending one would abort the connection).
+      this.resolutionType = "broken";
+    } else {
+      this.resolutionType = "reflected";
+    }
+
+    // Transfer any active flow controller from the initial RpcClient so
+    // pipelined streaming calls keep their window and error state.
+    if (previous instanceof ImportClient || previous instanceof PipelineClient) {
+      const flows: WindowFlowController[] = [];
+      if (previous.flow.peakInFlight > 0 || previous.flow.failed) flows.push(previous.flow);
+      flows.push(...previous.adoptedFlows);
+      for (const f of flows) {
+        if (target.brand === this.host) (target as RpcClientHook).adoptFlow(f);
+        else this.adoptedFlows.push(f);
+      }
+    }
+
+    if (
+      this.resolutionType === "reflected" &&
+      this.receivedCall &&
+      this.host.disconnected === undefined
+    ) {
       // The target is hosted here, and we have already sent calls
       // through the peer to reach it. Hold new calls until the peer
       // echoes a Disembargo sent behind them.
       const lifted = this.host.startEmbargo(previous as RpcClientHook);
       const eventual = new Settle<ClientHook>();
       lifted.onSettled((s) => {
-        if (s.state === "ok") eventual.resolve(replacement);
+        if (s.state === "ok") eventual.resolve(target);
         else {
-          replacement.release();
+          target.release();
           eventual.reject(s.error);
         }
       });
       this.cap = new QueuedClient(eventual);
     } else {
-      this.cap = replacement;
+      this.cap = target;
     }
-    this.resolved = true;
     previous.release();
     this.more.resolve(this.cap);
   }
 
   protected dispose(): void {
     this.disposed = true;
+    if (this.importId !== undefined) this.host.promiseDropped(this.importId, this);
     if (this.resolved) this.cap.release();
     else (this.cap as ClientHook).release();
   }

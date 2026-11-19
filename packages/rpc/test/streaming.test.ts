@@ -209,4 +209,28 @@ describe("streaming over a connection", () => {
     await expect(c.callStreaming(IFACE, WRITE, chunk(0, 5), 1, 1)).rejects.toThrow("disk full");
     await expect(c.callStreaming(IFACE, WRITE, chunk(1, 5), 1, 1)).rejects.toThrow("disk full");
   });
+
+  test("pipelined stream calls keep their flow controller and errors after resolution", async () => {
+    let openGate!: () => void;
+    const sink = new Sink(0, 2);
+    const factory: RpcServer = {
+      dispatch(_i, _m, _p, _r, ctx) {
+        return new Promise<void>((r) => (openGate = r)).then(() => {
+          ctx.setResultCap(ctx.initResults(0, 1), 0, Client.local(sink).hook);
+        });
+      },
+    };
+    const { a, settle } = link(undefined, factory, { streamWindow: 1 << 20 });
+    const boot = a.bootstrap();
+    await settle();
+    const pipelinedSink = boot.call(IFACE, 0).pipeline(0);
+    const stream = new RpcStream(pipelinedSink);
+    const sends = [0, 1, 2, 3].map((n) => stream.send(IFACE, WRITE, chunk(n, 16), 1, 1));
+    await settle();
+    openGate();
+    await settle();
+    await Promise.allSettled(sends);
+    await expect(stream.finish()).rejects.toThrow("disk full");
+    await expect(stream.send(IFACE, WRITE, chunk(4, 16), 1, 1)).rejects.toThrow("disk full");
+  });
 });
