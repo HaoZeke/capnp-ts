@@ -223,7 +223,7 @@ export interface ClientHook {
    * `callStreaming()`.
    */
   callStreaming?(interfaceId: bigint, methodId: number, params: Payload): Promise<void>;
-  /** Resolves when every stream call made through this hook has returned. */
+  /** Resolves when every stream call made through this hook has been acknowledged. */
   flush?(): Promise<void>;
   /** Identifies which connection or wrapper made this hook. */
   readonly brand: unknown;
@@ -778,7 +778,7 @@ export class Client {
     return callStreaming(this.hook, interfaceId, methodId, params.toPayload());
   }
 
-  /** Resolves when every stream call has returned; rejects with the first failure. */
+  /** Resolves when every stream call has been acknowledged. A stream failure rejects the next send. */
   flush(): Promise<void> {
     let h = this.hook;
     for (let r = h.getResolved(); r !== undefined; r = h.getResolved()) h = r;

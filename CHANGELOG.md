@@ -35,7 +35,7 @@ Pre-1.0 minor releases may include breaking API changes.
   when one is reported, matching capnp-C++ two-party.
   `AdaptiveStreamWindow` remains available as an explicit `streamWindow`
   opt-in. Serialised server-side stream calls break the capability on
-  failure.
+  failure, and `waitAllAcked` resolves after that failure.
 - RPC membranes, ported from `capnp/membrane.h` with the C++
   `membrane-test.c++` suite: `membrane`, `reverseMembrane`,
   `MembranePolicy`, `RevocablePolicy`, `copyIntoMembrane` and

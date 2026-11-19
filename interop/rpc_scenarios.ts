@@ -259,7 +259,7 @@ const scenarios: Record<string, () => Promise<void>> = {
     assert.ok(failure instanceof RpcError, "writes kept succeeding after the sink failed");
     assert.match((failure as RpcError).message, /sink full/);
     assert.equal((failure as RpcError).type, "overloaded");
-    await assert.rejects(stream.finish(), /sink full/);
+    await stream.finish();
     await assert.rejects(
       Promise.resolve(sink.call(SINK_INTERFACE_ID, Sink_methods.done.ordinal, undefined, 0, 0)),
       /sink full/,
@@ -287,7 +287,17 @@ const scenarios: Record<string, () => Promise<void>> = {
       ),
     );
     await Promise.allSettled(sends);
-    await assert.rejects(stream.finish(), /sink full/);
+    await stream.finish();
+    await assert.rejects(
+      stream.send(
+        SINK_INTERFACE_ID,
+        Sink_methods.write.ordinal,
+        (p) => p.setData(0, new Uint8Array(64)),
+        0,
+        1,
+      ),
+      /sink full/,
+    );
     sink.release();
   },
 

@@ -27,7 +27,7 @@ export class RpcStream {
     return this.client.callStreaming(interfaceId, methodId, fill, paramsDwords, paramsPwords);
   }
 
-  /** Resolves when everything sent has returned, or rejects with the first failure. */
+  /** Resolves when everything sent has been acknowledged, even after a stream failure. */
   finish(): Promise<void> {
     return this.client.flush();
   }
