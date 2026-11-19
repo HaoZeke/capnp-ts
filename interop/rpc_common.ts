@@ -14,9 +14,21 @@ import {
   type RpcServer,
   StreamTransport,
 } from "../packages/rpc/src/index.ts";
-import { COUNTER_INTERFACE_ID, Echo_methods, ECHO_INTERFACE_ID } from "./interop.capnp.ts";
+import {
+  COUNTER_INTERFACE_ID,
+  Echo_methods,
+  ECHO_INTERFACE_ID,
+  Sink_methods,
+  SINK_INTERFACE_ID,
+} from "./interop.capnp.ts";
 
-export { COUNTER_INTERFACE_ID, Echo_methods, ECHO_INTERFACE_ID };
+export {
+  COUNTER_INTERFACE_ID,
+  Echo_methods,
+  ECHO_INTERFACE_ID,
+  Sink_methods,
+  SINK_INTERFACE_ID,
+};
 
 export function attach(sock: Socket, bootstrap?: RpcServer | Client): RpcConnection {
   const transport = new StreamTransport((bytes) => {
@@ -53,6 +65,27 @@ export class CounterImpl implements RpcServer {
   }
   dispose(): void {
     CounterImpl.released++;
+  }
+}
+
+/** The Sink interface: write is `-> stream`, done reports the byte total. */
+export class SinkImpl implements RpcServer {
+  total = 0n;
+  private count = 0;
+  constructor(private readonly failAfter = 0) {}
+  isStreaming(_i: bigint, m: number): boolean {
+    return m === Sink_methods.write.ordinal;
+  }
+  dispatch(_i: bigint, m: number, params: Ptr, _r: StructBuilder, ctx: CallContext): void {
+    if (m === Sink_methods.write.ordinal) {
+      this.count++;
+      if (this.failAfter > 0 && this.count > this.failAfter) {
+        throw new RpcError("sink full", "overloaded");
+      }
+      this.total += BigInt(params.getData(0).length);
+      return;
+    }
+    ctx.initResults(1, 0).setU64(0, this.total);
   }
 }
 
@@ -161,6 +194,13 @@ export class EchoImpl implements RpcServer {
       case m.resolveHeld.ordinal:
         this.fulfillHeld?.(this.held!.dup());
         this.fulfillHeld = undefined;
+        return;
+      case m.openSink.ordinal:
+        ctx.setResultCap(
+          ctx.initResults(0, 1),
+          0,
+          Client.local(new SinkImpl(params.getU32(0))).hook,
+        );
         return;
       case m.die.ordinal:
         setImmediate(this.onDie);
