@@ -435,6 +435,30 @@ describe("const and annotation emit", () => {
     }
   });
 
+  test("Int64 constants preserve their signed value", async () => {
+    const { emitModuleSource } = await import("../src/emit.ts");
+    const synthetic = {
+      nodes: [
+        {
+          id: 0x1n,
+          displayName: "synth.capnp:negative",
+          displayNamePrefixLength: 0,
+          scopeId: 0n,
+          which: "const" as const,
+          whichTag: 4,
+          nestedNodes: [],
+          const: {
+            type: { which: "int64" as const },
+            value: { which: "int64" as const, value: -1n },
+          },
+        },
+      ],
+      requestedFiles: [{ id: 0n, filename: "synth.capnp" }],
+    };
+    const src = emitModuleSource(synthetic as never, "synth.capnp", 0n);
+    expect(src).toContain("export const negative = -1n as const;");
+  });
+
   test("annotation nodes emit id, type, and targets mask metadata", async () => {
     const { emitModuleSource } = await import("../src/emit.ts");
     const synthetic = {
