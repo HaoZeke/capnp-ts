@@ -1,11 +1,33 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CapnpError } from "../src/kinds.ts";
+import { MessageBuilder } from "../src/builder.ts";
 import { pack, unpack } from "../src/packed.ts";
 
 const golden = (name: string) =>
   new Uint8Array(readFileSync(join(import.meta.dir, "golden", name)));
+
+function hasCapnp(): boolean {
+  return spawnSync("capnp", ["--version"], { encoding: "utf8" }).status === 0;
+}
+
+function capnpConvert(mode: string, input: Uint8Array): Uint8Array {
+  const r = spawnSync("capnp", ["convert", mode], { input });
+  expect(r.status).toBe(0);
+  return new Uint8Array(r.stdout as Uint8Array);
+}
+
+function buildMultiSegmentTextFrame(): Uint8Array {
+  const b = new MessageBuilder({ firstWords: 1, maxSegWords: 32 });
+  const root = b.initRoot(0, 1);
+  root.setText(
+    0,
+    "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+  );
+  return b.toFlat();
+}
 
 describe("packed codec", () => {
   test("spec vector from encoding.html", () => {
@@ -28,6 +50,15 @@ describe("packed codec", () => {
     const bin = golden("addressbook.bin");
     const packed = golden("addressbook.packed.bin");
     expect([...unpack(packed)]).toEqual([...bin]);
+  });
+
+  test.skipIf(!hasCapnp())("multi-segment framed pack matches capnp convert", () => {
+    const frame = buildMultiSegmentTextFrame();
+    const expected = capnpConvert("binary:packed", frame);
+    expect([...pack(frame)]).toEqual([...expected]);
+    // Raw packing diverges because capnp convert compacts framed messages
+    // before writing packed output.
+    expect([...pack(frame, { compactFramed: false })]).not.toEqual([...expected]);
   });
 
   test("unpack rejects packed amplification bomb with PACKED", () => {
