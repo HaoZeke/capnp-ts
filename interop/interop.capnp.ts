@@ -3,7 +3,7 @@
  *
  * Source schema: interop.capnp
  * CodeGeneratorRequest: nodes=59, requestedFiles=1
- * File id: 0xd1e5a3b7c9f20486 (emitted 4 nested nodes)
+ * File id: 0xd1e5a3b7c9f20486 (emitted 49 nested nodes)
  *
  * Enums are const maps (Bun strip-safe). UInt64/Int64 use getU64/bigint.
  */
@@ -15,14 +15,548 @@ export const __capnpcTsMeta = {
   nodeCount: 59,
   requestedFileCount: 1,
   fileId: 0xd1e5a3b7c9f20486n,
-  emittedNodes: 4,
+  emittedNodes: 49,
 } as const;
+
+export type StreamResult_Ptr = Ptr;
+
+/** Struct interop.capnp:Counter.inc$Params. */
+export const COUNTER_INC_PARAMS_DWORDS = 1;
+export const COUNTER_INC_PARAMS_PWORDS = 0;
+export const Counter_inc_Params_dataWordCount = 1;
+export const Counter_inc_Params_pointerCount = 0;
+export type Counter_inc_Params_Ptr = Ptr;
+
+export function Counter_inc_Params_getN(ptr: Ptr, dflt = 0): number {
+  return ptr.getU32(0, dflt);
+}
+
+export function Counter_inc_Params_setN(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
+/** Struct interop.capnp:Counter.inc$Results. */
+export const COUNTER_INC_RESULTS_DWORDS = 1;
+export const COUNTER_INC_RESULTS_PWORDS = 0;
+export const Counter_inc_Results_dataWordCount = 1;
+export const Counter_inc_Results_pointerCount = 0;
+export type Counter_inc_Results_Ptr = Ptr;
+
+export function Counter_inc_Results_getN(ptr: Ptr, dflt = 0): number {
+  return ptr.getU32(0, dflt);
+}
+
+export function Counter_inc_Results_setN(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
+/** Struct interop.capnp:Echo.ping$Params. */
+export const ECHO_PING_PARAMS_DWORDS = 1;
+export const ECHO_PING_PARAMS_PWORDS = 0;
+export const Echo_ping_Params_dataWordCount = 1;
+export const Echo_ping_Params_pointerCount = 0;
+export type Echo_ping_Params_Ptr = Ptr;
+
+export function Echo_ping_Params_getN(ptr: Ptr, dflt = 0): number {
+  return ptr.getU32(0, dflt);
+}
+
+export function Echo_ping_Params_setN(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
+/** Struct interop.capnp:Echo.ping$Results. */
+export const ECHO_PING_RESULTS_DWORDS = 1;
+export const ECHO_PING_RESULTS_PWORDS = 0;
+export const Echo_ping_Results_dataWordCount = 1;
+export const Echo_ping_Results_pointerCount = 0;
+export type Echo_ping_Results_Ptr = Ptr;
+
+export function Echo_ping_Results_getN(ptr: Ptr, dflt = 0): number {
+  return ptr.getU32(0, dflt);
+}
+
+export function Echo_ping_Results_setN(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
+/** Struct interop.capnp:Echo.makeCounter$Params. */
+export const ECHO_MAKE_COUNTER_PARAMS_DWORDS = 0;
+export const ECHO_MAKE_COUNTER_PARAMS_PWORDS = 0;
+export const Echo_makeCounter_Params_dataWordCount = 0;
+export const Echo_makeCounter_Params_pointerCount = 0;
+export type Echo_makeCounter_Params_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.makeCounter$Results. */
+export const ECHO_MAKE_COUNTER_RESULTS_DWORDS = 0;
+export const ECHO_MAKE_COUNTER_RESULTS_PWORDS = 1;
+export const Echo_makeCounter_Results_dataWordCount = 0;
+export const Echo_makeCounter_Results_pointerCount = 1;
+export type Echo_makeCounter_Results_Ptr = Ptr;
+
+export function Echo_makeCounter_Results_getCounter(ptr: Ptr): Counter_Capability {
+  return ptr.getP(0) as Counter_Capability;
+}
+
+export function Echo_makeCounter_Results_setCounter(ptr: StructBuilder, value: Counter_Capability): void {
+  ptr.setP(0, value);
+}
+
+/** Struct interop.capnp:Echo.makePromise$Params. */
+export const ECHO_MAKE_PROMISE_PARAMS_DWORDS = 0;
+export const ECHO_MAKE_PROMISE_PARAMS_PWORDS = 0;
+export const Echo_makePromise_Params_dataWordCount = 0;
+export const Echo_makePromise_Params_pointerCount = 0;
+export type Echo_makePromise_Params_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.makePromise$Results. */
+export const ECHO_MAKE_PROMISE_RESULTS_DWORDS = 0;
+export const ECHO_MAKE_PROMISE_RESULTS_PWORDS = 1;
+export const Echo_makePromise_Results_dataWordCount = 0;
+export const Echo_makePromise_Results_pointerCount = 1;
+export type Echo_makePromise_Results_Ptr = Ptr;
+
+export function Echo_makePromise_Results_getCounter(ptr: Ptr): Counter_Capability {
+  return ptr.getP(0) as Counter_Capability;
+}
+
+export function Echo_makePromise_Results_setCounter(ptr: StructBuilder, value: Counter_Capability): void {
+  ptr.setP(0, value);
+}
+
+/** Struct interop.capnp:Echo.resolveLater$Params. */
+export const ECHO_RESOLVE_LATER_PARAMS_DWORDS = 0;
+export const ECHO_RESOLVE_LATER_PARAMS_PWORDS = 0;
+export const Echo_resolveLater_Params_dataWordCount = 0;
+export const Echo_resolveLater_Params_pointerCount = 0;
+export type Echo_resolveLater_Params_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.resolveLater$Results. */
+export const ECHO_RESOLVE_LATER_RESULTS_DWORDS = 0;
+export const ECHO_RESOLVE_LATER_RESULTS_PWORDS = 0;
+export const Echo_resolveLater_Results_dataWordCount = 0;
+export const Echo_resolveLater_Results_pointerCount = 0;
+export type Echo_resolveLater_Results_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.slow$Params. */
+export const ECHO_SLOW_PARAMS_DWORDS = 0;
+export const ECHO_SLOW_PARAMS_PWORDS = 0;
+export const Echo_slow_Params_dataWordCount = 0;
+export const Echo_slow_Params_pointerCount = 0;
+export type Echo_slow_Params_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.slow$Results. */
+export const ECHO_SLOW_RESULTS_DWORDS = 1;
+export const ECHO_SLOW_RESULTS_PWORDS = 0;
+export const Echo_slow_Results_dataWordCount = 1;
+export const Echo_slow_Results_pointerCount = 0;
+export type Echo_slow_Results_Ptr = Ptr;
+
+export function Echo_slow_Results_getN(ptr: Ptr, dflt = 0): number {
+  return ptr.getU32(0, dflt);
+}
+
+export function Echo_slow_Results_setN(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
+/** Struct interop.capnp:Echo.unblock$Params. */
+export const ECHO_UNBLOCK_PARAMS_DWORDS = 0;
+export const ECHO_UNBLOCK_PARAMS_PWORDS = 0;
+export const Echo_unblock_Params_dataWordCount = 0;
+export const Echo_unblock_Params_pointerCount = 0;
+export type Echo_unblock_Params_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.unblock$Results. */
+export const ECHO_UNBLOCK_RESULTS_DWORDS = 0;
+export const ECHO_UNBLOCK_RESULTS_PWORDS = 0;
+export const Echo_unblock_Results_dataWordCount = 0;
+export const Echo_unblock_Results_pointerCount = 0;
+export type Echo_unblock_Results_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.stats$Params. */
+export const ECHO_STATS_PARAMS_DWORDS = 0;
+export const ECHO_STATS_PARAMS_PWORDS = 0;
+export const Echo_stats_Params_dataWordCount = 0;
+export const Echo_stats_Params_pointerCount = 0;
+export type Echo_stats_Params_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.stats$Results. */
+export const ECHO_STATS_RESULTS_DWORDS = 2;
+export const ECHO_STATS_RESULTS_PWORDS = 0;
+export const Echo_stats_Results_dataWordCount = 2;
+export const Echo_stats_Results_pointerCount = 0;
+export type Echo_stats_Results_Ptr = Ptr;
+
+export function Echo_stats_Results_getCancelled(ptr: Ptr, dflt = 0): number {
+  return ptr.getU32(0, dflt);
+}
+
+export function Echo_stats_Results_setCancelled(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
+export function Echo_stats_Results_getReleased(ptr: Ptr, dflt = 0): number {
+  return ptr.getU32(4, dflt);
+}
+
+export function Echo_stats_Results_setReleased(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(4, value, dflt);
+}
+
+export function Echo_stats_Results_getCompletedUncancelable(ptr: Ptr, dflt = 0): number {
+  return ptr.getU32(8, dflt);
+}
+
+export function Echo_stats_Results_setCompletedUncancelable(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(8, value, dflt);
+}
+
+/** Struct interop.capnp:Echo.callBack$Params. */
+export const ECHO_CALL_BACK_PARAMS_DWORDS = 1;
+export const ECHO_CALL_BACK_PARAMS_PWORDS = 1;
+export const Echo_callBack_Params_dataWordCount = 1;
+export const Echo_callBack_Params_pointerCount = 1;
+export type Echo_callBack_Params_Ptr = Ptr;
+
+export function Echo_callBack_Params_getCap(ptr: Ptr): Counter_Capability {
+  return ptr.getP(0) as Counter_Capability;
+}
+
+export function Echo_callBack_Params_setCap(ptr: StructBuilder, value: Counter_Capability): void {
+  ptr.setP(0, value);
+}
+
+export function Echo_callBack_Params_getN(ptr: Ptr, dflt = 0): number {
+  return ptr.getU32(0, dflt);
+}
+
+export function Echo_callBack_Params_setN(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
+/** Struct interop.capnp:Echo.callBack$Results. */
+export const ECHO_CALL_BACK_RESULTS_DWORDS = 1;
+export const ECHO_CALL_BACK_RESULTS_PWORDS = 0;
+export const Echo_callBack_Results_dataWordCount = 1;
+export const Echo_callBack_Results_pointerCount = 0;
+export type Echo_callBack_Results_Ptr = Ptr;
+
+export function Echo_callBack_Results_getN(ptr: Ptr, dflt = 0): number {
+  return ptr.getU32(0, dflt);
+}
+
+export function Echo_callBack_Results_setN(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
+/** Struct interop.capnp:Echo.echoCap$Params. */
+export const ECHO_ECHO_CAP_PARAMS_DWORDS = 0;
+export const ECHO_ECHO_CAP_PARAMS_PWORDS = 1;
+export const Echo_echoCap_Params_dataWordCount = 0;
+export const Echo_echoCap_Params_pointerCount = 1;
+export type Echo_echoCap_Params_Ptr = Ptr;
+
+export function Echo_echoCap_Params_getCap(ptr: Ptr): Counter_Capability {
+  return ptr.getP(0) as Counter_Capability;
+}
+
+export function Echo_echoCap_Params_setCap(ptr: StructBuilder, value: Counter_Capability): void {
+  ptr.setP(0, value);
+}
+
+/** Struct interop.capnp:Echo.echoCap$Results. */
+export const ECHO_ECHO_CAP_RESULTS_DWORDS = 0;
+export const ECHO_ECHO_CAP_RESULTS_PWORDS = 1;
+export const Echo_echoCap_Results_dataWordCount = 0;
+export const Echo_echoCap_Results_pointerCount = 1;
+export type Echo_echoCap_Results_Ptr = Ptr;
+
+export function Echo_echoCap_Results_getCap(ptr: Ptr): Counter_Capability {
+  return ptr.getP(0) as Counter_Capability;
+}
+
+export function Echo_echoCap_Results_setCap(ptr: StructBuilder, value: Counter_Capability): void {
+  ptr.setP(0, value);
+}
+
+/** Struct interop.capnp:Echo.fail$Params. */
+export const ECHO_FAIL_PARAMS_DWORDS = 0;
+export const ECHO_FAIL_PARAMS_PWORDS = 0;
+export const Echo_fail_Params_dataWordCount = 0;
+export const Echo_fail_Params_pointerCount = 0;
+export type Echo_fail_Params_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.fail$Results. */
+export const ECHO_FAIL_RESULTS_DWORDS = 0;
+export const ECHO_FAIL_RESULTS_PWORDS = 0;
+export const Echo_fail_Results_dataWordCount = 0;
+export const Echo_fail_Results_pointerCount = 0;
+export type Echo_fail_Results_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.brokenCap$Params. */
+export const ECHO_BROKEN_CAP_PARAMS_DWORDS = 0;
+export const ECHO_BROKEN_CAP_PARAMS_PWORDS = 0;
+export const Echo_brokenCap_Params_dataWordCount = 0;
+export const Echo_brokenCap_Params_pointerCount = 0;
+export type Echo_brokenCap_Params_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.brokenCap$Results. */
+export const ECHO_BROKEN_CAP_RESULTS_DWORDS = 0;
+export const ECHO_BROKEN_CAP_RESULTS_PWORDS = 1;
+export const Echo_brokenCap_Results_dataWordCount = 0;
+export const Echo_brokenCap_Results_pointerCount = 1;
+export type Echo_brokenCap_Results_Ptr = Ptr;
+
+export function Echo_brokenCap_Results_getCap(ptr: Ptr): Counter_Capability {
+  return ptr.getP(0) as Counter_Capability;
+}
+
+export function Echo_brokenCap_Results_setCap(ptr: StructBuilder, value: Counter_Capability): void {
+  ptr.setP(0, value);
+}
+
+/** Struct interop.capnp:Echo.hold$Params. */
+export const ECHO_HOLD_PARAMS_DWORDS = 0;
+export const ECHO_HOLD_PARAMS_PWORDS = 1;
+export const Echo_hold_Params_dataWordCount = 0;
+export const Echo_hold_Params_pointerCount = 1;
+export type Echo_hold_Params_Ptr = Ptr;
+
+export function Echo_hold_Params_getCap(ptr: Ptr): Counter_Capability {
+  return ptr.getP(0) as Counter_Capability;
+}
+
+export function Echo_hold_Params_setCap(ptr: StructBuilder, value: Counter_Capability): void {
+  ptr.setP(0, value);
+}
+
+/** Struct interop.capnp:Echo.hold$Results. */
+export const ECHO_HOLD_RESULTS_DWORDS = 0;
+export const ECHO_HOLD_RESULTS_PWORDS = 0;
+export const Echo_hold_Results_dataWordCount = 0;
+export const Echo_hold_Results_pointerCount = 0;
+export type Echo_hold_Results_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.callHeld$Params. */
+export const ECHO_CALL_HELD_PARAMS_DWORDS = 1;
+export const ECHO_CALL_HELD_PARAMS_PWORDS = 0;
+export const Echo_callHeld_Params_dataWordCount = 1;
+export const Echo_callHeld_Params_pointerCount = 0;
+export type Echo_callHeld_Params_Ptr = Ptr;
+
+export function Echo_callHeld_Params_getN(ptr: Ptr, dflt = 0): number {
+  return ptr.getU32(0, dflt);
+}
+
+export function Echo_callHeld_Params_setN(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
+/** Struct interop.capnp:Echo.callHeld$Results. */
+export const ECHO_CALL_HELD_RESULTS_DWORDS = 1;
+export const ECHO_CALL_HELD_RESULTS_PWORDS = 0;
+export const Echo_callHeld_Results_dataWordCount = 1;
+export const Echo_callHeld_Results_pointerCount = 0;
+export type Echo_callHeld_Results_Ptr = Ptr;
+
+export function Echo_callHeld_Results_getN(ptr: Ptr, dflt = 0): number {
+  return ptr.getU32(0, dflt);
+}
+
+export function Echo_callHeld_Results_setN(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
+/** Struct interop.capnp:Echo.promiseOfHeld$Params. */
+export const ECHO_PROMISE_OF_HELD_PARAMS_DWORDS = 0;
+export const ECHO_PROMISE_OF_HELD_PARAMS_PWORDS = 0;
+export const Echo_promiseOfHeld_Params_dataWordCount = 0;
+export const Echo_promiseOfHeld_Params_pointerCount = 0;
+export type Echo_promiseOfHeld_Params_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.promiseOfHeld$Results. */
+export const ECHO_PROMISE_OF_HELD_RESULTS_DWORDS = 0;
+export const ECHO_PROMISE_OF_HELD_RESULTS_PWORDS = 1;
+export const Echo_promiseOfHeld_Results_dataWordCount = 0;
+export const Echo_promiseOfHeld_Results_pointerCount = 1;
+export type Echo_promiseOfHeld_Results_Ptr = Ptr;
+
+export function Echo_promiseOfHeld_Results_getCap(ptr: Ptr): Counter_Capability {
+  return ptr.getP(0) as Counter_Capability;
+}
+
+export function Echo_promiseOfHeld_Results_setCap(ptr: StructBuilder, value: Counter_Capability): void {
+  ptr.setP(0, value);
+}
+
+/** Struct interop.capnp:Echo.resolveHeld$Params. */
+export const ECHO_RESOLVE_HELD_PARAMS_DWORDS = 0;
+export const ECHO_RESOLVE_HELD_PARAMS_PWORDS = 0;
+export const Echo_resolveHeld_Params_dataWordCount = 0;
+export const Echo_resolveHeld_Params_pointerCount = 0;
+export type Echo_resolveHeld_Params_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.resolveHeld$Results. */
+export const ECHO_RESOLVE_HELD_RESULTS_DWORDS = 0;
+export const ECHO_RESOLVE_HELD_RESULTS_PWORDS = 0;
+export const Echo_resolveHeld_Results_dataWordCount = 0;
+export const Echo_resolveHeld_Results_pointerCount = 0;
+export type Echo_resolveHeld_Results_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.slowUncancelable$Params. */
+export const ECHO_SLOW_UNCANCELABLE_PARAMS_DWORDS = 0;
+export const ECHO_SLOW_UNCANCELABLE_PARAMS_PWORDS = 0;
+export const Echo_slowUncancelable_Params_dataWordCount = 0;
+export const Echo_slowUncancelable_Params_pointerCount = 0;
+export type Echo_slowUncancelable_Params_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.slowUncancelable$Results. */
+export const ECHO_SLOW_UNCANCELABLE_RESULTS_DWORDS = 1;
+export const ECHO_SLOW_UNCANCELABLE_RESULTS_PWORDS = 0;
+export const Echo_slowUncancelable_Results_dataWordCount = 1;
+export const Echo_slowUncancelable_Results_pointerCount = 0;
+export type Echo_slowUncancelable_Results_Ptr = Ptr;
+
+export function Echo_slowUncancelable_Results_getN(ptr: Ptr, dflt = 0): number {
+  return ptr.getU32(0, dflt);
+}
+
+export function Echo_slowUncancelable_Results_setN(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
+/** Struct interop.capnp:Echo.die$Params. */
+export const ECHO_DIE_PARAMS_DWORDS = 0;
+export const ECHO_DIE_PARAMS_PWORDS = 0;
+export const Echo_die_Params_dataWordCount = 0;
+export const Echo_die_Params_pointerCount = 0;
+export type Echo_die_Params_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.die$Results. */
+export const ECHO_DIE_RESULTS_DWORDS = 0;
+export const ECHO_DIE_RESULTS_PWORDS = 0;
+export const Echo_die_Results_dataWordCount = 0;
+export const Echo_die_Results_pointerCount = 0;
+export type Echo_die_Results_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.openSink$Params. */
+export const ECHO_OPEN_SINK_PARAMS_DWORDS = 1;
+export const ECHO_OPEN_SINK_PARAMS_PWORDS = 0;
+export const Echo_openSink_Params_dataWordCount = 1;
+export const Echo_openSink_Params_pointerCount = 0;
+export type Echo_openSink_Params_Ptr = Ptr;
+
+export function Echo_openSink_Params_getFailAfter(ptr: Ptr, dflt = 0): number {
+  return ptr.getU32(0, dflt);
+}
+
+export function Echo_openSink_Params_setFailAfter(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
+/** Struct interop.capnp:Echo.openSink$Results. */
+export const ECHO_OPEN_SINK_RESULTS_DWORDS = 0;
+export const ECHO_OPEN_SINK_RESULTS_PWORDS = 1;
+export const Echo_openSink_Results_dataWordCount = 0;
+export const Echo_openSink_Results_pointerCount = 1;
+export type Echo_openSink_Results_Ptr = Ptr;
+
+export function Echo_openSink_Results_getSink(ptr: Ptr): Sink_Capability {
+  return ptr.getP(0) as Sink_Capability;
+}
+
+export function Echo_openSink_Results_setSink(ptr: StructBuilder, value: Sink_Capability): void {
+  ptr.setP(0, value);
+}
+
+/** Struct interop.capnp:Echo.openKeep$Params. */
+export const ECHO_OPEN_KEEP_PARAMS_DWORDS = 0;
+export const ECHO_OPEN_KEEP_PARAMS_PWORDS = 0;
+export const Echo_openKeep_Params_dataWordCount = 0;
+export const Echo_openKeep_Params_pointerCount = 0;
+export type Echo_openKeep_Params_Ptr = Ptr;
+
+/** Struct interop.capnp:Echo.openKeep$Results. */
+export const ECHO_OPEN_KEEP_RESULTS_DWORDS = 0;
+export const ECHO_OPEN_KEEP_RESULTS_PWORDS = 1;
+export const Echo_openKeep_Results_dataWordCount = 0;
+export const Echo_openKeep_Results_pointerCount = 1;
+export type Echo_openKeep_Results_Ptr = Ptr;
+
+export function Echo_openKeep_Results_getKeep(ptr: Ptr): Keep_Capability {
+  return ptr.getP(0) as Keep_Capability;
+}
+
+export function Echo_openKeep_Results_setKeep(ptr: StructBuilder, value: Keep_Capability): void {
+  ptr.setP(0, value);
+}
+
+/** Struct interop.capnp:Sink.write$Params. */
+export const SINK_WRITE_PARAMS_DWORDS = 0;
+export const SINK_WRITE_PARAMS_PWORDS = 1;
+export const Sink_write_Params_dataWordCount = 0;
+export const Sink_write_Params_pointerCount = 1;
+export type Sink_write_Params_Ptr = Ptr;
+
+export function Sink_write_Params_getData(ptr: Ptr): Uint8Array {
+  return ptr.getData(0);
+}
+
+export function Sink_write_Params_setData(ptr: StructBuilder, value: Uint8Array): void {
+  ptr.setData(0, value);
+}
+
+/** Struct interop.capnp:Sink.done$Params. */
+export const SINK_DONE_PARAMS_DWORDS = 0;
+export const SINK_DONE_PARAMS_PWORDS = 0;
+export const Sink_done_Params_dataWordCount = 0;
+export const Sink_done_Params_pointerCount = 0;
+export type Sink_done_Params_Ptr = Ptr;
+
+/** Struct interop.capnp:Sink.done$Results. */
+export const SINK_DONE_RESULTS_DWORDS = 1;
+export const SINK_DONE_RESULTS_PWORDS = 0;
+export const Sink_done_Results_dataWordCount = 1;
+export const Sink_done_Results_pointerCount = 0;
+export type Sink_done_Results_Ptr = Ptr;
+
+export function Sink_done_Results_getTotal(ptr: Ptr, dflt: bigint = 0n): bigint {
+  return ptr.getU64(0, dflt);
+}
+
+export function Sink_done_Results_setTotal(ptr: StructBuilder, value: bigint, dflt: bigint = 0n): void {
+  ptr.setU64(0, value, dflt);
+}
+
+/** Struct interop.capnp:Keep.value$Params. */
+export const KEEP_VALUE_PARAMS_DWORDS = 0;
+export const KEEP_VALUE_PARAMS_PWORDS = 0;
+export const Keep_value_Params_dataWordCount = 0;
+export const Keep_value_Params_pointerCount = 0;
+export type Keep_value_Params_Ptr = Ptr;
+
+/** Struct interop.capnp:Keep.value$Results. */
+export const KEEP_VALUE_RESULTS_DWORDS = 1;
+export const KEEP_VALUE_RESULTS_PWORDS = 0;
+export const Keep_value_Results_dataWordCount = 1;
+export const Keep_value_Results_pointerCount = 0;
+export type Keep_value_Results_Ptr = Ptr;
+
+export function Keep_value_Results_getN(ptr: Ptr, dflt = 0): number {
+  return ptr.getU32(0, dflt);
+}
+
+export function Keep_value_Results_setN(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
 
 /** Interface interop.capnp:Counter. */
 export const COUNTER_INTERFACE_ID = 0xf4e1e864ee16d853n;
+export type Counter_Capability = Ptr;
 
 export const Counter_methods = {
-  inc: { ordinal: 0, paramsDwords: 1, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0 },
+  inc: { ordinal: 0, paramsDwords: 1, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
 } as const;
 
 /** Calls Counter methods on an imported capability. */
@@ -58,7 +592,7 @@ export class CounterClient {
 
 /** Implement Counter by extending this and overriding its methods. */
 export abstract class CounterServer {
-  abstract inc(params: Ptr, results: StructBuilder): void;
+  abstract inc(params: Counter_inc_Params_Ptr, results: StructBuilder): void;
 
   /** Route one Call. Throws when the id or ordinal is not ours. */
   dispatch(
@@ -82,10 +616,11 @@ export abstract class CounterServer {
 
 /** Interface interop.capnp:Sink. */
 export const SINK_INTERFACE_ID = 0x845071e1200cdff7n;
+export type Sink_Capability = Ptr;
 
 export const Sink_methods = {
-  write: { ordinal: 0, paramsDwords: 0, paramsPwords: 1, resultsDwords: 0, resultsPwords: 0 },
-  done: { ordinal: 1, paramsDwords: 0, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0 },
+  write: { ordinal: 0, paramsDwords: 0, paramsPwords: 1, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  done: { ordinal: 1, paramsDwords: 0, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
 } as const;
 
 /** Calls Sink methods on an imported capability. */
@@ -134,8 +669,8 @@ export class SinkClient {
 
 /** Implement Sink by extending this and overriding its methods. */
 export abstract class SinkServer {
-  abstract write(params: Ptr, results: StructBuilder): void;
-  abstract done(params: Ptr, results: StructBuilder): void;
+  abstract write(params: Sink_write_Params_Ptr, results: StructBuilder): void;
+  abstract done(params: Sink_done_Params_Ptr, results: StructBuilder): void;
 
   /** Route one Call. Throws when the id or ordinal is not ours. */
   dispatch(
@@ -162,9 +697,10 @@ export abstract class SinkServer {
 
 /** Interface interop.capnp:Keep. */
 export const KEEP_INTERFACE_ID = 0x8b20375f0f23dc45n;
+export type Keep_Capability = Ptr;
 
 export const Keep_methods = {
-  value: { ordinal: 0, paramsDwords: 0, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0 },
+  value: { ordinal: 0, paramsDwords: 0, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
 } as const;
 
 /** Calls Keep methods on an imported capability. */
@@ -200,7 +736,7 @@ export class KeepClient {
 
 /** Implement Keep by extending this and overriding its methods. */
 export abstract class KeepServer {
-  abstract value(params: Ptr, results: StructBuilder): void;
+  abstract value(params: Keep_value_Params_Ptr, results: StructBuilder): void;
 
   /** Route one Call. Throws when the id or ordinal is not ours. */
   dispatch(
@@ -224,27 +760,28 @@ export abstract class KeepServer {
 
 /** Interface interop.capnp:Echo. */
 export const ECHO_INTERFACE_ID = 0xda75289ac99b543bn;
+export type Echo_Capability = Ptr;
 
 export const Echo_methods = {
-  ping: { ordinal: 0, paramsDwords: 1, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0 },
-  makeCounter: { ordinal: 1, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1 },
-  makePromise: { ordinal: 2, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1 },
-  resolveLater: { ordinal: 3, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0 },
-  slow: { ordinal: 4, paramsDwords: 0, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0 },
-  unblock: { ordinal: 5, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0 },
-  stats: { ordinal: 6, paramsDwords: 0, paramsPwords: 0, resultsDwords: 2, resultsPwords: 0 },
-  callBack: { ordinal: 7, paramsDwords: 1, paramsPwords: 1, resultsDwords: 1, resultsPwords: 0 },
-  echoCap: { ordinal: 8, paramsDwords: 0, paramsPwords: 1, resultsDwords: 0, resultsPwords: 1 },
-  fail: { ordinal: 9, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0 },
-  brokenCap: { ordinal: 10, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1 },
-  hold: { ordinal: 11, paramsDwords: 0, paramsPwords: 1, resultsDwords: 0, resultsPwords: 0 },
-  callHeld: { ordinal: 12, paramsDwords: 1, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0 },
-  promiseOfHeld: { ordinal: 13, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1 },
-  resolveHeld: { ordinal: 14, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0 },
-  slowUncancelable: { ordinal: 15, paramsDwords: 0, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0 },
-  die: { ordinal: 16, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0 },
-  openSink: { ordinal: 17, paramsDwords: 1, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1 },
-  openKeep: { ordinal: 18, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1 },
+  ping: { ordinal: 0, paramsDwords: 1, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  makeCounter: { ordinal: 1, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  makePromise: { ordinal: 2, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  resolveLater: { ordinal: 3, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  slow: { ordinal: 4, paramsDwords: 0, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  unblock: { ordinal: 5, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  stats: { ordinal: 6, paramsDwords: 0, paramsPwords: 0, resultsDwords: 2, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  callBack: { ordinal: 7, paramsDwords: 1, paramsPwords: 1, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  echoCap: { ordinal: 8, paramsDwords: 0, paramsPwords: 1, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  fail: { ordinal: 9, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  brokenCap: { ordinal: 10, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  hold: { ordinal: 11, paramsDwords: 0, paramsPwords: 1, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  callHeld: { ordinal: 12, paramsDwords: 1, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  promiseOfHeld: { ordinal: 13, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  resolveHeld: { ordinal: 14, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  slowUncancelable: { ordinal: 15, paramsDwords: 0, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  die: { ordinal: 16, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  openSink: { ordinal: 17, paramsDwords: 1, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  openKeep: { ordinal: 18, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [] },
 } as const;
 
 /** Calls Echo methods on an imported capability. */
@@ -514,25 +1051,25 @@ export class EchoClient {
 
 /** Implement Echo by extending this and overriding its methods. */
 export abstract class EchoServer {
-  abstract ping(params: Ptr, results: StructBuilder): void;
-  abstract makeCounter(params: Ptr, results: StructBuilder): void;
-  abstract makePromise(params: Ptr, results: StructBuilder): void;
-  abstract resolveLater(params: Ptr, results: StructBuilder): void;
-  abstract slow(params: Ptr, results: StructBuilder): void;
-  abstract unblock(params: Ptr, results: StructBuilder): void;
-  abstract stats(params: Ptr, results: StructBuilder): void;
-  abstract callBack(params: Ptr, results: StructBuilder): void;
-  abstract echoCap(params: Ptr, results: StructBuilder): void;
-  abstract fail(params: Ptr, results: StructBuilder): void;
-  abstract brokenCap(params: Ptr, results: StructBuilder): void;
-  abstract hold(params: Ptr, results: StructBuilder): void;
-  abstract callHeld(params: Ptr, results: StructBuilder): void;
-  abstract promiseOfHeld(params: Ptr, results: StructBuilder): void;
-  abstract resolveHeld(params: Ptr, results: StructBuilder): void;
-  abstract slowUncancelable(params: Ptr, results: StructBuilder): void;
-  abstract die(params: Ptr, results: StructBuilder): void;
-  abstract openSink(params: Ptr, results: StructBuilder): void;
-  abstract openKeep(params: Ptr, results: StructBuilder): void;
+  abstract ping(params: Echo_ping_Params_Ptr, results: StructBuilder): void;
+  abstract makeCounter(params: Echo_makeCounter_Params_Ptr, results: StructBuilder): void;
+  abstract makePromise(params: Echo_makePromise_Params_Ptr, results: StructBuilder): void;
+  abstract resolveLater(params: Echo_resolveLater_Params_Ptr, results: StructBuilder): void;
+  abstract slow(params: Echo_slow_Params_Ptr, results: StructBuilder): void;
+  abstract unblock(params: Echo_unblock_Params_Ptr, results: StructBuilder): void;
+  abstract stats(params: Echo_stats_Params_Ptr, results: StructBuilder): void;
+  abstract callBack(params: Echo_callBack_Params_Ptr, results: StructBuilder): void;
+  abstract echoCap(params: Echo_echoCap_Params_Ptr, results: StructBuilder): void;
+  abstract fail(params: Echo_fail_Params_Ptr, results: StructBuilder): void;
+  abstract brokenCap(params: Echo_brokenCap_Params_Ptr, results: StructBuilder): void;
+  abstract hold(params: Echo_hold_Params_Ptr, results: StructBuilder): void;
+  abstract callHeld(params: Echo_callHeld_Params_Ptr, results: StructBuilder): void;
+  abstract promiseOfHeld(params: Echo_promiseOfHeld_Params_Ptr, results: StructBuilder): void;
+  abstract resolveHeld(params: Echo_resolveHeld_Params_Ptr, results: StructBuilder): void;
+  abstract slowUncancelable(params: Echo_slowUncancelable_Params_Ptr, results: StructBuilder): void;
+  abstract die(params: Echo_die_Params_Ptr, results: StructBuilder): void;
+  abstract openSink(params: Echo_openSink_Params_Ptr, results: StructBuilder): void;
+  abstract openKeep(params: Echo_openKeep_Params_Ptr, results: StructBuilder): void;
 
   /** Route one Call. Throws when the id or ordinal is not ours. */
   dispatch(
