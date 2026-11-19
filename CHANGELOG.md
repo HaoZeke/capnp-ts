@@ -48,6 +48,12 @@ Pre-1.0 minor releases may include breaking API changes.
   cancellation, streaming, membrane and persistence scenarios against
   capnp-C++ in both directions.
 - `docs/orgmode/rpc.org`.
+- Runtime schema reflection (`SchemaLoader`, `Schema`, `StructSchema`,
+  `EnumSchema`, `InterfaceSchema`, `ConstSchema`, `AnnotationSchema`,
+  `ListSchema`, `Type`, generic `Brand` substitution, annotation inspection) and
+  dynamic value API (`DynamicStruct`, `DynamicList`, `DynamicEnum`,
+  `DynamicCapability`, `DynamicValue`, `DynamicOrphan`) with full schema
+  defaults and evolution semantics.
 - `@haozeke/capnp-rpc` covers RPC level 3, both halves. `Provide` holds a
   capability under the recipient's nonce and `Accept` claims it; an
   `Accept` with `embargo` waits for `Disembargo` with `context.provide`.
@@ -127,4 +133,3 @@ Pre-1.0 minor releases may include breaking API changes.
 - Cross-width list demotion matrix beyond the covered upgrade/downgrade suite
 - Generated primitive/pointer-list element builders and group init wrappers
 - Live c-capnproto twin interop (Phase 2; offline sketch only)
-- Dynamic by-name reflection

@@ -30,6 +30,12 @@
       "import": "./dist/schema.js",
       "default": "./dist/schema.js"
     },
+    "./dynamic": {
+      "bun": "./src/dynamic.ts",
+      "types": "./dist/dynamic.d.ts",
+      "import": "./dist/dynamic.js",
+      "default": "./dist/dynamic.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

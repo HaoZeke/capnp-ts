@@ -47,6 +47,11 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
 - Stream segment-table serialize (`serializeToFlat` / `frameSegments`)
 - Multi-segment `MessageBuilder` arena with far / double-far pointer paths
 - Same-message orphan `disown` / `adopt`; cross-message `deepCopyPtr` / `structSetP`
+- Runtime schema reflection (`SchemaLoader`, `StructSchema`, `EnumSchema`,
+  `ListSchema`, `InterfaceSchema`, `ConstSchema`, `AnnotationSchema`, `Type`,
+  generic `Brand` substitution, annotation inspection) and dynamic value API
+  (`DynamicStruct`, `DynamicList`, `DynamicEnum`, `DynamicCapability`,
+  `DynamicOrphan`, schema-evolution defaults and list up/downgrade)
 - `capnpc-ts` emits schema `Field.defaultValue` into scalar and Text/Data
   getters; generated scalar setters use the same XOR defaults
 - Packed codec (`pack` / `unpack`) byte-identical to Cap'n C++ 1.4.0 on
@@ -65,8 +70,7 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
   `which`, Text/Data setters, shape-aware struct and `List(Struct)` initializers,
   List(Text) via `listGetText`, u64probe-safe `getU64`/`bigint`)
 
-Current limits: generated primitive/pointer-list element builders and dynamic
-reflection.
+Current limits: generated primitive/pointer-list element builders.
 
 `@haozeke/capnp-rpc` is the vat: levels 1 and 3, the level 2 `Persistent`
 interface as capnp-C++ has it, and level 4 `Join`, with promises, pipelining,
@@ -274,7 +278,6 @@ examples/           pi-admit-harness (Message.fromFlat Alice/Bob dogfood)
 | Wrapping node-capnp / libcapnp | Pure TS only (Bun strip loaders and extension packs) |
 | Cap'n Web | Separate ecosystem |
 | Byte-identical *builder* output without documented alloc order | Semantic round-trip first; live twin is Phase 2 |
-| Full dynamic reflection | Optional later |
 
 ## Family
 
@@ -305,6 +308,6 @@ Tier A for this package means:
 3. Bidirectional interop with **pycapnp** (decode their frames; they decode our builder frames)
 4. Adversarial security fixes on reader/builder (depth, list charge, composite tag)
 
-Still not “full Cap'n C++”: not every schema-evolution demotion edge, no dynamic
-API, and generated list builders cover composite structs rather than every
-element kind. RPC ships separately as `@haozeke/capnp-rpc`.
+Still not “full Cap'n C++”: not every schema-evolution demotion edge, and
+generated list builders cover composite structs rather than every element
+kind. RPC ships separately as `@haozeke/capnp-rpc`.
