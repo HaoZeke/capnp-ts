@@ -854,11 +854,22 @@ export class Ptr {
   }
 
   listGetBool(index: number, dflt = false): boolean {
-    if (this.kind !== PtrKind.List || this.esize !== ElemSize.Bit) {
-      return dflt;
-    }
+    if (this.kind !== PtrKind.List) return dflt;
     assertCapnp(index >= 0, "BOUNDS");
     if (index >= this.count) return dflt;
+    if (
+      this.esize !== ElemSize.Bit &&
+      this.esize !== ElemSize.Byte &&
+      this.esize !== ElemSize.TwoBytes &&
+      this.esize !== ElemSize.FourBytes &&
+      this.esize !== ElemSize.EightBytes &&
+      !(this.esize === ElemSize.Composite && this.dwords >= 1)
+    ) {
+      return dflt;
+    }
+    // C++ ListReader permits readers expecting bit elements to consume any
+    // non-empty data list. Its bool accessor deliberately ignores the list
+    // step, so the result comes from the first `count` packed data bits.
     const base = this.msg.segs[this.seg]!.data;
     const off = this.word * WORD_BYTES + ((index / 8) | 0);
     const bit = 1 << (index % 8);
