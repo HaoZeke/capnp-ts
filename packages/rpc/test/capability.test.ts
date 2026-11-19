@@ -4,9 +4,12 @@ import type { Ptr, StructBuilder } from "@haozeke/capnp";
 import {
   CallBuilder,
   type CallContext,
+  type ClientHook,
   Client,
+  failedCall,
   newBrokenCap,
   Payload,
+  RefHook,
   RpcError,
   type RpcServer,
 } from "../src/capability.ts";
@@ -228,6 +231,22 @@ describe("cancellation", () => {
     await expect(Promise.resolve(call)).rejects.toThrow("canceled");
   });
 
+  test("a cancel that arrived first aborts once cancellation is allowed", async () => {
+    let ctx!: CallContext;
+    const c = Client.local({
+      dispatch(_i, _m, _p, _r, context) {
+        ctx = context;
+        return new Promise(() => {});
+      },
+    });
+    const call = c.call(IFACE, 0);
+    call.release();
+    expect(ctx.signal.aborted).toBe(false);
+    ctx.allowCancellation();
+    expect(ctx.signal.aborted).toBe(true);
+    await expect(Promise.resolve(call)).rejects.toThrow("canceled");
+  });
+
   test("a server that allowed cancellation sees its signal abort at once", async () => {
     let aborted = false;
     const c = Client.local({
@@ -244,7 +263,65 @@ describe("cancellation", () => {
   });
 });
 
+/** Records stream calls so a queue cannot satisfy them with plain call(). */
+class StreamTarget extends RefHook implements ClientHook {
+  readonly brand = StreamTarget;
+  readonly brokenError = undefined;
+  readonly streams: number[] = [];
+  calls = 0;
+  flushes = 0;
+
+  getResolved(): undefined {
+    return undefined;
+  }
+
+  whenMoreResolved(): undefined {
+    return undefined;
+  }
+
+  call(_interfaceId: bigint, _methodId: number, params: Payload): ReturnType<ClientHook["call"]> {
+    this.calls++;
+    params.release();
+    return failedCall(new RpcError("used call"));
+  }
+
+  callStreaming(_interfaceId: bigint, _methodId: number, params: Payload): Promise<void> {
+    this.streams.push(params.content.getU32(0));
+    params.release();
+    return Promise.resolve();
+  }
+
+  flush(): Promise<void> {
+    this.flushes++;
+    return Promise.resolve();
+  }
+
+  protected dispose(): void {}
+}
+
 describe("queued calls", () => {
+  test("streaming calls and flush wait for the resolved client", async () => {
+    let resolve!: (c: Client) => void;
+    const queued = Client.fromPromise(new Promise<Client>((r) => (resolve = r)));
+    const inner = new StreamTarget();
+    const sent = queued.callStreaming(IFACE, 0, arg(7));
+    let flushed = false;
+    const flushing = queued.flush().then(() => {
+      flushed = true;
+    });
+    await Promise.resolve();
+    expect(flushed).toBe(false);
+    expect(inner.streams).toEqual([]);
+    expect(inner.calls).toBe(0);
+    resolve(new Client(inner));
+    await sent;
+    await flushing;
+    expect(inner.calls).toBe(0);
+    expect(inner.streams).toEqual([7]);
+    expect(inner.flushes).toBe(1);
+    expect(flushed).toBe(true);
+  });
+
   test("canceling a queued call releases its parameters", () => {
     let resolve!: (c: Client) => void;
     const promise = Client.fromPromise(new Promise<Client>((r) => (resolve = r)));
