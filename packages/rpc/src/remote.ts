@@ -62,7 +62,7 @@ export interface RpcClientHook extends ClientHook {
   adoptFlow(flow: WindowFlowController): void;
 }
 
-/** Send one stream call through `flow`, finishing the question once it returns. */
+/** Send one stream call through `flow`. `cancel` releases the question. */
 function sendStreaming(
   host: RemoteHost,
   flow: WindowFlowController,
@@ -70,10 +70,18 @@ function sendStreaming(
   interfaceId: bigint,
   methodId: number,
   params: Payload,
-): Promise<void> {
+): Promise<void> & { cancel(): void } {
   const call = host.sendCallTo(write, interfaceId, methodId, params, { streaming: true });
-  call.result.onSettled(() => call.release());
-  return flow.send(call.wireSize, call.result);
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    call.release();
+  };
+  call.result.onSettled(() => release());
+  const promise = flow.send(call.wireSize, call.result) as Promise<void> & { cancel(): void };
+  promise.cancel = release;
+  return promise;
 }
 
 /** One pending question; `Finish` goes out when the last reference is dropped. */

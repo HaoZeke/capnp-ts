@@ -219,6 +219,39 @@ describe("revocation", () => {
     expect(outside.isBroken).toBe(true);
   });
 
+  test("a streaming call in flight is canceled when the membrane is revoked", async () => {
+    let canceled = false;
+    const slow: RpcServer = {
+      isStreaming() {
+        return true;
+      },
+      dispatch(_i, _m, _p, _r, ctx) {
+        ctx.allowCancellation();
+        ctx.signal.addEventListener("abort", () => {
+          canceled = true;
+        });
+        return new Promise<void>(() => {});
+      },
+    };
+    const policy = new RevocablePolicy();
+    const outside = membrane(Client.local(slow), policy);
+    const pending = outside.callStreaming(IFACE, 0);
+    policy.revoke(new RpcError("pulled"));
+    await expect(pending).rejects.toThrow("pulled");
+    expect(canceled).toBe(true);
+  });
+
+  test("releasing the membrane releases the capability inside", () => {
+    const inside = new Counter();
+    const policy = new RevocablePolicy();
+    const outside = membrane(Client.local(inside), policy);
+    expect(inside.disposed).toBe(0);
+    expect(policy.wrappers.size).toBe(1);
+    outside.release();
+    expect(inside.disposed).toBe(1);
+    expect(policy.wrappers.size).toBe(0);
+  });
+
   test("a call in flight is canceled with the revocation error", async () => {
     let canceled = false;
     const slow: RpcServer = {
