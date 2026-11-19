@@ -401,6 +401,11 @@ function finishList(
     if (BigInt(nelem) * BigInt(step) > BigInt(contentWords)) {
       throw new CapnpError("BOUNDS");
     }
+    if (step === 0) {
+      // A zero-size element carries no words, so the element count itself is
+      // the amplification. Charge one word per element.
+      chargeWords(m, nelem);
+    }
     return Ptr.list(m, seg, start + 1, esize, nelem, dwords, pwords, step, depth);
   }
 
@@ -416,6 +421,11 @@ function finishList(
       throw new CapnpError("BOUNDS");
     }
     boundsWord(m, seg, Number(last));
+  }
+  if (esize === ElemSize.Void) {
+    // Void elements occupy no bytes. Charge one word per element so a huge
+    // count cannot slip past the traversal limit.
+    chargeWords(m, wireCount);
   }
   return Ptr.list(m, seg, start, esize, wireCount, 0, 0, 0, depth);
 }

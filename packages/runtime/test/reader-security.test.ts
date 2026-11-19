@@ -253,8 +253,44 @@ describe("composite finishList", () => {
     expect(lst.esize).toBe(ElemSize.Composite);
     expect(lst.listLen()).toBe(100);
     const spent = DEFAULT_TRAVERSAL_WORDS - ok.remainingTraversal();
-    // root pointer word + tag + contentWords
-    expect(spent).toBeGreaterThanOrEqual(1 + 1 + contentWords);
+    // root pointer word + tag + contentWords + one word per zero-size element
+    expect(spent).toBe(1 + 1 + contentWords + 100);
+  });
+
+  test("zero-size composite with an empty body still charges one word per element", () => {
+    const nelem = 20;
+    const listPtr = wpMakeList(0, ElemSize.Composite, 0);
+    const tag = wpMakeStruct(nelem, 0, 0);
+    const words = [listPtr, tag];
+    const tight = Message.fromSegments(
+      [{ data: packWords(words), words: words.length }],
+      { traversalWords: nelem },
+    );
+    expectCode(() => tight.root(), "TRAVERSAL");
+    const ok = Message.fromSegments(
+      [{ data: packWords(words), words: words.length }],
+      { traversalWords: 1 + 1 + nelem },
+    );
+    expect(ok.root().listLen()).toBe(nelem);
+    expect(ok.remainingTraversal()).toBe(0);
+  });
+
+  test("void list charges one word per element", () => {
+    const count = 10;
+    const listPtr = wpMakeList(0, ElemSize.Void, count);
+    const tight = Message.fromSegments(
+      [{ data: packWords([listPtr]), words: 1 }],
+      { traversalWords: count },
+    );
+    expectCode(() => tight.root(), "TRAVERSAL");
+    const ok = Message.fromSegments(
+      [{ data: packWords([listPtr]), words: 1 }],
+      { traversalWords: 1 + count },
+    );
+    const lst = ok.root();
+    expect(lst.esize).toBe(ElemSize.Void);
+    expect(lst.listLen()).toBe(count);
+    expect(ok.remainingTraversal()).toBe(0);
   });
 
   test("valid composite list still decodes", () => {
