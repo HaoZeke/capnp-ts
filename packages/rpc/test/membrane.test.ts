@@ -485,4 +485,20 @@ describe("membrane C++ semantics", () => {
     first.release();
     second.release();
   });
+
+  test("disposing a wrapper unregisters its revocation watcher", async () => {
+    const policy = new RevocablePolicy();
+    const outside = membrane(Client.local(new Counter()), policy);
+    expect(policy.revocationWatcherCount()).toBe(1);
+    outside.release();
+    expect(policy.revocationWatcherCount()).toBe(0);
+
+    const still = membrane(Client.local(new Counter()), policy);
+    expect(policy.revocationWatcherCount()).toBe(1);
+    policy.revoke("done");
+    await sleep(1);
+    expect(still.isBroken).toBe(true);
+    expect(policy.revocationWatcherCount()).toBe(0);
+    still.release();
+  });
 });

@@ -47,30 +47,47 @@ export abstract class MembranePolicy {
   /** Cached revocation error once `onRevoked()` settles. */
   revokedError: RpcError | undefined;
   private revocationWatched = false;
+  private readonly revocationListeners = new Set<(err: RpcError) => void>();
 
-  /** Watch `onRevoked()` once so wrappers created after revocation see it immediately. */
-  watchRevocation(onRevoke: (err: RpcError) => void): void {
+  /**
+   * Watch `onRevoked()` and return a function that drops the watch.
+   * One reaction is attached to the promise. A disposed wrapper must
+   * unregister, or it stays reachable until the membrane is revoked.
+   */
+  watchRevocation(onRevoke: (err: RpcError) => void): () => void {
     if (this.revokedError !== undefined) {
       onRevoke(this.revokedError);
-      return;
+      return () => {};
     }
     const p = this.onRevoked();
-    if (p === undefined) return;
+    if (p === undefined) return () => {};
+    this.revocationListeners.add(onRevoke);
     if (!this.revocationWatched) {
       this.revocationWatched = true;
       p.then(
         () => {
-          this.revokedError ??= new RpcError("onRevoked() resolved; it should only reject");
+          this.fireRevocation(new RpcError("onRevoked() resolved; it should only reject"));
         },
         (e) => {
-          this.revokedError ??= toRpcError(e);
+          this.fireRevocation(toRpcError(e));
         },
       );
     }
-    p.then(
-      () => onRevoke((this.revokedError ??= new RpcError("onRevoked() resolved; it should only reject"))),
-      (e) => onRevoke((this.revokedError ??= toRpcError(e))),
-    );
+    return () => {
+      this.revocationListeners.delete(onRevoke);
+    };
+  }
+
+  /** Wrappers still waiting on `onRevoked()`. */
+  revocationWatcherCount(): number {
+    return this.revocationListeners.size;
+  }
+
+  private fireRevocation(err: RpcError): void {
+    this.revokedError ??= err;
+    const listeners = [...this.revocationListeners];
+    this.revocationListeners.clear();
+    for (const fn of listeners) fn(this.revokedError!);
   }
 
   /**
@@ -232,6 +249,7 @@ class MembraneHook extends RefHook implements ClientHook {
   private disposed = false;
   private resolvedWrap: ClientHook | undefined;
   private readonly flights = new Set<Flight>();
+  private unwatchRevocation: (() => void) | undefined;
 
   /** Takes over the reference to `inner`. */
   constructor(
@@ -243,7 +261,7 @@ class MembraneHook extends RefHook implements ClientHook {
     this.inner = inner;
     this.originalInner = inner;
     this.wrapperMap().set(inner, this);
-    this.policy.watchRevocation((err) => this.revoke(err));
+    this.unwatchRevocation = this.policy.watchRevocation((err) => this.revoke(err));
   }
 
   private wrapperMap(): Map<ClientHook, MembraneHook> {
@@ -451,6 +469,8 @@ class MembraneHook extends RefHook implements ClientHook {
 
   protected dispose(): void {
     this.disposed = true;
+    this.unwatchRevocation?.();
+    this.unwatchRevocation = undefined;
     const orig = this.originalInner;
     if (orig !== undefined) {
       const map = this.wrapperMap();
