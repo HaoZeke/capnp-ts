@@ -647,7 +647,7 @@ function emitConst(node: NodeAst, lines: string[]): void {
       const base = upperSnake(name);
       lines.push(
         `const ${base}_BYTES = new Uint8Array([${v.pointerBytes.join(", ")}]);`,
-        `const ${base}_PTR = Message.fromFlat(${base}_BYTES).root();`,
+        `const ${base}_PTR = CapnpMessage.fromFlat(${base}_BYTES).root();`,
         `export const ${name}: Ptr = ${base}_PTR;`,
         ``,
       );
@@ -853,7 +853,7 @@ function emitFieldGetter(
         const dflt = `${upperSnake(typeName)}_${upperSnake(fname)}_DEFAULT`;
         lines.push(
           `const ${dflt}_BYTES = new Uint8Array([${ptrDefaultBytes.join(", ")}]);`,
-          `const ${dflt}_PTR = Message.fromFlat(${dflt}_BYTES).root();`,
+          `const ${dflt}_PTR = CapnpMessage.fromFlat(${dflt}_BYTES).root();`,
           `export function ${fn}${generic}(${recv}): ${retType} {`,
           `  const p = ptr.getP(${off});`,
           `  return (p.kind === PtrKind.Null ? ${dflt}_PTR : p) as ${retType};`,
@@ -1452,7 +1452,7 @@ export function emitModuleSource(
       : `import type { Ptr } from "@haozeke/capnp";`,
   );
   const runtimeValueImports: string[] = [];
-  if (needsMessageImport) runtimeValueImports.push("Message");
+  if (needsMessageImport) runtimeValueImports.push("Message as CapnpMessage");
   if (needsPtrKindImport) runtimeValueImports.push("PtrKind");
   if (runtimeValueImports.length > 0) {
     lines.push(
