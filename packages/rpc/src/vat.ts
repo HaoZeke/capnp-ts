@@ -84,6 +84,8 @@ import {
   Provide_getTarget,
   FINISH_DWORDS,
   FINISH_PWORDS,
+  JOIN_DWORDS,
+  JOIN_PWORDS,
   RELEASE_DWORDS,
   RELEASE_PWORDS,
   RESOLVE_DWORDS,
@@ -156,6 +158,8 @@ import {
   Resolve_which,
 } from "./rpc.capnp.ts";
 import {
+  JOIN_KEY_PART_DWORDS,
+  JOIN_KEY_PART_PWORDS,
   JOIN_RESULT_DWORDS,
   JOIN_RESULT_PWORDS,
   JoinKeyPart_getJoinId,
@@ -872,6 +876,12 @@ export class RpcConnection implements RemoteHost {
     return this.questions.get(questionId)?.failed === true;
   }
 
+  /** Why a question failed, or undefined while it is outstanding or if it succeeded. */
+  answerError(questionId: number): RpcError | undefined {
+    const r = this.questions.get(questionId)?.call.result;
+    return r?.state === "err" ? r.error : undefined;
+  }
+
   /**
    * Results of an answered question, or undefined while it is still
    * outstanding or if it failed.
@@ -938,6 +948,28 @@ export class RpcConnection implements RemoteHost {
     accept.setU32(0, id);
     if (embargo) accept.setBool(32, true);
     accept.initStruct(0, PROVISION_ID_DWORDS, PROVISION_ID_PWORDS).setU64(0, nonce);
+    this.transport.send(b.toFlat());
+    return id;
+  }
+
+  /**
+   * `Join` (level 4): ask the peer whether `importedCapId` is the same
+   * object as the capabilities the other parts of this join name. Every
+   * part of one join sends its own `Join` with the same `joinId`; the
+   * peer answers once the last part has arrived. Returns the question id.
+   */
+  sendJoin(importedCapId: number, joinId: number, partCount: number, partNum: number): number {
+    const { id } = this.newQuestion();
+    const { b, root } = newMessage(Message.join);
+    const join = root.initStruct(0, JOIN_DWORDS, JOIN_PWORDS);
+    join.setU32(0, id);
+    const target = join.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS);
+    target.setU16(OFF.targetUnion, MessageTarget.importedCap);
+    target.setU32(0, importedCapId);
+    const key = join.initStruct(1, JOIN_KEY_PART_DWORDS, JOIN_KEY_PART_PWORDS);
+    key.setU32(0, joinId);
+    key.setU16(4, partCount);
+    key.setU16(6, partNum);
     this.transport.send(b.toFlat());
     return id;
   }
@@ -1095,7 +1127,7 @@ export class RpcConnection implements RemoteHost {
     const questionId = Provide_getQuestionId(provide);
     const hook = this.targetHook(Provide_getTarget(provide));
     if (hook === undefined) {
-      this.answerError(questionId, new RpcError("provide: no such capability"));
+      this.answerWithError(questionId, new RpcError("provide: no such capability"));
       return;
     }
     const nonce = RecipientId_getNonce(Provide_getRecipient(provide));
@@ -1118,7 +1150,7 @@ export class RpcConnection implements RemoteHost {
     const nonce = ProvisionId_getNonce(Accept_getProvision(accept));
     const held = this.vat.provisions.get(nonce);
     if (held === undefined) {
-      this.answerError(questionId, new RpcError("accept: no such provision"));
+      this.answerWithError(questionId, new RpcError("accept: no such provision"));
       return;
     }
     this.vat.provisions.delete(nonce);
@@ -1150,7 +1182,7 @@ export class RpcConnection implements RemoteHost {
     if (bootstrap.kind !== PtrKind.Struct) return;
     const questionId = Bootstrap_getQuestionId(bootstrap);
     if (this.bootstrapHook === undefined) {
-      this.answerError(questionId, new RpcError("no bootstrap capability"));
+      this.answerWithError(questionId, new RpcError("no bootstrap capability"));
       return;
     }
     this.answerNow(questionId, capPayload(this.bootstrapHook.addRef()));
@@ -1171,7 +1203,7 @@ export class RpcConnection implements RemoteHost {
     const target = this.targetHook(Call_getTarget(call));
     if (target === undefined) {
       caps.forEach((c) => c.release());
-      this.answerError(questionId, new RpcError("no such export"));
+      this.answerWithError(questionId, new RpcError("no such export"));
       return;
     }
     const answer = this.newAnswer(questionId);
@@ -1205,7 +1237,7 @@ export class RpcConnection implements RemoteHost {
     this.completeAnswer(questionId, answer, answer.call.result);
   }
 
-  private answerError(questionId: number, error: RpcError): void {
+  private answerWithError(questionId: number, error: RpcError): void {
     const answer = this.newAnswer(questionId);
     answer.call = new CallState();
     answer.call.pipeline = { getPipelinedCap: () => new BrokenClient(error) };
@@ -1509,19 +1541,51 @@ export class RpcConnection implements RemoteHost {
   }
 
   /**
-   * The peer did not understand a message of ours. A capability sent in a
-   * `Resolve` it ignored will never be used, so the reference it would
-   * have held is released.
+   * The peer did not understand a message of ours. A question it ignored
+   * will never be answered, so it fails with `unimplemented`. A
+   * capability sent in a `Resolve` it ignored will never be used, so the
+   * reference it would have held is released.
    */
   private handleUnimplemented(echoed: Ptr): void {
     if (echoed.kind !== PtrKind.Struct) return;
-    if (Message_which(echoed) !== Message.resolve) return;
-    const resolve = Message_getResolve(echoed);
-    if (Resolve_which(resolve) !== Resolve.cap) return;
-    const desc = Resolve_getCap(resolve);
-    if (desc.kind === PtrKind.Struct && CapDescriptor_which(desc) === CapDescriptor.senderHosted) {
-      this.releaseExport(CapDescriptor_getSenderHosted(desc), 1);
+    const unimplemented = new RpcError("peer does not implement this message", "unimplemented");
+    switch (Message_which(echoed)) {
+      case Message.call:
+        this.failAsked(Call_getQuestionId(Message_getCall(echoed)), unimplemented);
+        return;
+      case Message.bootstrap:
+        this.failAsked(Bootstrap_getQuestionId(Message_getBootstrap(echoed)), unimplemented);
+        return;
+      case Message.provide:
+        this.failAsked(Provide_getQuestionId(Message_getProvide(echoed)), unimplemented);
+        return;
+      case Message.accept:
+        this.failAsked(Accept_getQuestionId(Message_getAccept(echoed)), unimplemented);
+        return;
+      case Message.join:
+        this.failAsked(Join_getQuestionId(Message_getJoin(echoed)), unimplemented);
+        return;
+      case Message.resolve: {
+        const resolve = Message_getResolve(echoed);
+        if (Resolve_which(resolve) !== Resolve.cap) return;
+        const desc = Resolve_getCap(resolve);
+        if (desc.kind === PtrKind.Struct && CapDescriptor_which(desc) === CapDescriptor.senderHosted) {
+          this.releaseExport(CapDescriptor_getSenderHosted(desc), 1);
+        }
+        return;
+      }
+      default:
+        return;
     }
+  }
+
+  private failAsked(questionId: number, error: RpcError): void {
+    const q = this.questions.get(questionId);
+    if (q === undefined || q.returned) return;
+    this.failQuestion(q, error);
+    for (const id of q.paramExports) this.releaseExport(id, 1);
+    q.paramExports = [];
+    if (q.finished) this.questions.delete(questionId);
   }
 
   /**
