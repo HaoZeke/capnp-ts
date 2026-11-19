@@ -5,6 +5,8 @@ import {
   AdaptiveStreamWindow,
   type CallContext,
   Client,
+  membrane,
+  RevocablePolicy,
   RpcConnection,
   RpcError,
   RpcStream,
@@ -365,5 +367,36 @@ describe("streaming over a connection", () => {
     expect(flow.inFlight).toBe(0);
     await flushing;
     expect(flow.failed).toBe(false);
+  });
+
+  test("canceling a membraned remote stream frees the flow window", async () => {
+    const hang: RpcServer = {
+      isStreaming() {
+        return true;
+      },
+      dispatch(_i, _m, _p, _r, ctx) {
+        ctx.allowCancellation();
+        return new Promise<void>(() => {});
+      },
+    };
+    const { a, settle } = link(undefined, hang, { streamWindow: 1 << 20 });
+    const client = a.bootstrap();
+    await settle();
+    const policy = new RevocablePolicy();
+    const wrapped = membrane(client, policy);
+    const pending = wrapped.callStreaming(IFACE, WRITE, chunk(1, 8), 1, 1) as Promise<void> & {
+      cancel(): void;
+    };
+    const flow = (client.resolved() as ImportClient).flow;
+    expect(flow.inFlight).toBeGreaterThan(0);
+    // Cancel before the flow-control promise is observed, so Finish goes
+    // out while the call is still in flight. Return.canceled must release
+    // the window and let flush() finish.
+    const flushing = client.flush();
+    pending.cancel();
+    await expect(pending).rejects.toThrow("canceled");
+    await settle();
+    expect(flow.inFlight).toBe(0);
+    await flushing;
   });
 });
