@@ -1,7 +1,7 @@
 {
   "name": "@haozeke/capnp-rpc",
   "version": "0.1.0-dev",
-  "description": "Cap'n Proto RPC vat for the pure TypeScript runtime (levels 1 and 4)",
+  "description": "Cap'n Proto RPC vat for the pure TypeScript runtime (levels 1 through 4)",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -16,9 +16,15 @@
   "files": ["dist", "src"],
   "license": "MIT",
   "scripts": {
-    "build": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsup",
+    "prepack": "tsup",
+    "prepublishOnly": "tsup"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0"
   },
   "dependencies": {
-    "@haozeke/capnp": "workspace:*"
+    "@haozeke/capnp": "^0.1.0-dev"
   }
 }

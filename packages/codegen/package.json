@@ -19,7 +19,8 @@
     "test": "bun test test"
   },
   "dependencies": {
-    "@haozeke/capnp": "workspace:*"
+    "@haozeke/capnp": "^0.1.0-dev"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "files": ["bin", "src", "README.md", "LICENSE"]
 }
