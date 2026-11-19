@@ -211,6 +211,7 @@ function rebuildMessageRoot(msg: Message, segmentSize = 0): MessageBuilder {
     segmentSize > 0
       ? new MessageBuilder({
           firstWords: segmentSize,
+          fixedSegmentGrowth: true,
         })
       : new MessageBuilder();
   const slot = b.rootSlot();
@@ -239,7 +240,9 @@ export function writeMessageInFormat(
     case "binary":
       return rebuildMessageRoot(msg, segSize).toFlat();
     case "packed":
-      return pack(rebuildMessageRoot(msg, segSize).toFlat());
+      return pack(rebuildMessageRoot(msg, segSize).toFlat(), {
+        compactFramed: segSize === 0,
+      });
     case "flat":
       return buildFlatSingleSegment(msg);
     case "flat-packed":
@@ -601,6 +604,7 @@ interface ParsedCliFlags {
   version: boolean;
   outputFormat: string | null;
   segmentSize: number;
+  segmentSizeSet: boolean;
   positionals: string[];
 }
 
@@ -619,6 +623,7 @@ function parseFlags(argv: readonly string[]): ParsedCliFlags {
     version: false,
     outputFormat: null,
     segmentSize: 0,
+    segmentSizeSet: false,
     positionals: [],
   };
 
@@ -668,8 +673,12 @@ function parseFlags(argv: readonly string[]): ParsedCliFlags {
       const val = argv[++i];
       assertCapnp(!!val, "ARG", "missing format for --output");
       res.outputFormat = val;
-    } else if (arg.startsWith("--segment-size=")) {
-      const raw = arg.slice("--segment-size=".length);
+    } else if (arg.startsWith("--segment-size=") || arg === "--segment-size") {
+      const raw =
+        arg === "--segment-size"
+          ? argv[++i]
+          : arg.slice("--segment-size=".length);
+      assertCapnp(raw !== undefined, "ARG", "missing value for --segment-size");
       const n = Number.parseInt(raw, 10);
       assertCapnp(
         Number.isInteger(n) && n >= 0 && String(n) === raw,
@@ -677,6 +686,7 @@ function parseFlags(argv: readonly string[]): ParsedCliFlags {
         `invalid --segment-size '${raw}'`,
       );
       res.segmentSize = n;
+      res.segmentSizeSet = true;
     } else if (arg.startsWith("-")) {
       throw new CapnpError("ARG", `unknown flag '${arg}'`);
     } else {
@@ -694,7 +704,7 @@ function resolveDeprecatedFormat(
   if (flags.binary && (flags.packed || flags.flat)) {
     throw new CapnpError("ARG", "--binary cannot be combined with --packed or --flat");
   }
-  if (flags.flat && flags.segmentSize > 0) {
+  if (flags.flat && flags.segmentSizeSet) {
     throw new CapnpError("ARG", "--segment-size cannot be combined with --flat");
   }
   if (flags.binary) return "binary";
@@ -702,6 +712,15 @@ function resolveDeprecatedFormat(
   if (flags.flat) return "flat";
   if (flags.packed) return "packed";
   return fallback;
+}
+
+function rejectUnsupportedFlags(
+  cmd: string,
+  checks: ReadonlyArray<readonly [boolean, string]>,
+): void {
+  for (const [present, flag] of checks) {
+    assertCapnp(!present, "ARG", `${cmd}: ${flag}: unrecognized option`);
+  }
 }
 
 function readStdinSync(): Uint8Array {
@@ -737,6 +756,12 @@ export async function runCli(
     }
 
     if (cmd === "encode") {
+      rejectUnsupportedFlags("encode", [
+        [flags.short, "--short"],
+        [flags.quiet, "--quiet"],
+        [flags.binary, "--binary"],
+        [flags.outputFormat !== null, "--output"],
+      ]);
       assertCapnp(
         args.length === 2,
         "ARG",
@@ -747,7 +772,6 @@ export async function runCli(
       const rootSchema = loader.resolveStruct(args[1]!, fileId);
       const input = io?.stdin ?? readStdinSync();
       const out = convertStream(input, "text", to, rootSchema, {
-        short: flags.short,
         segmentSize: flags.segmentSize,
       });
       writeOut(out);
@@ -755,6 +779,11 @@ export async function runCli(
     }
 
     if (cmd === "decode") {
+      rejectUnsupportedFlags("decode", [
+        [flags.segmentSizeSet, "--segment-size"],
+        [flags.binary, "--binary"],
+        [flags.outputFormat !== null, "--output"],
+      ]);
       assertCapnp(
         args.length === 2,
         "ARG",
@@ -766,13 +795,18 @@ export async function runCli(
       const input = io?.stdin ?? readStdinSync();
       const out = convertStream(input, from, "text", rootSchema, {
         short: flags.short,
-        segmentSize: flags.segmentSize,
       });
       writeOut(out);
       return 0;
     }
 
     if (cmd === "convert") {
+      rejectUnsupportedFlags("convert", [
+        [flags.packed, "--packed"],
+        [flags.flat, "--flat"],
+        [flags.binary, "--binary"],
+        [flags.outputFormat !== null, "--output"],
+      ]);
       assertCapnp(
         args.length === 1 || args.length === 3,
         "ARG",
@@ -814,6 +848,10 @@ export async function runCli(
     }
 
     if (cmd === "eval") {
+      rejectUnsupportedFlags("eval", [
+        [flags.segmentSizeSet, "--segment-size"],
+        [flags.quiet, "--quiet"],
+      ]);
       assertCapnp(
         args.length === 2,
         "ARG",

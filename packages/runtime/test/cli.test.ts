@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { canonicalizeFlat } from "../src/index.ts";
+import { canonicalizeFlat, loadU32, unpack } from "../src/index.ts";
 import {
   type WireFormat,
   formatNeedsSchema,
@@ -161,7 +161,7 @@ describe("capnp-ts CLI (encode, decode, convert, eval)", () => {
       canonicalizeFlat(readGolden("dynamic-kitchen-extreme.bin")),
     );
 
-    // Errors: evaluating a struct type itself, out-of-bounds subscript, binary on scalar
+    // Errors: evaluating a struct type itself, out-of-bounds subscript, binary on scalar, invalid command flags
     expect((await execCliInMemory(["eval", ksCgr, "KitchenSink"])).code).toBe(1);
     expect((await execCliInMemory(["eval", ksCgr, "greetingList[9]"])).code).toBe(
       1,
@@ -169,6 +169,41 @@ describe("capnp-ts CLI (encode, decode, convert, eval)", () => {
     expect(
       (await execCliInMemory(["eval", "-b", ksCgr, "magicAnswer"])).code,
     ).toBe(1);
+    for (const badArgv of [
+      ["encode", "--short", ksCgr, "KitchenSink"],
+      ["encode", "--quiet", ksCgr, "KitchenSink"],
+      ["encode", "--binary", ksCgr, "KitchenSink"],
+      ["encode", "--flat", "--segment-size=4", ksCgr, "KitchenSink"],
+      ["decode", "--segment-size=4", ksCgr, "KitchenSink"],
+      ["decode", "--binary", ksCgr, "KitchenSink"],
+      ["convert", "--packed", "binary:text", ksCgr, "KitchenSink"],
+      ["convert", "--flat", "binary:text", ksCgr, "KitchenSink"],
+      ["convert", "--binary", "binary:text", ksCgr, "KitchenSink"],
+      ["eval", "--segment-size=4", ksCgr, "magicAnswer"],
+      ["eval", "--quiet", ksCgr, "magicAnswer"],
+      ["eval", "-b", "-p", ksCgr, "extremeConst"],
+    ]) {
+      expect((await execCliInMemory(badArgv)).code).toBe(1);
+    }
+
+    // --segment-size <n> uses fixed segment growth and preserves multi-segment packed framing
+    const ksBin = readGolden("dynamic-kitchen-extreme.bin");
+    const ksCanon = canonicalizeFlat(ksBin);
+    const fixedSegBin = await execCliInMemory(
+      ["convert", "--segment-size", "4", "binary:binary", ksCgr, "KitchenSink"],
+      ksBin,
+    );
+    expect(fixedSegBin.code).toBe(0);
+    const nSegs = loadU32(fixedSegBin.stdout, 0) + 1;
+    expect(nSegs).toBeGreaterThan(4);
+    const fixedSegPacked = await execCliInMemory(
+      ["convert", "--segment-size", "4", "binary:packed", ksCgr, "KitchenSink"],
+      ksBin,
+    );
+    expect(fixedSegPacked.code).toBe(0);
+    const unpackedMulti = unpack(fixedSegPacked.stdout, { maxWords: 1_073_741_824 });
+    expect(loadU32(unpackedMulti, 0) + 1).toBe(nSegs);
+    expect(canonicalizeFlat(unpackedMulti)).toEqual(ksCanon);
   });
 
   test("handles multi-message encode/decode/convert streams and runs under Bun and Node", async () => {
@@ -371,6 +406,10 @@ describe("capnp-ts CLI (encode, decode, convert, eval)", () => {
         [[], "extremeConst.matrix[0][1]"],
         [[], "KitchenSink.defaultTag"],
         [[], "KitchenSink.i64"],
+        [[], "KitchenSink.meta"],
+        [[], "KitchenSink.meta.author"],
+        [[], "KitchenSink.meta.nested.score"],
+        [[], "KitchenSink.none"],
       ] as const) {
         const ref = spawnSync(
           "capnp",
