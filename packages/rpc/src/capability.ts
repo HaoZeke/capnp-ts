@@ -393,6 +393,8 @@ class LocalCallContext implements CallContext {
   cancellable = false;
   tailCalled = false;
   tailState: CallState | undefined;
+  /** Abort a cancel that arrived before `allowCancellation()`. */
+  applyPendingCancel: (() => void) | undefined;
 
   constructor(
     readonly params: Payload,
@@ -409,7 +411,10 @@ class LocalCallContext implements CallContext {
   }
 
   allowCancellation(): void {
+    if (this.cancellable) return;
     this.cancellable = true;
+    // C++ kept the Finish until allowCancellation(), then canceled the call.
+    if (this.cancelRequested) this.applyPendingCancel?.();
   }
 
   getCap(ptr: Ptr): ClientHook {
@@ -554,13 +559,18 @@ export class LocalClient extends RefHook implements ClientHook {
     // server underneath it.
     this.addRef();
     state.result.onSettled(() => this.release());
+    const applyPendingCancel = (): void => {
+      if (state.result.state !== "pending") return;
+      ctx.controller.abort();
+      state.result.reject(new RpcError("canceled"));
+    };
+    ctx.applyPendingCancel = applyPendingCancel;
     const dropInterest = (): void => {
       if (--liveRefs > 0) return;
       ctx.cancelRequested = true;
       if (ctx.tailState !== undefined) ctx.tailState.release();
-      if (state.result.state !== "pending" || !ctx.cancellable) return;
-      ctx.controller.abort();
-      state.result.reject(new RpcError("canceled"));
+      if (!ctx.cancellable) return;
+      applyPendingCancel();
     };
     pipeline = new LocalPipeline(
       state.result,
@@ -749,6 +759,68 @@ export class QueuedClient extends RefHook implements ClientHook {
       releaseSelf();
     });
     return outer;
+  }
+
+  callStreaming(interfaceId: bigint, methodId: number, params: Payload): Promise<void> {
+    if (this.redirect !== undefined) {
+      return callStreaming(this.redirect, interfaceId, methodId, params);
+    }
+    let canceled = false;
+    let cancelInner: (() => void) | undefined;
+    let rejectPromise: ((reason: unknown) => void) | undefined;
+    this.addRef();
+    let releasedSelf = false;
+    const releaseSelf = (): void => {
+      if (releasedSelf) return;
+      releasedSelf = true;
+      this.release();
+    };
+    const promise = new Promise<void>((resolve, reject) => {
+      rejectPromise = reject;
+      this.eventual.onSettled(() => {
+        if (canceled) {
+          releaseSelf();
+          return;
+        }
+        const inner = callStreaming(this.redirect!, interfaceId, methodId, params);
+        cancelInner = () => inner.cancel();
+        inner.then(
+          () => {
+            releaseSelf();
+            resolve();
+          },
+          (error) => {
+            releaseSelf();
+            reject(error);
+          },
+        );
+      });
+    }) as StreamingPromise;
+    promise.cancel = () => {
+      if (cancelInner !== undefined) {
+        cancelInner();
+        return;
+      }
+      if (canceled) return;
+      canceled = true;
+      params.release();
+      rejectPromise?.(new RpcError("canceled"));
+      releaseSelf();
+    };
+    return promise;
+  }
+
+  flush(): Promise<void> {
+    const forward = (): Promise<void> => this.redirect?.flush?.() ?? Promise.resolve();
+    if (this.redirect !== undefined) return forward();
+    this.addRef();
+    return new Promise((resolve) => {
+      this.eventual.onSettled(() => {
+        const done = forward();
+        this.release();
+        resolve(done);
+      });
+    });
   }
 
   protected dispose(): void {
