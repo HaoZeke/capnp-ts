@@ -36,6 +36,7 @@ import {
   wpFarSeg,
   wpFarTwo,
   wpKind,
+  wpCompositeElementCount,
   wpListCount,
   wpListEsize,
   wpOffset,
@@ -392,8 +393,8 @@ function finishList(
     }
     const tag = readWord(m, seg, start);
     assertCapnp(wpKind(tag) === WireKind.Struct, "KIND");
-    // Element count lives in the tag "offset" field as unsigned 30-bit.
-    const nelem = Number((tag >> 2n) & 0x3fff_ffffn);
+    // C++ masks this to 29 bits. The extra offset bit is not an element.
+    const nelem = wpCompositeElementCount(tag);
     const dwords = wpStructDwords(tag);
     const pwords = wpStructPwords(tag);
     const step = dwords + pwords;
@@ -402,8 +403,8 @@ function finishList(
       throw new CapnpError("BOUNDS");
     }
     if (step === 0) {
-      // A zero-size element carries no words, so the element count itself is
-      // the amplification. Charge one word per element.
+      // Zero-sized structs carry no words. C++ amplifiedRead charges one
+      // word per element so the count cannot outrun the traversal limit.
       chargeWords(m, nelem);
     }
     return Ptr.list(m, seg, start + 1, esize, nelem, dwords, pwords, step, depth);
