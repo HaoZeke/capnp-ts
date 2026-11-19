@@ -1,0 +1,18 @@
+name: Parity gap
+description: Behaviour that differs from Cap'n Proto C++ 1.4.0
+labels: [parity, enhancement]
+body:
+- type: textarea
+  id: gap
+  attributes:
+    label: What C++ 1.4.0 does and this does not
+  validations: {required: true}
+- type: textarea
+  id: repro
+  attributes:
+    label: Reproducer
+    description: A schema and a capnp command, or a short snippet.
+- type: textarea
+  id: done
+  attributes:
+    label: What done looks like

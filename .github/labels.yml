@@ -1,0 +1,16 @@
+# Applied with scripts/sync-labels.sh (gh label create --force).
+- {name: bug, color: d73a4a, description: Something isn't working}
+- {name: enhancement, color: a2eeef, description: New feature or request}
+- {name: documentation, color: 0075ca, description: Improvements or additions to documentation}
+- {name: parity, color: 5319e7, description: Differs from Cap'n Proto C++ 1.4.0}
+- {name: wire, color: 1d76db, description: Message layout, pointers, packing, canonical form}
+- {name: codegen, color: 0e8a16, description: Schema compiler plugin output}
+- {name: rpc, color: fbca04, description: RPC vat, capabilities, transports}
+- {name: dynamic, color: c5def5, description: Reflection, text and JSON codecs}
+- {name: interop, color: 006b75, description: Behaviour against the C++ reference}
+- {name: security, color: b60205, description: Memory safety, bounds, limits}
+- {name: ci, color: 0e8a16, description: Workflows and release machinery}
+- {name: dependencies, color: 0366d6, description: Dependency updates}
+- {name: good first issue, color: 7057ff, description: Good for newcomers}
+- {name: help wanted, color: 008672, description: Extra attention is needed}
+- {name: wontfix, color: ffffff, description: This will not be worked on}
