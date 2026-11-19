@@ -576,4 +576,96 @@ describe("dynamic list builder storage", () => {
     expect(loadU32(bytes, base + 4)).toBe(0xcccc1234);
     expect(list.asReader().get(1).asUInt16()).toBe(0x1234);
   });
+
+  test("set and init check composite element size, including primitive upgrades", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const tag = loader.resolveStruct("Tag");
+    // Tag is one data word plus one pointer. Upgrading a data primitive
+    // yields one data word and no pointers; upgrading a pointer list yields
+    // no data words and one pointer. Neither fits Tag.
+    expect(tag.dataWordCount).toBe(1);
+    expect(tag.pointerCount).toBe(1);
+
+    function expectSchema(fn: () => void): void {
+      try {
+        fn();
+        throw new Error("expected SCHEMA");
+      } catch (e) {
+        if (e instanceof Error && e.message === "expected SCHEMA") throw e;
+        expect(e).toBeInstanceOf(CapnpError);
+        expect((e as CapnpError).code).toBe("SCHEMA");
+      }
+    }
+
+    const small = new MessageBuilder();
+    const smallRoot = small.initRoot(0, 1);
+    const dataOnly = smallRoot.initCompositeList(0, 2, 1, 0);
+    dataOnly.setU32(0, 0x11111111);
+    dataOnly.nextElement().setU32(0, 0x22222222);
+    const tags = DynamicList.Builder.fromResolvedOrphan(
+      small,
+      ListSchema.of(tag.asType()),
+      small.resolveSlot(smallRoot.slot(0)),
+    );
+    const srcMsg = new MessageBuilder();
+    const src = DynamicStruct.initRoot(srcMsg, tag);
+    src.set("key", "spill");
+    src.set("code", 7);
+    expectSchema(() => tags.set(0, src));
+    const smallBytes = small.segBytes(tags.seg);
+    const smallBase = tags.word * 8;
+    expect(loadU32(smallBytes, smallBase)).toBe(0x11111111);
+    expect(loadU32(smallBytes, smallBase + 8)).toBe(0x22222222);
+
+    const blobs = DynamicList.Builder.fromResolvedOrphan(
+      small,
+      ListSchema.of(Type.DATA),
+      small.resolveSlot(smallRoot.slot(0)),
+    );
+    expectSchema(() => blobs.init(0, 4));
+    expectSchema(() => blobs.set(0, new Uint8Array([1, 2, 3, 4])));
+    expect(loadU32(smallBytes, smallBase)).toBe(0x11111111);
+    expect(loadU32(smallBytes, smallBase + 8)).toBe(0x22222222);
+
+    const pointers = new MessageBuilder();
+    const pointerRoot = pointers.initRoot(0, 1);
+    pointerRoot.initCompositeList(0, 2, 0, 1);
+    const nums = DynamicList.Builder.fromResolvedOrphan(
+      pointers,
+      ListSchema.of(Type.UINT32),
+      pointers.resolveSlot(pointerRoot.slot(0)),
+    );
+    expectSchema(() => nums.set(0, 0x12345678));
+    const pointerTags = DynamicList.Builder.fromResolvedOrphan(
+      pointers,
+      ListSchema.of(tag.asType()),
+      pointers.resolveSlot(pointerRoot.slot(0)),
+    );
+    expectSchema(() => pointerTags.set(0, src));
+
+    // A data primitive upgraded far enough to keep a pointer: init and set
+    // write the pointer section and leave the data word alone.
+    const wide = new MessageBuilder();
+    const wideRoot = wide.initRoot(0, 1);
+    const wideEl = wideRoot.initCompositeList(0, 2, 1, 1);
+    wideEl.setU32(0, 0xabcdef01);
+    wideEl.nextElement().setU32(0, 0x22222222);
+    const dataList = DynamicList.Builder.fromResolvedOrphan(
+      wide,
+      ListSchema.of(Type.DATA),
+      wide.resolveSlot(wideRoot.slot(0)),
+    );
+    const view = dataList.init(0, 4).asData();
+    view[0] = 9;
+    view[1] = 8;
+    view[2] = 7;
+    view[3] = 6;
+    dataList.set(1, new Uint8Array([1, 2, 3, 4]));
+    const wideBytes = wide.segBytes(dataList.seg);
+    const wideBase = dataList.word * 8;
+    expect(loadU32(wideBytes, wideBase)).toBe(0xabcdef01);
+    expect(loadU32(wideBytes, wideBase + 16)).toBe(0x22222222);
+    expect([...dataList.get(0).asData()]).toEqual([9, 8, 7, 6]);
+    expect([...dataList.get(1).asData()]).toEqual([1, 2, 3, 4]);
+  });
 });

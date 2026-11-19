@@ -2599,8 +2599,7 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
     }
 
     if (elemType.isList()) {
-      assertCapnp(this.esize === ElemSize.Pointer, "KIND", "expected pointer list");
-      const slot = new BuilderPointer(this.builder, this.seg, this.word + index);
+      const slot = new BuilderPointer(this.builder, this.seg, this.pointerWord(index));
       const resolved = this.builder.resolveSlot(slot);
       if (resolved.isNull) {
         return new DynamicValueBuilder(
@@ -2619,10 +2618,9 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
     }
 
     if (elemType.isAnyPointer()) {
-      assertCapnp(this.esize === ElemSize.Pointer, "KIND", "expected pointer list");
       return new DynamicValueBuilder(
         DynamicValueType.ANY_POINTER,
-        new BuilderPointer(this.builder, this.seg, this.word + index),
+        new BuilderPointer(this.builder, this.seg, this.pointerWord(index)),
       );
     }
 
@@ -2656,8 +2654,10 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
       `invalid sub-list size ${subSize}`,
     );
     const elemType = this.schema.getElementType();
-    assertCapnp(this.esize === ElemSize.Pointer, "KIND", "expected pointer list");
-    const slot = new BuilderPointer(this.builder, this.seg, this.word + index);
+    // Composite lists, including ones upgraded from a primitive list, keep
+    // the blob in the element's pointer section. pointerWord rejects a
+    // data-only element the way C++ ListBuilder does.
+    const slot = new BuilderPointer(this.builder, this.seg, this.pointerWord(index));
 
     if (elemType.isList()) {
       return new DynamicValueBuilder(
@@ -2697,8 +2697,12 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
    */
   private primByte(index: number, width: number): number {
     if (this.esize === ElemSize.Composite) {
+      // C++ ListBuilder accepts a primitive on a composite element only when
+      // the data section is at least one word (every primitive fits) and
+      // rejects a pointer-only element. A primitive list upgraded to a
+      // struct keeps that one word; a pointer list upgraded in place does not.
       assertCapnp(
-        this.elemDwords >= 1,
+        this.elemDwords * WORD_BYTES >= width,
         "SCHEMA",
         "Schema mismatch: Expected a primitive list, but got a list of pointer-only structs.",
       );
@@ -2743,7 +2747,18 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
     }
 
     if (elemType.isStruct()) {
-      const src = coerceStructReader(rawInput, elemType.asStruct());
+      const st = elemType.asStruct();
+      // C++ getWritableStructListPointer refuses to write a struct into a
+      // composite element that is smaller than the schema, including a list
+      // upgraded from a primitive (one data word, no pointers).
+      if (this.esize === ElemSize.Composite) {
+        assertCapnp(
+          this.elemDwords >= st.dataWordCount && this.elemPwords >= st.pointerCount,
+          "SCHEMA",
+          "Schema mismatch: Existing list value is incompatible with expected type.",
+        );
+      }
+      const src = coerceStructReader(rawInput, st);
       const dst = this.get(index).asStruct();
       // Zero existing inline element body and copy active fields
       const step = this.elemDwords + this.elemPwords;
