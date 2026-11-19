@@ -13,6 +13,7 @@ import {
   ElemSize,
   Message,
   PtrKind,
+  listGetBool,
   listGetF64,
   listGetStruct,
   listGetText,
@@ -216,6 +217,22 @@ describe("cross-width primitive list demotion matrix", () => {
     expect(listGetU32(l64, 0, dfltU32)).toBe(0x54442d18);
     expect(listGetU64(l64, 0, dfltU64)).toBe(piBits);
     expect(listGetF64(l64, 0, dfltF64)).toBeCloseTo(Math.PI);
+  });
+
+  test("C++-compatible List(Bool) view accepts a non-bit data list", () => {
+    const msg = msgFromWords([
+      wpMakeStruct(0, 0, 1),
+      wpMakeList(0, ElemSize.Byte, 3),
+      0n,
+    ]);
+    // C++ ListReader<bool> ignores the source element step. It views the
+    // first `listLen()` bits of the data area as packed Bool elements.
+    storeU8(msg.segments[0]!, 16, 0b0000_0101);
+    const list = msg.root().getP(0);
+
+    expect(listGetBool(list, 0)).toBe(true);
+    expect(listGetBool(list, 1)).toBe(false);
+    expect(listGetBool(list, 2)).toBe(true);
   });
 });
 
