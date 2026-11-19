@@ -375,17 +375,29 @@ class LocalCallContext implements CallContext {
 }
 
 class LocalPipeline implements PipelineHook {
-  constructor(private readonly result: Settle<Payload>) {}
+  constructor(
+    private readonly result: Settle<Payload>,
+    private readonly retain: () => void,
+    private readonly releaseRef: () => void,
+  ) {}
 
   getPipelinedCap(ops: readonly number[]): ClientHook {
     const r = this.result;
     if (r.state === "ok") return r.value.getPipelinedCap(ops);
     if (r.state === "err") return new BrokenClient(r.error);
+    this.retain();
+    let held = true;
+    const drop = (): void => {
+      if (!held) return;
+      held = false;
+      this.releaseRef();
+    };
     const eventual = new Settle<ClientHook>();
     r.onSettled((s) => {
       eventual.resolve(s.state === "ok" ? s.value.getPipelinedCap(ops) : new BrokenClient(s.error));
+      drop();
     });
-    return new QueuedClient(eventual);
+    return new QueuedClient(eventual, drop);
   }
 }
 
@@ -423,13 +435,22 @@ export class LocalClient extends RefHook implements ClientHook {
     // server underneath it.
     this.addRef();
     state.result.onSettled(() => this.release());
-    state.pipeline = new LocalPipeline(state.result);
-    state.onRelease = () => {
+    let liveRefs = 1;
+    const dropInterest = (): void => {
+      if (--liveRefs > 0) return;
       ctx.cancelRequested = true;
       if (state.result.state !== "pending" || !ctx.cancellable) return;
       ctx.controller.abort();
       state.result.reject(new RpcError("canceled"));
     };
+    state.pipeline = new LocalPipeline(
+      state.result,
+      () => {
+        liveRefs++;
+      },
+      dropInterest,
+    );
+    state.onRelease = dropInterest;
     this.when(() => this.run(interfaceId, methodId, ctx, state));
     return state;
   }
@@ -498,9 +519,16 @@ export class LocalClient extends RefHook implements ClientHook {
       },
     );
     if (isStreaming) {
-      this.blocked = done.then(() => {
-        this.blocked = undefined;
-      });
+      const unblock = (): void => {
+        if (this.blocked === gate) this.blocked = undefined;
+      };
+      // Unblock when the call settles — including on cancellation — so a
+      // canceled streaming call whose handler ignores abort cannot deadlock.
+      const gate: Promise<void> = Promise.race([done, state.result.promise.then(() => {}, () => {})]).then(
+        unblock,
+        unblock,
+      );
+      this.blocked = gate;
     }
   }
 
@@ -517,7 +545,10 @@ export class QueuedClient extends RefHook implements ClientHook {
   readonly brand = QueuedClient;
   private redirect: ClientHook | undefined;
 
-  constructor(private readonly eventual: Settle<ClientHook>) {
+  constructor(
+    private readonly eventual: Settle<ClientHook>,
+    private readonly onPendingDispose?: () => void,
+  ) {
     super();
     eventual.onSettled((s) => {
       this.redirect = s.state === "ok" ? s.value : new BrokenClient(s.error);
@@ -541,9 +572,11 @@ export class QueuedClient extends RefHook implements ClientHook {
 
     const outer = new CallState();
     const inner = new Settle<CallState>();
+    let canceledBeforeSend = false;
     outer.pipeline = {
       getPipelinedCap: (ops) => {
         if (inner.state === "ok") return inner.value.pipeline.getPipelinedCap(ops);
+        if (inner.state === "err") return new BrokenClient(inner.error);
         const eventual = new Settle<ClientHook>();
         inner.onSettled((s) => {
           eventual.resolve(
@@ -555,7 +588,27 @@ export class QueuedClient extends RefHook implements ClientHook {
         return new QueuedClient(eventual);
       },
     };
+    // Keep this QueuedClient (and any underlying pipeline ref) alive until
+    // the queued call is forwarded or canceled.
+    this.addRef();
+    let releasedSelf = false;
+    const releaseSelf = (): void => {
+      if (releasedSelf) return;
+      releasedSelf = true;
+      this.release();
+    };
+    outer.onRelease = () => {
+      if (this.redirect === undefined && !canceledBeforeSend) {
+        canceledBeforeSend = true;
+        params.release();
+        const err = new RpcError("canceled");
+        inner.reject(err);
+        outer.result.reject(err);
+        releaseSelf();
+      }
+    };
     this.eventual.onSettled(() => {
+      if (canceledBeforeSend) return;
       const handle = this.redirect!.call(interfaceId, methodId, params, opts);
       inner.resolve(handle);
       handle.result.onSettled((s) => {
@@ -564,11 +617,13 @@ export class QueuedClient extends RefHook implements ClientHook {
       });
       if (outer.released) handle.release();
       else outer.onRelease = () => handle.release();
+      releaseSelf();
     });
     return outer;
   }
 
   protected dispose(): void {
+    if (this.eventual.state === "pending") this.onPendingDispose?.();
     this.eventual.onSettled((s) => {
       if (s.state === "ok") s.value.release();
     });
