@@ -176,10 +176,51 @@ describe("flow controller", () => {
     expect(conn.streamWindow).toBe(16384);
     bufSize = 131072;
     expect(conn.streamWindow).toBe(131072);
-    // Undefined falls back to adaptive default.
+    // No reported buffer falls back to the fixed 64 KiB window.
     const t2 = new StreamTransport(() => {});
     const conn2 = new RpcConnection(t2);
     expect(conn2.streamWindow).toBe(65536);
+  });
+
+  test("the default window stays fixed while an explicit adaptive window grows", async () => {
+    const fixed = new RpcConnection(new StreamTransport(() => {}));
+    const flow = fixed.createFlowController();
+    const a = ack();
+    const b = ack();
+    const c = ack();
+    await flow.send(40000, a);
+    await flow.send(40000, b);
+    const blocked = flow.send(40000, c);
+    a.resolve();
+    await blocked;
+    b.resolve();
+    c.resolve();
+    expect(fixed.streamWindow).toBe(65536);
+
+    let clock = 0;
+    const adaptive = new AdaptiveStreamWindow({
+      initialWindow: 100,
+      minWindow: 100,
+      maxWindow: 500,
+      minRttFloorMs: 1,
+      now: () => clock,
+    });
+    const opted = new RpcConnection(new StreamTransport(() => {}), undefined, undefined, {
+      streamWindow: adaptive,
+    });
+    const optedFlow = opted.createFlowController();
+    const d = ack();
+    const e = ack();
+    const f = ack();
+    await optedFlow.send(60, d);
+    await optedFlow.send(60, e);
+    const wait = optedFlow.send(60, f);
+    clock = 2;
+    d.resolve();
+    await wait;
+    expect(opted.streamWindow).toBeGreaterThan(100);
+    e.resolve();
+    f.resolve();
   });
 });
 

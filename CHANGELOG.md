@@ -31,10 +31,11 @@ Pre-1.0 minor releases may include breaking API changes.
   outgoing and incoming tail calls (`CallContext.tailCall`,
   `sendResultsTo.yourself`, `takeFromOtherQuestion`), `Unimplemented`
   handling, `sendJoin`.
-- RPC streaming: an adaptive byte-window flow controller
-  (`AdaptiveStreamWindow`, `WindowGetter`, `Transport.getSendBufferSize`),
-  serialised server-side stream calls that break the capability on failure,
-  and error propagation, after capnp-C++.
+- RPC streaming: a fixed 64 KiB window, or the transport send buffer
+  when one is reported, matching capnp-C++ two-party.
+  `AdaptiveStreamWindow` remains available as an explicit `streamWindow`
+  opt-in. Serialised server-side stream calls break the capability on
+  failure.
 - RPC membranes, ported from `capnp/membrane.h` with the C++
   `membrane-test.c++` suite: `membrane`, `reverseMembrane`,
   `MembranePolicy`, `RevocablePolicy`, `copyIntoMembrane` and

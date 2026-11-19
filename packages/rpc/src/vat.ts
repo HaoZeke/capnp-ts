@@ -41,7 +41,7 @@ import {
   type TailHandler,
   toRpcError,
 } from "./capability.ts";
-import { AdaptiveStreamWindow, WindowFlowController, type WindowGetter } from "./flow.ts";
+import { DEFAULT_STREAM_WINDOW, WindowFlowController, type WindowGetter } from "./flow.ts";
 import {
   ImportClient,
   PipelineClient,
@@ -453,7 +453,10 @@ export class RpcConnection implements RemoteHost {
     } else if (w !== undefined) {
       this.windowGetter = w;
     } else {
-      const adaptive = new AdaptiveStreamWindow();
+      // capnp-C++ two-party uses the transport send buffer when the
+      // socket reports one, and otherwise a fixed 64 KiB window. The
+      // adaptive window is only used when the caller passes one in
+      // streamWindow.
       let useTransportBuf = transport.getSendBufferSize !== undefined;
       this.windowGetter = {
         getWindow: () => {
@@ -462,10 +465,7 @@ export class RpcConnection implements RemoteHost {
             if (buf !== undefined && buf > 0) return buf;
             useTransportBuf = false;
           }
-          return adaptive.getWindow();
-        },
-        onAck: (bytes, rttMs, saturated) => {
-          if (!useTransportBuf) adaptive.onAck(bytes, rttMs, saturated);
+          return DEFAULT_STREAM_WINDOW;
         },
       };
     }
