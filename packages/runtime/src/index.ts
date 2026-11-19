@@ -18,3 +18,4 @@ export * from "./copy.ts";
 export * from "./schema.ts";
 export * from "./dynamic.ts";
 export * from "./text.ts";
+export * from "./json.ts";
