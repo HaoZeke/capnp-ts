@@ -415,6 +415,18 @@ export class RpcConnection implements RemoteHost {
     }
     if (this.gone !== undefined) return true;
 
+    // The peer chooses what a frame contains, so one that cannot be read
+    // or makes a handler throw is a protocol error: abort, rather than
+    // let it escape the message loop and leave the tables half-updated.
+    try {
+      this.dispatchFrame(frame);
+    } catch (e) {
+      this.abort(new RpcError(`protocol error: ${e instanceof Error ? e.message : String(e)}`));
+    }
+    return true;
+  }
+
+  private dispatchFrame(frame: Uint8Array): void {
     const msg = CapnpMessage.fromFlat(frame);
     const root = msg.root();
     const which = Message_which(root);
@@ -461,7 +473,6 @@ export class RpcConnection implements RemoteHost {
         this.sendUnimplemented(frame);
         break;
     }
-    return true;
   }
 
   /** Handle every pending message. */
