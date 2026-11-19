@@ -673,8 +673,16 @@ export class RpcConnection implements RemoteHost {
   }
 
   private releaseExport(id: number, count: number): void {
+    if (this.gone !== undefined) return;
     const slot = this.exports.get(id);
-    if (slot === undefined) return;
+    if (slot === undefined) {
+      this.abort(new RpcError(`Tried to release invalid export ID ${id}`));
+      return;
+    }
+    if (count < 0 || count > slot.refcount) {
+      this.abort(new RpcError(`Tried to drop export ${id} refcount below zero`));
+      return;
+    }
     slot.refcount -= count;
     if (slot.refcount > 0) return;
     this.exports.delete(id);
