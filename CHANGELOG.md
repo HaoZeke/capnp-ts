@@ -48,6 +48,10 @@ Pre-1.0 minor releases may include breaking API changes.
   cancellation, streaming, membrane and persistence scenarios against
   capnp-C++ in both directions.
 - `docs/orgmode/rpc.org`.
+- `capnp-ts` CLI (`packages/runtime/bin/capnp-ts`, `@haozeke/capnp/cli`)
+  implementing `encode`, `decode`, `convert` across `binary`, `packed`, `flat`,
+  `flat-packed`, `canonical`, `text`, and `json`, plus `eval` for schema
+  constants, field defaults, and subscripted expressions.
 - Cap'n Proto compat JSON codec (`JsonCodec`, `encodeJson`, `decodeJson`,
   `splitJsonMessages`) matching `capnp/compat/json.h` defaults and `$Json`
   annotations (`name`, `flatten`, `discriminator`, `hex`, `base64`).

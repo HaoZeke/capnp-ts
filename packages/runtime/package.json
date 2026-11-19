@@ -3,6 +3,9 @@
   "version": "0.1.0-dev",
   "description": "Pure TypeScript Cap'n Proto wire runtime (HaoZeke family)",
   "type": "module",
+  "bin": {
+    "capnp-ts": "./bin/capnp-ts"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -48,6 +51,12 @@
       "import": "./dist/json.js",
       "default": "./dist/json.js"
     },
+    "./cli": {
+      "bun": "./src/cli.ts",
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js",
+      "default": "./dist/cli.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -62,5 +71,5 @@
   },
   "license": "MIT",
   "sideEffects": false,
-  "files": ["src", "dist", "LICENSE", "README.md"]
+  "files": ["bin", "src", "dist", "LICENSE", "README.md"]
 }
