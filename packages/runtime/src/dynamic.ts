@@ -2601,17 +2601,32 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
     if (elemType.isList()) {
       const slot = new BuilderPointer(this.builder, this.seg, this.pointerWord(index));
       const resolved = this.builder.resolveSlot(slot);
+      const innerSchema = elemType.asList();
       if (resolved.isNull) {
         return new DynamicValueBuilder(
           DynamicValueType.LIST,
-          DynamicListBuilder.empty(this.builder, elemType.asList()),
+          DynamicListBuilder.empty(this.builder, innerSchema),
         );
+      }
+      // List(List(Struct)) must upgrade an older inner struct list the same
+      // way a struct field that is List(Struct) does. Otherwise a write of a
+      // field the new schema added fails.
+      if (innerSchema.getElementType().isStruct()) {
+        const upgraded = upgradeStructListAtSlot(
+          this.builder,
+          slot,
+          innerSchema,
+          resolved,
+        );
+        if (upgraded) {
+          return new DynamicValueBuilder(DynamicValueType.LIST, upgraded);
+        }
       }
       return new DynamicValueBuilder(
         DynamicValueType.LIST,
         DynamicListBuilder.fromResolvedOrphan(
           this.builder,
-          elemType.asList(),
+          innerSchema,
           resolved,
         ),
       );

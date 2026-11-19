@@ -20,6 +20,7 @@ import {
   SchemaLoader,
   Type,
   canonicalizeFlat,
+  storeU32,
   deepCopyPtrToSlot,
   newDynamicListOrphan,
   newDynamicStructOrphan,
@@ -715,5 +716,55 @@ describe("dynamic list builder storage", () => {
     bitList.set(0, true);
     expect(bitList.get(0).asBool()).toBe(true);
     expect(bitList.get(1).asBool()).toBe(false);
+  });
+
+  test("List(List(Struct)) get upgrades an older inner struct list", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const tag = loader.resolveStruct("Tag");
+    const innerSchema = ListSchema.of(tag.asType());
+    const outerSchema = ListSchema.of(innerSchema.asType());
+    const wireCode = (77 ^ -42) >>> 0;
+
+    const small = new MessageBuilder();
+    const smallRoot = small.initRoot(0, 1);
+    const smallRows = smallRoot.initPointerList(0, 1);
+    const smallInner = DynamicList.Builder.allocateCompositeAtSlot(
+      small,
+      smallRows,
+      innerSchema,
+      1,
+      1,
+      0,
+    );
+    storeU32(small.segBytes(smallInner.seg), smallInner.word * 8, wireCode);
+    const smallOuter = DynamicList.Builder.fromResolvedOrphan(
+      small,
+      outerSchema,
+      small.resolveSlot(smallRoot.slot(0)),
+    );
+    const smallRow = smallOuter.get(0).asList();
+    smallRow.get(0).asStruct().set("key", "added-key");
+    expect(smallRow.get(0).asStruct().get("key").asText()).toBe("added-key");
+    expect(smallRow.get(0).asStruct().get("code").asInt32()).toBe(77);
+
+    const prim = new MessageBuilder();
+    const primRoot = prim.initRoot(0, 1);
+    const primRows = primRoot.initPointerList(0, 1);
+    const u32 = DynamicList.Builder.allocateAtSlot(
+      prim,
+      primRows,
+      ListSchema.of(Type.UINT32),
+      1,
+    );
+    u32.set(0, wireCode);
+    const primOuter = DynamicList.Builder.fromResolvedOrphan(
+      prim,
+      outerSchema,
+      prim.resolveSlot(primRoot.slot(0)),
+    );
+    const primRow = primOuter.get(0).asList();
+    primRow.get(0).asStruct().set("key", "from-prim");
+    expect(primRow.get(0).asStruct().get("key").asText()).toBe("from-prim");
+    expect(primRow.get(0).asStruct().get("code").asInt32()).toBe(77);
   });
 });
