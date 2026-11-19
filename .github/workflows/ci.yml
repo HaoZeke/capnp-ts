@@ -93,5 +93,5 @@ jobs:
       # real EzRpcServer and calls it.
       - name: Build the capnp-C++ peer
         run: pixi run -- bash interop/build-peer.sh
-      - name: Call it from this vat
-        run: pixi run -- bash interop/run_rpc_interop.sh build-interop/rpc_peer_server interop/rpc_client.ts
+      - name: Call it from this vat, and let it call this vat
+        run: pixi run -- bash interop/run_rpc_interop.sh build-interop/rpc_peer_server interop/rpc_client.ts build-interop/rpc_peer
