@@ -244,6 +244,24 @@ describe("cancellation", () => {
   });
 });
 
+describe("queued calls", () => {
+  test("canceling a queued call releases its parameters", () => {
+    let resolve!: (c: Client) => void;
+    const promise = Client.fromPromise(new Promise<Client>((r) => (resolve = r)));
+    const param = new Counter();
+    const call = promise.call(
+      IFACE,
+      0,
+      (p, cb) => cb.setCap(p, 0, Client.local(param).hook),
+      0,
+      1,
+    );
+    call.release();
+    expect(param.disposed).toBe(1);
+    resolve(Client.local(new Counter()));
+  });
+});
+
 describe("streaming calls on a local server", () => {
   const stream = (log: string[], failOn?: number): RpcServer => ({
     isStreaming: (_i, m) => m === 0,

@@ -231,22 +231,37 @@ export interface ClientHook {
   readonly brokenError: RpcError | undefined;
 }
 
+/** A stream promise that can be canceled, dropping the underlying call. */
+export type StreamingPromise = Promise<void> & { cancel(): void };
+
 /** A stream call on a hook with no flow control: resolves when the call returns. */
 export function callStreaming(
   hook: ClientHook,
   interfaceId: bigint,
   methodId: number,
   params: Payload,
-): Promise<void> {
-  if (hook.callStreaming !== undefined) return hook.callStreaming(interfaceId, methodId, params);
+): StreamingPromise {
+  if (hook.callStreaming !== undefined) {
+    const promise = hook.callStreaming(interfaceId, methodId, params) as StreamingPromise;
+    promise.cancel ??= () => {};
+    return promise;
+  }
   const call = hook.call(interfaceId, methodId, params, { streaming: true });
-  return call.result.promise.then(
-    () => call.release(),
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    call.release();
+  };
+  const promise = call.result.promise.then(
+    () => release(),
     (e) => {
-      call.release();
+      release();
       throw e;
     },
-  );
+  ) as StreamingPromise;
+  promise.cancel = release;
+  return promise;
 }
 
 export abstract class RefHook {
