@@ -448,12 +448,12 @@ describe("DynamicStruct / DynamicList / DynamicEnum / DynamicCapability", () => 
     const pingRes = await upcasted.call("ping", (p) => p.set("msg", "hi"));
     expect(pingRes.get("reply").asText()).toBe("pong:hi");
 
-    const compRes = await client.call("compute", (p) => {
+    const compResult = await client.call("compute", (p) => {
       const inp = p.init("input").asStruct();
       inp.set("key", "job");
       inp.set("code", 9);
     });
-    expect(compRes.get("output").asStruct().get("title").asText()).toBe("job#9");
+    expect(compResult.get("output").asStruct().get("title").asText()).toBe("job#9");
   });
 
   test.skipIf(!hasCapnp)(
