@@ -191,7 +191,7 @@ describe("promise pipelining", () => {
 });
 
 describe("disembargo", () => {
-  test("senderLoopback is echoed back as receiverLoopback with the same id", () => {
+  test("senderLoopback aimed at a local object is a protocol error, not an echo", () => {
     const pair = new MemoryTransportPair();
     const vat = new RpcConnection(pair.b, new CountingServer());
     sendBootstrap(pair.a, 1);
@@ -211,15 +211,13 @@ describe("disembargo", () => {
     pair.a.send(b.toFlat());
     vat.pump();
 
+    // Export 0 is a local object, so it cannot be a promise that resolved
+    // back to the sender. The spec makes that an abort.
     const frame = pair.a.receive();
     expect(frame).not.toBeNull();
     const reply = CapnpMessage.fromFlat(frame!).root();
-    expect(Message_which(reply)).toBe(Message.disembargo);
-    const replyCtx = Disembargo_getContext(Message_getDisembargo(reply));
-    expect(Disembargo_context_which(replyCtx)).toBe(
-      Disembargo_context.receiverLoopback,
-    );
-    expect(Disembargo_context_getReceiverLoopback(replyCtx)).toBe(12345);
+    expect(Message_which(reply)).toBe(Message.abort);
+    expect(vat.disconnected).toBeDefined();
   });
 
   test("receiverLoopback is absorbed rather than echoed", () => {
