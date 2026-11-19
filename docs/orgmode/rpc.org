@@ -33,7 +33,8 @@ own and are released with =Release= when they are dropped. This is
 capnp-C++'s rule.
 
 A server opts in to cancellation per call with =ctx.allowCancellation()=;
-a canceled call's =ctx.signal= then aborts and no =Return= is sent.
+a canceled call's =ctx.signal= then aborts and the vat answers with
+=Return.canceled= so the caller can drop the question table entry.
 Without it a canceled call runs to completion and its results are
 discarded, which is also what capnp-C++ does by default.
 
@@ -48,35 +49,40 @@ back, so none overtakes an earlier one.
 
 Chains shorten: a capability written into a message is looked through to
 its most resolved hook first, so a resolved promise goes out as its target
-and a promise that resolves to another promise exports the second. Calls
-the peer forwarded back to us with =sendResultsTo.yourself= are answered
-with =resultsSentElsewhere= and claimed by =takeFromOtherQuestion=. Sending
-such tail calls is not implemented; the forwarded call just round-trips.
+and a promise that resolves to another promise exports the second. Tail
+calls work in both directions: calls forwarded back to the caller (via
+=CallContext.tailCall= or a promise resolving back to the caller) are sent
+with =sendResultsTo.yourself= and answered immediately with
+=takeFromOtherQuestion=, and incoming =yourself= calls are held and
+answered with =resultsSentElsewhere=.
 
 * Broken capabilities, abort, disconnect
 
 =newBrokenCap= makes a capability whose calls fail with one error, and an
 exception thrown by a pipelined or resolved target breaks what depends on
 it. =RpcConnection.abort(error)= sends =Abort= and disconnects; a received
-=Abort= or a closed transport does the same without sending. On
-disconnect every outstanding question fails with a =disconnected= error,
-every import becomes broken, and everything exported is released.
+=Abort=, an over-release, or a closed transport does the same without
+sending (over-release and protocol errors send =Abort= first). On
+disconnect every outstanding question and pending embargo fails with a
+=disconnected= error, every import becomes broken, and everything exported
+is released.
 
 * Streaming
 
 A =-> stream= method returns nothing; what matters is that a sender
-cannot run ahead of the receiver. =Client.callStreaming= sends at once
-and resolves when the bytes in flight (each message's size, until its
-=Return= comes back) are within a window of 64 KiB plus the largest
+cannot run ahead of the receiver. =Client.callStreaming= (and =RpcStream=)
+sends at once and resolves when the bytes in flight (each message's size,
+until its =Return= comes back) are within the window plus the largest
 message sent, as capnp-C++'s flow controller does. The first failure is
 kept: later sends and =Client.flush()= reject with it.
 
 On the serving side a method that declares itself streaming
 (=RpcServer.isStreaming=, or a =DispatchResult= with =streaming=) makes
 later calls wait for it, and its failure breaks the capability, so the
-error also reaches the next ordinary call. The window is fixed, where
-capnp-C++ can adapt it to the connection; set it with the
-=streamWindow= option.
+error also reaches the next ordinary call. By default the window tracks
+=Transport.getSendBufferSize()= if supplied or adapts with
+=AdaptiveStreamWindow= (starting at 64 KiB); pass a fixed number or
+=WindowGetter= via the =streamWindow= option to override it.
 
 * Membranes
 
