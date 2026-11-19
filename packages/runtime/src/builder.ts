@@ -63,6 +63,8 @@ export interface BuilderOptions {
   maxSegWords?: number;
   /** Grow last segment instead of appending (canonical path). */
   forceSingle?: boolean;
+  /** Allocate subsequent segments at max(firstWords, need) without doubling. */
+  fixedSegmentGrowth?: boolean;
 }
 
 /** Pointer slot or object body location inside a MessageBuilder. */
@@ -180,13 +182,17 @@ export class MessageBuilder {
   segs: BSeg[] = [];
   maxSegWords: number;
   forceSingle: boolean;
+  readonly firstWords: number;
+  readonly fixedSegmentGrowth: boolean;
 
   constructor(opts: BuilderOptions = {}) {
     this.maxSegWords = opts.maxSegWords ?? 0;
     this.forceSingle = opts.forceSingle ?? false;
+    this.fixedSegmentGrowth = opts.fixedSegmentGrowth ?? false;
     let first = opts.firstWords ?? DEFAULT_FIRST_WORDS;
     if (first < 1) first = 1;
     if (first > MAX_SEGMENT_WORDS) first = MAX_SEGMENT_WORDS;
+    this.firstWords = first;
     this.appendSegment(first);
   }
 
@@ -264,7 +270,11 @@ export class MessageBuilder {
       s.words += n;
       return { seg: lastIdx, word };
     }
-    let ncap = last.cap ? last.cap * 2 : 16;
+    let ncap = this.fixedSegmentGrowth
+      ? Math.max(this.firstWords, n)
+      : last.cap
+        ? last.cap * 2
+        : 16;
     if (ncap < n) ncap = n;
     if (ncap > lim) ncap = lim;
     assertCapnp(ncap >= n, "ALLOC");
@@ -279,6 +289,7 @@ export class MessageBuilder {
     const s = this.segs[seg];
     if (!s) return null;
     if (s.words + n > this.limWords()) return null;
+    if (this.fixedSegmentGrowth && s.words + n > s.cap) return null;
     try {
       this.segEnsure(seg, s.words + n);
     } catch {
