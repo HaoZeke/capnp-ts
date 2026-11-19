@@ -21,8 +21,10 @@ import {
   Type,
   canonicalizeFlat,
   deepCopyPtrToSlot,
+  newDynamicListOrphan,
   newDynamicStructOrphan,
 } from "../src/index.ts";
+import { loadU32 } from "../src/endian.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..", "..");
@@ -509,4 +511,69 @@ describe("DynamicStruct / DynamicList / DynamicEnum / DynamicCapability", () => 
       expect(tsCanonical).toEqual(new Uint8Array(canon.stdout));
     },
   );
+});
+
+describe("dynamic list builder storage", () => {
+  test("Data init returns a view of the message bytes", () => {
+    const { builder: list } = newDynamicListOrphan(
+      new MessageBuilder(),
+      ListSchema.of(Type.DATA),
+      1,
+    );
+    const view = list.init(0, 4).asData();
+    view[0] = 9;
+    view[1] = 8;
+    view[2] = 7;
+    view[3] = 6;
+    expect([...list.get(0).asData()]).toEqual([9, 8, 7, 6]);
+  });
+
+  test("a primitive write on a composite list uses each struct data section", () => {
+    const b = new MessageBuilder();
+    const root = b.initRoot(0, 1);
+    const first = root.initCompositeList(0, 2, 2, 0);
+    first.setU32(0, 0x11111111);
+    first.setU32(4, 0xaaaaaaaa);
+    const second = first.nextElement();
+    second.setU32(0, 0x33333333);
+    second.setU32(4, 0xbbbbbbbb);
+
+    const list = DynamicList.Builder.fromResolvedOrphan(
+      b,
+      ListSchema.of(Type.UINT32),
+      b.resolveSlot(root.slot(0)),
+    );
+    list.set(1, 0x22222222);
+
+    const bytes = b.segBytes(list.seg);
+    const base = list.word * 8;
+    expect(loadU32(bytes, base)).toBe(0x11111111);
+    expect(loadU32(bytes, base + 4)).toBe(0xaaaaaaaa);
+    expect(loadU32(bytes, base + 16)).toBe(0x22222222);
+    expect(loadU32(bytes, base + 20)).toBe(0xbbbbbbbb);
+    expect(list.asReader().get(0).asUInt32()).toBe(0x11111111);
+    expect(list.asReader().get(1).asUInt32()).toBe(0x22222222);
+  });
+
+  test("a primitive write uses the wire element stride", () => {
+    const b = new MessageBuilder();
+    const root = b.initRoot(0, 1);
+    const payload = new Uint8Array(8);
+    new DataView(payload.buffer).setUint32(0, 0xaaaabbbb, true);
+    new DataView(payload.buffer).setUint32(4, 0xccccdddd, true);
+    root.initPrimList(0, ElemSize.FourBytes, 2, 4, payload);
+
+    const list = DynamicList.Builder.fromResolvedOrphan(
+      b,
+      ListSchema.of(Type.UINT16),
+      b.resolveSlot(root.slot(0)),
+    );
+    list.set(1, 0x1234);
+
+    const bytes = b.segBytes(list.seg);
+    const base = list.word * 8;
+    expect(loadU32(bytes, base)).toBe(0xaaaabbbb);
+    expect(loadU32(bytes, base + 4)).toBe(0xcccc1234);
+    expect(list.asReader().get(1).asUInt16()).toBe(0x1234);
+  });
 });
