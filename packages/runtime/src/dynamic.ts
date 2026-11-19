@@ -1472,6 +1472,17 @@ export class DynamicStructBuilder {
           );
         }
         assertCapnp(resolved.kind === PtrKind.List, "KIND", "slot is not a list");
+        if (listSchema.getElementType().isStruct()) {
+          const upgraded = upgradeStructListAtSlot(
+            this.sb.builder,
+            slot,
+            listSchema,
+            resolved,
+          );
+          if (upgraded) {
+            return new DynamicValueBuilder(DynamicValueType.LIST, upgraded);
+          }
+        }
         return new DynamicValueBuilder(
           DynamicValueType.LIST,
           DynamicListBuilder.fromResolvedOrphan(
@@ -1599,11 +1610,20 @@ export class DynamicStructBuilder {
     const dval = field.defaultValue;
     const val = coerceToDynamicReader(rawInput, t);
 
+    const checkDataBytes = (byteOffset: number, size: number) => {
+      assertCapnp(
+        byteOffset + size <= this.sb.dwords * WORD_BYTES,
+        "BOUNDS",
+        `struct data section (${this.sb.dwords} words) too small for field '${field.name}'`,
+      );
+    };
+
     switch (t.whichCode) {
       case TypeKind.Void:
         val.asVoid();
         return;
       case TypeKind.Bool:
+        checkDataBytes(field.offset >>> 3, 1);
         this.sb.setBool(
           field.offset,
           val.asBool(),
@@ -1611,6 +1631,7 @@ export class DynamicStructBuilder {
         );
         return;
       case TypeKind.Int8:
+        checkDataBytes(field.offset, 1);
         this.sb.setU8(
           field.offset,
           val.asInt8() & 0xff,
@@ -1618,6 +1639,7 @@ export class DynamicStructBuilder {
         );
         return;
       case TypeKind.Int16:
+        checkDataBytes(field.offset * 2, 2);
         this.sb.setU16(
           field.offset * 2,
           val.asInt16() & 0xffff,
@@ -1625,6 +1647,7 @@ export class DynamicStructBuilder {
         );
         return;
       case TypeKind.Int32:
+        checkDataBytes(field.offset * 4, 4);
         this.sb.setU32(
           field.offset * 4,
           val.asInt32() >>> 0,
@@ -1632,6 +1655,7 @@ export class DynamicStructBuilder {
         );
         return;
       case TypeKind.Int64:
+        checkDataBytes(field.offset * 8, 8);
         this.sb.setU64(
           field.offset * 8,
           BigInt.asUintN(64, val.asInt64()),
@@ -1639,6 +1663,7 @@ export class DynamicStructBuilder {
         );
         return;
       case TypeKind.UInt8:
+        checkDataBytes(field.offset, 1);
         this.sb.setU8(
           field.offset,
           val.asUInt8(),
@@ -1646,6 +1671,7 @@ export class DynamicStructBuilder {
         );
         return;
       case TypeKind.UInt16:
+        checkDataBytes(field.offset * 2, 2);
         this.sb.setU16(
           field.offset * 2,
           val.asUInt16(),
@@ -1653,6 +1679,7 @@ export class DynamicStructBuilder {
         );
         return;
       case TypeKind.UInt32:
+        checkDataBytes(field.offset * 4, 4);
         this.sb.setU32(
           field.offset * 4,
           val.asUInt32(),
@@ -1660,6 +1687,7 @@ export class DynamicStructBuilder {
         );
         return;
       case TypeKind.UInt64:
+        checkDataBytes(field.offset * 8, 8);
         this.sb.setU64(
           field.offset * 8,
           val.asUInt64(),
@@ -1667,6 +1695,7 @@ export class DynamicStructBuilder {
         );
         return;
       case TypeKind.Float32: {
+        checkDataBytes(field.offset * 4, 4);
         const bits = f32ToBits(val.asFloat32());
         this.sb.setU32(
           field.offset * 4,
@@ -1676,6 +1705,7 @@ export class DynamicStructBuilder {
         return;
       }
       case TypeKind.Float64: {
+        checkDataBytes(field.offset * 8, 8);
         const bits = f64ToBits(val.asFloat64());
         this.sb.setU64(
           field.offset * 8,
@@ -1685,6 +1715,7 @@ export class DynamicStructBuilder {
         return;
       }
       case TypeKind.Enum: {
+        checkDataBytes(field.offset * 2, 2);
         const enumSchema = t.asEnum();
         let ord: number;
         if (val.getType() === DynamicValueType.TEXT) {
@@ -2069,99 +2100,119 @@ export class DynamicListReader implements Iterable<DynamicValueReader> {
 
     switch (elemType.whichCode) {
       case TypeKind.Void:
+        assertCapnp(
+          this.ptr.esize !== ElemSize.Bit,
+          "KIND",
+          "List(Bool) cannot be read as List(Void)",
+        );
         return DynamicValueReader.VOID;
       case TypeKind.Bool:
-        if (compStruct) {
-          return DynamicValueReader.fromBool(compStruct.getBool(0));
-        }
         assertCapnp(
-          this.ptr.esize === ElemSize.Bit,
+          this.ptr.esize === ElemSize.Bit ||
+            this.ptr.esize === ElemSize.Byte ||
+            this.ptr.esize === ElemSize.TwoBytes ||
+            this.ptr.esize === ElemSize.FourBytes ||
+            this.ptr.esize === ElemSize.EightBytes,
           "KIND",
-          "expected bit list for List(Bool)",
+          "expected bit or primitive data list for List(Bool)",
         );
         return DynamicValueReader.fromBool(this.ptr.listGetBool(index));
       case TypeKind.Int8: {
         const u = compStruct
-          ? compStruct.getU8(0)
-          : this.readPrimBytes(index, ElemSize.Byte, 1)[0]!;
+          ? this.readCompositePrimU8(compStruct)
+          : this.readPrimBytes(index, 1)[0]!;
         return DynamicValueReader.fromInt((u << 24) >> 24);
       }
       case TypeKind.UInt8: {
         const u = compStruct
-          ? compStruct.getU8(0)
-          : this.readPrimBytes(index, ElemSize.Byte, 1)[0]!;
+          ? this.readCompositePrimU8(compStruct)
+          : this.readPrimBytes(index, 1)[0]!;
         return DynamicValueReader.fromUInt(u);
       }
       case TypeKind.Int16: {
         const u = compStruct
-          ? compStruct.getU16(0)
-          : loadU16(this.readPrimBytes(index, ElemSize.TwoBytes, 2), 0);
+          ? this.readCompositePrimU16(compStruct)
+          : loadU16(this.readPrimBytes(index, 2), 0);
         return DynamicValueReader.fromInt((u << 16) >> 16);
       }
       case TypeKind.UInt16: {
         const u = compStruct
-          ? compStruct.getU16(0)
-          : loadU16(this.readPrimBytes(index, ElemSize.TwoBytes, 2), 0);
+          ? this.readCompositePrimU16(compStruct)
+          : loadU16(this.readPrimBytes(index, 2), 0);
         return DynamicValueReader.fromUInt(u);
       }
       case TypeKind.Enum: {
         const u = compStruct
-          ? compStruct.getU16(0)
-          : loadU16(this.readPrimBytes(index, ElemSize.TwoBytes, 2), 0);
+          ? this.readCompositePrimU16(compStruct)
+          : loadU16(this.readPrimBytes(index, 2), 0);
         return DynamicValueReader.fromEnum(
           new DynamicEnum(elemType.asEnum(), u),
         );
       }
       case TypeKind.Int32: {
         const u = compStruct
-          ? compStruct.getU32(0)
-          : loadU32(this.readPrimBytes(index, ElemSize.FourBytes, 4), 0);
+          ? this.readCompositePrimU32(compStruct)
+          : loadU32(this.readPrimBytes(index, 4), 0);
         return DynamicValueReader.fromInt(u | 0);
       }
       case TypeKind.UInt32: {
         const u = compStruct
-          ? compStruct.getU32(0)
-          : loadU32(this.readPrimBytes(index, ElemSize.FourBytes, 4), 0);
+          ? this.readCompositePrimU32(compStruct)
+          : loadU32(this.readPrimBytes(index, 4), 0);
         return DynamicValueReader.fromUInt(u >>> 0);
       }
       case TypeKind.Float32: {
         const f = compStruct
-          ? compStruct.getF32(0)
-          : loadF32(this.readPrimBytes(index, ElemSize.FourBytes, 4), 0);
+          ? this.readCompositePrimF32(compStruct)
+          : loadF32(this.readPrimBytes(index, 4), 0);
         return DynamicValueReader.fromFloat(f);
       }
       case TypeKind.Int64: {
         const u = compStruct
-          ? compStruct.getU64(0)
-          : loadU64(this.readPrimBytes(index, ElemSize.EightBytes, 8), 0);
+          ? this.readCompositePrimU64(compStruct)
+          : loadU64(this.readPrimBytes(index, 8), 0);
         return DynamicValueReader.fromInt(BigInt.asIntN(64, u));
       }
       case TypeKind.UInt64: {
         const u = compStruct
-          ? compStruct.getU64(0)
-          : loadU64(this.readPrimBytes(index, ElemSize.EightBytes, 8), 0);
+          ? this.readCompositePrimU64(compStruct)
+          : loadU64(this.readPrimBytes(index, 8), 0);
         return DynamicValueReader.fromUInt(u);
       }
       case TypeKind.Float64: {
         const f = compStruct
-          ? compStruct.getF64(0)
-          : loadF64(this.readPrimBytes(index, ElemSize.EightBytes, 8), 0);
+          ? this.readCompositePrimF64(compStruct)
+          : loadF64(this.readPrimBytes(index, 8), 0);
         return DynamicValueReader.fromFloat(f);
       }
       case TypeKind.Text:
-        return DynamicValueReader.fromText(this.ptr.listGetText(index));
+        if (compStruct) {
+          assertCapnp(
+            this.ptr.pwords >= 1,
+            "KIND",
+            "expected pointer list, got data-only struct list",
+          );
+          return DynamicValueReader.fromText(readPtrAsText(compStruct.getP(0), ""));
+        }
+        return DynamicValueReader.fromText(readPtrAsText(this.readPtrElem(index), ""));
       case TypeKind.Data: {
-        const p = compStruct ? compStruct.getP(0) : this.readPtrElem(index);
+        const p = compStruct
+          ? this.readCompositePtr(compStruct)
+          : this.readPtrElem(index);
         return DynamicValueReader.fromData(readPtrAsData(p, EMPTY_BYTES));
       }
       case TypeKind.List: {
-        const p = compStruct ? compStruct.getP(0) : this.readPtrElem(index);
+        const p = compStruct
+          ? this.readCompositePtr(compStruct)
+          : this.readPtrElem(index);
         return DynamicValueReader.fromList(
           new DynamicListReader(elemType.asList(), p),
         );
       }
       case TypeKind.Interface: {
-        const p = compStruct ? compStruct.getP(0) : this.readPtrElem(index);
+        const p = compStruct
+          ? this.readCompositePtr(compStruct)
+          : this.readPtrElem(index);
         if (p.isNull) {
           return DynamicValueReader.fromCapability(
             new DynamicCapabilityClient(elemType.asInterface(), null),
@@ -2173,7 +2224,9 @@ export class DynamicListReader implements Iterable<DynamicValueReader> {
         );
       }
       case TypeKind.AnyPointer: {
-        const p = compStruct ? compStruct.getP(0) : this.readPtrElem(index);
+        const p = compStruct
+          ? this.readCompositePtr(compStruct)
+          : this.readPtrElem(index);
         return DynamicValueReader.fromAnyPointer(p);
       }
       default:
@@ -2181,19 +2234,82 @@ export class DynamicListReader implements Iterable<DynamicValueReader> {
     }
   }
 
-  private readPrimBytes(
-    index: number,
-    expectedEsize: number,
-    elemBytes: number,
-  ): Uint8Array {
+  private assertCompositeData(): void {
     assertCapnp(
-      this.ptr.esize === expectedEsize,
+      this.ptr.dwords >= 1,
       "KIND",
-      `list element size mismatch: wire=${this.ptr.esize} expected=${expectedEsize}`,
+      "expected primitive list, got pointer-only struct list",
+    );
+  }
+
+  private readCompositePrimU8(el: Ptr): number {
+    this.assertCompositeData();
+    return el.getU8(0);
+  }
+
+  private readCompositePrimU16(el: Ptr): number {
+    this.assertCompositeData();
+    return el.getU16(0);
+  }
+
+  private readCompositePrimU32(el: Ptr): number {
+    this.assertCompositeData();
+    return el.getU32(0);
+  }
+
+  private readCompositePrimF32(el: Ptr): number {
+    this.assertCompositeData();
+    return el.getF32(0);
+  }
+
+  private readCompositePrimU64(el: Ptr): bigint {
+    this.assertCompositeData();
+    return el.getU64(0);
+  }
+
+  private readCompositePrimF64(el: Ptr): number {
+    this.assertCompositeData();
+    return el.getF64(0);
+  }
+
+  private readCompositePtr(el: Ptr): Ptr {
+    assertCapnp(
+      this.ptr.pwords >= 1,
+      "KIND",
+      "expected pointer list, got data-only struct list",
+    );
+    return el.getP(0);
+  }
+
+  private readPrimBytes(index: number, minBytes: number): Uint8Array {
+    let srcBytes = 0;
+    switch (this.ptr.esize) {
+      case ElemSize.Byte:
+        srcBytes = 1;
+        break;
+      case ElemSize.TwoBytes:
+        srcBytes = 2;
+        break;
+      case ElemSize.FourBytes:
+        srcBytes = 4;
+        break;
+      case ElemSize.EightBytes:
+        srcBytes = 8;
+        break;
+      default:
+        throw new CapnpError(
+          "KIND",
+          `list element size mismatch: wire=${this.ptr.esize} expected>=${minBytes}B`,
+        );
+    }
+    assertCapnp(
+      srcBytes >= minBytes,
+      "KIND",
+      `list element width ${srcBytes}B smaller than requested ${minBytes}B`,
     );
     const s = this.ptr.msg.segs[this.ptr.seg]!;
-    const off = this.ptr.word * WORD_BYTES + index * elemBytes;
-    return s.data.subarray(off, off + elemBytes);
+    const off = this.ptr.word * WORD_BYTES + index * srcBytes;
+    return s.data.subarray(off, off + minBytes);
   }
 
   private readPtrElem(index: number): Ptr {
@@ -2301,6 +2417,39 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
   }
 
   /** @internal */
+  static allocateCompositeAtSlot(
+    builder: MessageBuilder,
+    slot: BuilderPointer,
+    schema: ListSchema,
+    count: number,
+    dw: number,
+    pw: number,
+  ): DynamicListBuilder {
+    const step = dw + pw;
+    const contentWords = count * step;
+    const { seg: tagSeg, word: tagWord } = builder.allocWords(1 + contentWords);
+    builder.storeW(tagSeg, tagWord, wpMakeStruct(count | 0, dw, pw));
+    builder.writeListPtr(
+      slot.seg,
+      slot.word,
+      tagSeg,
+      tagWord,
+      ElemSize.Composite,
+      contentWords,
+    );
+    return new DynamicListBuilder({
+      builder,
+      schema,
+      seg: tagSeg,
+      word: tagWord + 1,
+      esize: ElemSize.Composite,
+      count,
+      elemDwords: dw,
+      elemPwords: pw,
+    });
+  }
+
+  /** @internal */
   static allocateAtSlot(
     builder: MessageBuilder,
     slot: BuilderPointer,
@@ -2312,30 +2461,14 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
 
     if (elemType.isStruct()) {
       const st = elemType.asStruct();
-      const dw = st.dataWordCount;
-      const pw = st.pointerCount;
-      const step = dw + pw;
-      const contentWords = count * step;
-      const { seg: tagSeg, word: tagWord } = builder.allocWords(1 + contentWords);
-      builder.storeW(tagSeg, tagWord, wpMakeStruct(count | 0, dw, pw));
-      builder.writeListPtr(
-        slot.seg,
-        slot.word,
-        tagSeg,
-        tagWord,
-        ElemSize.Composite,
-        contentWords,
-      );
-      return new DynamicListBuilder({
+      return DynamicListBuilder.allocateCompositeAtSlot(
         builder,
+        slot,
         schema,
-        seg: tagSeg,
-        word: tagWord + 1,
-        esize: ElemSize.Composite,
         count,
-        elemDwords: dw,
-        elemPwords: pw,
-      });
+        st.dataWordCount,
+        st.pointerCount,
+      );
     }
 
     if (esize === ElemSize.Pointer) {
@@ -2934,6 +3067,114 @@ export function initDynamicRoot(
   return new DynamicStructBuilder(schema, sb);
 }
 
+function upgradeStructListAtSlot(
+  builder: MessageBuilder,
+  slot: BuilderPointer,
+  listSchema: ListSchema,
+  resolved: Orphan,
+): DynamicListBuilder | null {
+  const subSchema = listSchema.getStructElementType();
+
+  if (resolved.esize === ElemSize.Composite) {
+    const tag = builder.loadW(resolved.seg, resolved.word);
+    const nelem = Number((tag >> 2n) & 0x3fff_ffffn);
+    const dw = Number((tag >> 32n) & 0xffffn);
+    const pw = Number((tag >> 48n) & 0xffffn);
+    if (dw >= subSchema.dataWordCount && pw >= subSchema.pointerCount) {
+      return null;
+    }
+
+    const oldOrphan = builder.disown(slot);
+    const newDw = Math.max(dw, subSchema.dataWordCount);
+    const newPw = Math.max(pw, subSchema.pointerCount);
+    const lb = DynamicListBuilder.allocateCompositeAtSlot(
+      builder,
+      slot,
+      listSchema,
+      nelem,
+      newDw,
+      newPw,
+    );
+    const oldStep = dw + pw;
+    const newStep = newDw + newPw;
+    const dstSeg = builder.segBytes(lb.seg);
+    const srcSeg = builder.segBytes(oldOrphan.seg);
+    for (let i = 0; i < nelem; i++) {
+      const srcElWord = oldOrphan.word + 1 + i * oldStep;
+      const dstElWord = lb.word + i * newStep;
+      if (dw > 0) {
+        dstSeg.set(
+          srcSeg.subarray(srcElWord * WORD_BYTES, (srcElWord + dw) * WORD_BYTES),
+          dstElWord * WORD_BYTES,
+        );
+      }
+      for (let k = 0; k < pw; k++) {
+        const subOrphan = builder.disown(
+          new BuilderPointer(builder, oldOrphan.seg, srcElWord + dw + k),
+        );
+        builder.adopt(
+          new BuilderPointer(builder, lb.seg, dstElWord + newDw + k),
+          subOrphan,
+        );
+      }
+    }
+    oldOrphan.consume();
+    return lb;
+  }
+
+  if (resolved.esize === ElemSize.Bit) {
+    throw new CapnpError("KIND", "List(Bool) cannot upgrade to struct list");
+  }
+
+  const elemBytes =
+    resolved.esize === ElemSize.Byte
+      ? 1
+      : resolved.esize === ElemSize.TwoBytes
+        ? 2
+        : resolved.esize === ElemSize.FourBytes
+          ? 4
+          : resolved.esize === ElemSize.EightBytes
+            ? 8
+            : 0;
+  const nelem = resolved.count;
+  const newDw = Math.max(subSchema.dataWordCount, elemBytes > 0 ? 1 : 0);
+  const newPw = Math.max(
+    subSchema.pointerCount,
+    resolved.esize === ElemSize.Pointer ? 1 : 0,
+  );
+  const oldOrphan = builder.disown(slot);
+  const lb = DynamicListBuilder.allocateCompositeAtSlot(
+    builder,
+    slot,
+    listSchema,
+    nelem,
+    newDw,
+    newPw,
+  );
+  const newStep = newDw + newPw;
+  if (resolved.esize === ElemSize.Pointer) {
+    for (let i = 0; i < nelem; i++) {
+      const subOrphan = builder.disown(
+        new BuilderPointer(builder, oldOrphan.seg, oldOrphan.word + i),
+      );
+      builder.adopt(
+        new BuilderPointer(builder, lb.seg, lb.word + i * newStep + newDw),
+        subOrphan,
+      );
+    }
+  } else if (elemBytes > 0) {
+    const srcSeg = builder.segBytes(oldOrphan.seg);
+    const dstSeg = builder.segBytes(lb.seg);
+    for (let i = 0; i < nelem; i++) {
+      const srcOff = oldOrphan.word * WORD_BYTES + i * elemBytes;
+      const dstOff = (lb.word + i * newStep) * WORD_BYTES;
+      dstSeg.set(srcSeg.subarray(srcOff, srcOff + elemBytes), dstOff);
+    }
+  }
+  oldOrphan.consume();
+  return lb;
+}
+
 /** Deep-copy a DynamicStructReader as the root of a fresh MessageBuilder. */
 export function setDynamicRoot(
   builder: MessageBuilder,
@@ -2941,6 +3182,47 @@ export function setDynamicRoot(
 ): void {
   const slot = builder.rootSlot();
   deepCopyPtrToSlot(builder, slot, value.ptr, 0);
+}
+
+/**
+ * Copy an existing struct or message root into a fresh `MessageBuilder`,
+ * upgrading its root word counts to at least `schema`'s dimensions.
+ */
+export function upgradeDynamicRoot(
+  builder: MessageBuilder,
+  source: Message | DynamicStructReader | Ptr,
+  schema: StructSchema,
+): DynamicStructBuilder {
+  const srcPtr =
+    source instanceof Message
+      ? source.root()
+      : source instanceof DynamicStructReader
+        ? source.ptr
+        : source;
+  if (srcPtr.kind === PtrKind.Null) {
+    return initDynamicRoot(builder, schema);
+  }
+  assertCapnp(
+    srcPtr.kind === PtrKind.Struct,
+    "KIND",
+    `expected struct or null pointer for ${schema.getShortDisplayName()}`,
+  );
+  const newDw = Math.max(srcPtr.dwords, schema.dataWordCount);
+  const newPw = Math.max(srcPtr.pwords, schema.pointerCount);
+  const sb = builder.initRoot(newDw, newPw);
+  const copyBytes =
+    srcPtr.dataBits > 0
+      ? Math.min(srcPtr.dwords * WORD_BYTES, (srcPtr.dataBits + 7) >>> 3)
+      : srcPtr.dwords * WORD_BYTES;
+  if (copyBytes > 0) {
+    builder
+      .segBytes(sb.seg)
+      .set(srcPtr.dataBytes().subarray(0, copyBytes), sb.word * WORD_BYTES);
+  }
+  for (let k = 0; k < srcPtr.pwords; k++) {
+    deepCopyPtrToSlot(builder, sb.slot(k), srcPtr.getP(k), 0);
+  }
+  return new DynamicStructBuilder(schema, sb);
 }
 
 /** Allocate a detached struct orphan inside `builder`. */
@@ -2995,6 +3277,7 @@ export const DynamicStruct = {
   fromMessage: readDynamicRoot,
   initRoot: initDynamicRoot,
   setRoot: setDynamicRoot,
+  upgradeRoot: upgradeDynamicRoot,
   empty: DynamicStructReader.empty,
 } as const;
 
