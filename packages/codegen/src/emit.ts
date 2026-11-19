@@ -1251,6 +1251,35 @@ export function emitModuleSource(
     importAliases.set(owner, alias);
     externalImports.push({ schemaPath: importSchema, alias });
   }
+
+  // A type from a file that was not requested has no module to import.
+  // Declare the pointer alias here so the reference type-checks.
+  const localExternalAliases: string[] = [];
+  const seenLocalAlias = new Set<string>();
+  let needsLocalGenericAlias = false;
+  for (const typeId of referencedTypeIds) {
+    const n = byId.get(typeId);
+    if (!n || (n.which !== "struct" && n.which !== "interface")) continue;
+    const owner = ownerFileByNodeId.get(typeId) ?? 0n;
+    if (owner === resolvedId) continue;
+    if (owner !== 0n && importAliases.has(owner)) continue;
+    const suffix = n.which === "interface" ? "_Capability" : "_Ptr";
+    const key = `${shortTypeName(n.displayName)}${suffix}`;
+    if (seenLocalAlias.has(key)) continue;
+    seenLocalAlias.add(key);
+    const names = paramNames(n);
+    if (names.length > 0) {
+      needsLocalGenericAlias = true;
+      const clause = names
+        .map((name) => `${name} extends CapnpAnyPointer = CapnpAnyPointer`)
+        .join(", ");
+      localExternalAliases.push(
+        `export type ${key}<${clause}> = Ptr & CapnpBranded<[${names.join(", ")}]>;`,
+      );
+    } else {
+      localExternalAliases.push(`export type ${key} = Ptr;`);
+    }
+  }
   externalImports.sort((a, b) => a.schemaPath.localeCompare(b.schemaPath));
 
   const ctx: ModuleEmitContext = {
@@ -1329,9 +1358,9 @@ export function emitModuleSource(
     `} as const;`,
     ``,
   );
-  const needsBrandHelpers = nodes.some(
-    (n) => (n.parameters?.length ?? 0) > 0 || nodeMentionsBrand(n),
-  );
+  const needsBrandHelpers =
+    needsLocalGenericAlias ||
+    nodes.some((n) => (n.parameters?.length ?? 0) > 0 || nodeMentionsBrand(n));
   if (needsAnyPointerWrappers || needsBrandHelpers) {
     lines.push(
       `export type CapnpAnyPointer = Ptr;`,
@@ -1348,6 +1377,9 @@ export function emitModuleSource(
       );
     }
     lines.push(``);
+  }
+  if (localExternalAliases.length > 0) {
+    lines.push(...localExternalAliases, ``);
   }
 
   // Enums first (referenced by struct field comments / types).
