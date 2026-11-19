@@ -57,6 +57,18 @@ private:
 	uint64_t total = 0;
 };
 
+class KeepImpl final : public Keep::Server {
+public:
+	kj::Promise<void> value(ValueContext ctx) override {
+		ctx.getResults().setN(7);
+		return kj::READY_NOW;
+	}
+	kj::Promise<void> save(SaveContext ctx) override {
+		ctx.getResults().setSturdyRef(kj::str("ref-for-", ctx.getParams().getSealFor()));
+		return kj::READY_NOW;
+	}
+};
+
 class EchoImpl final : public Echo::Server {
 public:
 	kj::Promise<void> ping(PingContext ctx) override {
@@ -169,6 +181,11 @@ public:
 
 	kj::Promise<void> openSink(OpenSinkContext ctx) override {
 		ctx.getResults().setSink(kj::heap<SinkImpl>(ctx.getParams().getFailAfter()));
+		return kj::READY_NOW;
+	}
+
+	kj::Promise<void> openKeep(OpenKeepContext ctx) override {
+		ctx.getResults().setKeep(kj::heap<KeepImpl>());
 		return kj::READY_NOW;
 	}
 
@@ -359,6 +376,15 @@ void runClient(const std::string &addr, const std::vector<std::string> &only) {
 		}
 		KJ_REQUIRE(doneFailed, "done() succeeded on a failed stream");
 		ok("streamfail");
+	}
+
+	if (wants(only, "persistent")) {
+		auto keep = echo.openKeepRequest().send().wait(ws).getKeep();
+		KJ_REQUIRE(keep.valueRequest().send().wait(ws).getN() == 7);
+		auto save = keep.saveRequest();
+		save.setSealFor("bob");
+		KJ_REQUIRE(std::string(save.send().wait(ws).getSturdyRef().cStr()) == "ref-for-bob");
+		ok("persistent");
 	}
 
 	if (wants(only, "abort")) {
