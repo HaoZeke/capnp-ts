@@ -2673,7 +2673,11 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
     if (elemType.isData()) {
       assertDataBlobSize(subSize, "integer overflow");
       writeDataToSlot(this.builder, slot, new Uint8Array(subSize));
-      return new DynamicValueBuilder(DynamicValueType.DATA, new Uint8Array(subSize));
+      // C++ Data::Builder is a view of the bytes just allocated in the message.
+      const resolved = this.builder.resolveSlot(slot);
+      const start = resolved.word * WORD_BYTES;
+      const slice = this.builder.segBytes(resolved.seg).subarray(start, start + subSize);
+      return new DynamicValueBuilder(DynamicValueType.DATA, slice);
     }
     if (elemType.isText()) {
       assertTextBlobSize(subSize, "integer overflow");
@@ -2684,6 +2688,45 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
       "ARG",
       `list init(index, size) requires List, Text, or Data element (got ${elemType.which})`,
     );
+  }
+
+  /**
+   * Byte offset of a primitive in element `index`. Composite lists store it
+   * at the start of that struct's data section. Any other list uses the
+   * wire element stride, which may be wider than the schema type.
+   */
+  private primByte(index: number, width: number): number {
+    if (this.esize === ElemSize.Composite) {
+      assertCapnp(
+        this.elemDwords >= 1,
+        "SCHEMA",
+        "Schema mismatch: Expected a primitive list, but got a list of pointer-only structs.",
+      );
+      const step = this.elemDwords + this.elemPwords;
+      return (this.word + index * step) * WORD_BYTES;
+    }
+    const stride = dataListStride(this.esize);
+    assertCapnp(
+      stride >= width,
+      "SCHEMA",
+      "Schema mismatch: Message contained list with incompatible element type.",
+    );
+    return this.word * WORD_BYTES + index * stride;
+  }
+
+  /** Word of pointer 0 in element `index`. */
+  private pointerWord(index: number): number {
+    if (this.esize === ElemSize.Composite) {
+      assertCapnp(
+        this.elemPwords >= 1,
+        "SCHEMA",
+        "Schema mismatch: Expected a pointer list, but got a list of data-only structs.",
+      );
+      const step = this.elemDwords + this.elemPwords;
+      return this.word + index * step + this.elemDwords;
+    }
+    assertCapnp(this.esize === ElemSize.Pointer, "KIND", "expected pointer list");
+    return this.word + index;
   }
 
   set(index: number, rawInput: DynamicSetValue): void {
@@ -2713,31 +2756,38 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
 
     const val = coerceToDynamicReader(rawInput, elemType);
     const data = this.builder.segBytes(this.seg);
-    const baseByte = this.word * WORD_BYTES;
 
     switch (elemType.whichCode) {
       case TypeKind.Void:
         val.asVoid();
         return;
       case TypeKind.Bool: {
+        if (this.esize === ElemSize.Composite) {
+          throw new CapnpError(
+            "SCHEMA",
+            "Schema mismatch: Found struct list where bit list was expected; upgrading boolean lists to structs is no longer supported.",
+          );
+        }
+        // C++ ListReader::getDataElement<bool> ignores element step and reads
+        // packed bits. Writes follow that layout.
         const b = val.asBool();
-        const byteIdx = baseByte + (index >>> 3);
+        const byteIdx = this.word * WORD_BYTES + (index >>> 3);
         const mask = 1 << (index & 7);
         if (b) data[byteIdx] = data[byteIdx]! | mask;
         else data[byteIdx] = data[byteIdx]! & ~mask;
         return;
       }
       case TypeKind.Int8:
-        data[baseByte + index] = val.asInt8() & 0xff;
+        data[this.primByte(index, 1)] = val.asInt8() & 0xff;
         return;
       case TypeKind.UInt8:
-        data[baseByte + index] = val.asUInt8() & 0xff;
+        data[this.primByte(index, 1)] = val.asUInt8() & 0xff;
         return;
       case TypeKind.Int16:
-        storeU16(data, baseByte + index * 2, val.asInt16() & 0xffff);
+        storeU16(data, this.primByte(index, 2), val.asInt16() & 0xffff);
         return;
       case TypeKind.UInt16:
-        storeU16(data, baseByte + index * 2, val.asUInt16());
+        storeU16(data, this.primByte(index, 2), val.asUInt16());
         return;
       case TypeKind.Enum: {
         const enumSchema = elemType.asEnum();
@@ -2754,41 +2804,41 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
           assertCapnp(ev.getSchema() === enumSchema, "KIND", "enum schema mismatch");
           ord = ev.getRaw();
         }
-        storeU16(data, baseByte + index * 2, ord);
+        storeU16(data, this.primByte(index, 2), ord);
         return;
       }
       case TypeKind.Int32:
-        storeU32(data, baseByte + index * 4, val.asInt32() >>> 0);
+        storeU32(data, this.primByte(index, 4), val.asInt32() >>> 0);
         return;
       case TypeKind.UInt32:
-        storeU32(data, baseByte + index * 4, val.asUInt32());
+        storeU32(data, this.primByte(index, 4), val.asUInt32());
         return;
       case TypeKind.Float32:
-        storeF32(data, baseByte + index * 4, val.asFloat32());
+        storeF32(data, this.primByte(index, 4), val.asFloat32());
         return;
       case TypeKind.Int64:
-        storeU64(data, baseByte + index * 8, BigInt.asUintN(64, val.asInt64()));
+        storeU64(data, this.primByte(index, 8), BigInt.asUintN(64, val.asInt64()));
         return;
       case TypeKind.UInt64:
-        storeU64(data, baseByte + index * 8, val.asUInt64());
+        storeU64(data, this.primByte(index, 8), val.asUInt64());
         return;
       case TypeKind.Float64:
-        storeF64(data, baseByte + index * 8, val.asFloat64());
+        storeF64(data, this.primByte(index, 8), val.asFloat64());
         return;
       case TypeKind.Text: {
-        const slot = new BuilderPointer(this.builder, this.seg, this.word + index);
+        const slot = new BuilderPointer(this.builder, this.seg, this.pointerWord(index));
         writeTextToSlot(this.builder, slot, val.asText());
         return;
       }
       case TypeKind.Data: {
-        const slot = new BuilderPointer(this.builder, this.seg, this.word + index);
+        const slot = new BuilderPointer(this.builder, this.seg, this.pointerWord(index));
         writeDataToSlot(this.builder, slot, val.asData());
         return;
       }
       case TypeKind.List: {
         const lv = val.asList();
         assertCapnp(lv.getSchema() === elemType.asList(), "KIND", "list schema mismatch");
-        const slot = new BuilderPointer(this.builder, this.seg, this.word + index);
+        const slot = new BuilderPointer(this.builder, this.seg, this.pointerWord(index));
         deepCopyPtrToSlot(this.builder, slot, lv.ptr, 0);
         return;
       }
@@ -2802,14 +2852,15 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
         const ci = cv.getCapIndex();
         this.builder.storeW(
           this.seg,
-          this.word + index,
+          this.pointerWord(index),
           ci === null ? 0n : wpMakeCap(ci),
         );
         return;
       }
       case TypeKind.AnyPointer: {
-        const slot = new BuilderPointer(this.builder, this.seg, this.word + index);
-        const tempSb = new StructBuilder(this.builder, this.seg, this.word + index, 0, 1);
+        const word = this.pointerWord(index);
+        const slot = new BuilderPointer(this.builder, this.seg, word);
+        const tempSb = new StructBuilder(this.builder, this.seg, word, 0, 1);
         writeAnyPointerValue(tempSb, 0, slot, val);
         return;
       }
@@ -2849,7 +2900,7 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
       return new DynamicOrphan({ type: r.getType(), scalarReader: r });
     }
 
-    const slot = new BuilderPointer(this.builder, this.seg, this.word + index);
+    const slot = new BuilderPointer(this.builder, this.seg, this.pointerWord(index));
     const rawOrphan = this.builder.disown(slot);
     if (elemType.isList()) {
       return new DynamicOrphan({
@@ -2890,7 +2941,7 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
       return;
     }
 
-    const slot = new BuilderPointer(this.builder, this.seg, this.word + index);
+    const slot = new BuilderPointer(this.builder, this.seg, this.pointerWord(index));
     orphan.markConsumed();
     this.builder.adopt(slot, orphan.orphan ?? Orphan.null());
   }
@@ -2899,6 +2950,21 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
     for (let i = 0; i < this.count; i++) {
       yield this.get(i);
     }
+  }
+}
+
+function dataListStride(esize: number): number {
+  switch (esize) {
+    case ElemSize.Byte:
+      return 1;
+    case ElemSize.TwoBytes:
+      return 2;
+    case ElemSize.FourBytes:
+      return 4;
+    case ElemSize.EightBytes:
+      return 8;
+    default:
+      return 0;
   }
 }
 
