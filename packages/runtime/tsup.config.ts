@@ -10,6 +10,7 @@ export default defineConfig({
     packed: "src/packed.ts",
     canonical: "src/canonical.ts",
     schema: "src/schema.ts",
+    dynamic: "src/dynamic.ts",
   },
   format: ["esm"],
   target: "es2022",

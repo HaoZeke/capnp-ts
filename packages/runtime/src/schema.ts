@@ -595,6 +595,7 @@ export class Type {
   private readonly _anyKind: AnyPointerKind;
   private readonly _brandParam: BrandParameterRef | null;
   private readonly _implicitParam: ImplicitParameterRef | null;
+  private _listOfThis: ListSchema | null = null;
 
   private constructor(
     which: TypeWhich,
@@ -689,19 +690,29 @@ export class Type {
   }
 
   static fromStruct(schema: StructSchema): Type {
-    return new Type("struct", TypeKind.Struct, schema);
+    return schema._getOrCreateType(() => new Type("struct", TypeKind.Struct, schema));
   }
 
   static fromEnum(schema: EnumSchema): Type {
-    return new Type("enum", TypeKind.Enum, schema);
+    return schema._getOrCreateType(() => new Type("enum", TypeKind.Enum, schema));
   }
 
   static fromInterface(schema: InterfaceSchema): Type {
-    return new Type("interface", TypeKind.Interface, schema);
+    return schema._getOrCreateType(
+      () => new Type("interface", TypeKind.Interface, schema),
+    );
   }
 
   static fromList(schema: ListSchema): Type {
-    return new Type("list", TypeKind.List, schema);
+    return schema._getOrCreateType(() => new Type("list", TypeKind.List, schema));
+  }
+
+  /** @internal */
+  _getOrCreateList(factory: () => ListSchema): ListSchema {
+    if (!this._listOfThis) {
+      this._listOfThis = factory();
+    }
+    return this._listOfThis;
   }
 
   static anyPointer(kind: AnyPointerKind = "anyKind"): Type {
@@ -897,20 +908,22 @@ export class Type {
 /** Schema for a `List(T)` type (models capnp::ListSchema). */
 export class ListSchema {
   readonly elementType: Type;
-  private static readonly cache = new Map<string, ListSchema>();
+  private _selfType: Type | null = null;
 
   private constructor(elementType: Type) {
     this.elementType = elementType;
   }
 
   static of(elementType: Type): ListSchema {
-    const key = elementType.canonicalKey();
-    let hit = ListSchema.cache.get(key);
-    if (!hit) {
-      hit = new ListSchema(elementType);
-      ListSchema.cache.set(key, hit);
+    return elementType._getOrCreateList(() => new ListSchema(elementType));
+  }
+
+  /** @internal */
+  _getOrCreateType(factory: () => Type): Type {
+    if (!this._selfType) {
+      this._selfType = factory();
     }
-    return hit;
+    return this._selfType;
   }
 
   getElementType(): Type {
@@ -991,6 +1004,15 @@ export class Schema {
   /** @internal */
   readonly brandKey: string;
   private _annotations: readonly AppliedAnnotation[] | null = null;
+  private _selfType: Type | null = null;
+
+  /** @internal */
+  _getOrCreateType(factory: () => Type): Type {
+    if (!this._selfType) {
+      this._selfType = factory();
+    }
+    return this._selfType;
+  }
 
   /** @internal */
   constructor(
