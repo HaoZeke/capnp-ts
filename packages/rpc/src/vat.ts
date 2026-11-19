@@ -469,7 +469,11 @@ export class RpcConnection implements RemoteHost {
         },
       };
     }
-    if (bootstrap instanceof Client) this.bootstrapHook = bootstrap.hook;
+    // The connection owns one ref, as capnp-C++'s RpcSystem owns the
+    // bootstrap Client. Each Bootstrap answer addRefs again. Without the
+    // owned ref, releasing the caller's Client drops the hook and the
+    // next Bootstrap throws "capability used after release".
+    if (bootstrap instanceof Client) this.bootstrapHook = bootstrap.hook.addRef();
     else if (bootstrap !== undefined) this.bootstrapHook = this.hookFor(bootstrap);
   }
 
@@ -2009,6 +2013,9 @@ export class RpcConnection implements RemoteHost {
     this.answers.clear();
     for (const slot of this.exports.values()) slot.hook.release();
     this.exports.clear();
+    // Drop the connection's own bootstrap ref. C++ releases the
+    // bootstrap capability with the vat that held it.
+    this.bootstrapHook?.release();
     this.exportIdByHook.clear();
     for (const hook of this.introductionHooks.values()) hook.release();
     this.introductionHooks.clear();
