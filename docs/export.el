@@ -1,3 +1,4 @@
+;; -*- lexical-binding: t; -*-
 ;; Batch export org-mode files to RST for Sphinx.
 ;; Usage (repo root): emacs --batch -l docs/export.el
 ;; Org under docs/orgmode/ is the source. RST under docs/source/ is generated.
