@@ -730,7 +730,7 @@ class AnnotatedStructHandler implements JsonCustomHandler {
     }
 
     if (discSpec) {
-      this.unionTagName = discSpec.name ?? unionDeclName;
+      this.unionTagName = discSpec.name;
       if (this.unionTagName !== null) {
         this.fieldsByName.set(this.unionTagName, { kind: "unionTag" });
       }
