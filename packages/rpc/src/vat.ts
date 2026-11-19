@@ -36,6 +36,7 @@ import {
   Settle,
   toRpcError,
 } from "./capability.ts";
+import { DEFAULT_STREAM_WINDOW } from "./flow.ts";
 import {
   ImportClient,
   PipelineClient,
@@ -382,12 +383,17 @@ export class RpcConnection implements RemoteHost {
   private nextEmbargoId = 0;
   private gone: RpcError | undefined;
 
+  /** Bytes of stream calls in flight per capability before a sender must wait. */
+  readonly streamWindow: number;
+
   constructor(
     private readonly transport: Transport,
     bootstrap?: RpcServer | Client,
     vat?: Vat,
+    options: { streamWindow?: number } = {},
   ) {
     this.vat = vat ?? new Vat();
+    this.streamWindow = options.streamWindow ?? DEFAULT_STREAM_WINDOW;
     if (bootstrap instanceof Client) this.bootstrapHook = bootstrap.hook;
     else if (bootstrap !== undefined) this.bootstrapHook = this.hookFor(bootstrap);
   }
@@ -814,7 +820,9 @@ export class RpcConnection implements RemoteHost {
       params,
       true,
     );
-    this.transport.send(b.toFlat());
+    const frame = b.toFlat();
+    q.call.wireSize = frame.length;
+    this.transport.send(frame);
     return q.call;
   }
 
