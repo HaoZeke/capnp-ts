@@ -165,9 +165,23 @@ export interface PipelineHook {
   getPipelinedCap(ops: readonly number[]): ClientHook;
 }
 
+/** Hook supplied by an RPC connection so a forwarded call can use `sendResultsTo.yourself`. */
+export interface TailHandler {
+  tryTailCall(
+    target: ClientHook,
+    interfaceId: bigint,
+    methodId: number,
+    params: Payload,
+  ): CallState | undefined;
+}
+
 export interface CallOptions {
   /** A `-> stream` call: flow-controlled, results are empty. */
   streaming?: boolean;
+  /** Present when the caller's connection can take results directly from a forwarded call. */
+  tailHandler?: TailHandler;
+  /** Internal: mark an outgoing `Call` with `sendResultsTo.yourself`. */
+  sendResultsToYourself?: boolean;
 }
 
 /**
@@ -324,6 +338,19 @@ export interface CallContext {
   initResults(dwords: number, pwords: number): StructBuilder;
   /** Point a result pointer field at `hook`, taking over the reference. */
   setResultCap(struct: StructBuilder, ptrIndex: number, hook: ClientHook): void;
+  /**
+   * Forward this call to `target` as a tail call. When `target` lives across
+   * the same RPC connection the call arrived on, the connection sends
+   * `sendResultsTo.yourself` and answers the caller with `takeFromOtherQuestion`.
+   */
+  tailCall(
+    target: Client,
+    interfaceId: bigint,
+    methodId: number,
+    fill?: (params: StructBuilder, caps: CallBuilder) => void,
+    paramsDwords?: number,
+    paramsPwords?: number,
+  ): Promise<void>;
 }
 
 export interface RpcServer {
@@ -349,8 +376,18 @@ class LocalCallContext implements CallContext {
   readonly controller = new AbortController();
   cancelRequested = false;
   cancellable = false;
+  tailCalled = false;
+  tailState: CallState | undefined;
 
-  constructor(readonly params: Payload) {}
+  constructor(
+    readonly params: Payload,
+    private readonly onTailCall: (
+      target: ClientHook,
+      interfaceId: bigint,
+      methodId: number,
+      params: Payload,
+    ) => CallState,
+  ) {}
 
   get signal(): AbortSignal {
     return this.controller.signal;
@@ -372,16 +409,52 @@ class LocalCallContext implements CallContext {
   setResultCap(struct: StructBuilder, ptrIndex: number, hook: ClientHook): void {
     this.results.setCap(struct, ptrIndex, hook);
   }
+
+  tailCall(
+    target: Client,
+    interfaceId: bigint,
+    methodId: number,
+    fill?: (params: StructBuilder, caps: CallBuilder) => void,
+    paramsDwords = 1,
+    paramsPwords = 1,
+  ): Promise<void> {
+    if (this.tailCalled) {
+      return Promise.reject(new RpcError("tailCall() may only be called once per call"));
+    }
+    this.tailCalled = true;
+    const params = new CallBuilder(paramsDwords, paramsPwords);
+    fill?.(params.root, params);
+    const tail = this.onTailCall(target.hook, interfaceId, methodId, params.toPayload());
+    this.tailState = tail;
+    return tail.result.promise.then(() => {});
+  }
 }
 
 class LocalPipeline implements PipelineHook {
+  private delegate: PipelineHook | undefined;
+  private readonly pending: Array<{
+    ops: readonly number[];
+    eventual: Settle<ClientHook>;
+    drop: () => void;
+  }> = [];
+
   constructor(
     private readonly result: Settle<Payload>,
     private readonly retain: () => void,
     private readonly releaseRef: () => void,
   ) {}
 
+  setDelegate(pipeline: PipelineHook): void {
+    if (this.delegate !== undefined) return;
+    this.delegate = pipeline;
+    for (const p of this.pending.splice(0)) {
+      p.eventual.resolve(pipeline.getPipelinedCap(p.ops));
+      p.drop();
+    }
+  }
+
   getPipelinedCap(ops: readonly number[]): ClientHook {
+    if (this.delegate !== undefined) return this.delegate.getPipelinedCap(ops);
     const r = this.result;
     if (r.state === "ok") return r.value.getPipelinedCap(ops);
     if (r.state === "err") return new BrokenClient(r.error);
@@ -393,8 +466,14 @@ class LocalPipeline implements PipelineHook {
       this.releaseRef();
     };
     const eventual = new Settle<ClientHook>();
+    const entry = { ops, eventual, drop };
+    this.pending.push(entry);
     r.onSettled((s) => {
-      eventual.resolve(s.state === "ok" ? s.value.getPipelinedCap(ops) : new BrokenClient(s.error));
+      const idx = this.pending.indexOf(entry);
+      if (idx !== -1) this.pending.splice(idx, 1);
+      if (eventual.state === "pending") {
+        eventual.resolve(s.state === "ok" ? s.value.getPipelinedCap(ops) : new BrokenClient(s.error));
+      }
       drop();
     });
     return new QueuedClient(eventual, drop);
@@ -423,33 +502,59 @@ export class LocalClient extends RefHook implements ClientHook {
     return undefined;
   }
 
-  call(interfaceId: bigint, methodId: number, params: Payload, _opts?: CallOptions): CallState {
+  call(interfaceId: bigint, methodId: number, params: Payload, opts?: CallOptions): CallState {
     if (this.broken !== undefined) {
       params.release();
       return failedCall(this.broken);
     }
-    const ctx = new LocalCallContext(params);
     const state = new CallState();
+    let liveRefs = 1;
+    let pipeline!: LocalPipeline;
+    const ctx = new LocalCallContext(params, (target, iface, method, tailParams) => {
+      const tail = target.call(
+        iface,
+        method,
+        tailParams,
+        opts?.tailHandler !== undefined ? { tailHandler: opts.tailHandler } : undefined,
+      );
+      pipeline.setDelegate(tail.pipeline);
+      tail.result.onSettled((s) => {
+        if (state.result.state !== "pending") return;
+        if (s.state === "ok") {
+          state.result.resolve(
+            new Payload(
+              s.value.content,
+              s.value.caps.map((c) => c.addRef()),
+            ),
+          );
+        } else {
+          state.result.reject(s.error);
+        }
+      });
+      if (ctx.cancelRequested && ctx.cancellable) tail.release();
+      return tail;
+    });
     // A running call keeps the capability alive, so dropping the last
     // reference while a call is queued or in flight does not dispose the
     // server underneath it.
     this.addRef();
     state.result.onSettled(() => this.release());
-    let liveRefs = 1;
     const dropInterest = (): void => {
       if (--liveRefs > 0) return;
       ctx.cancelRequested = true;
+      if (ctx.tailState !== undefined) ctx.tailState.release();
       if (state.result.state !== "pending" || !ctx.cancellable) return;
       ctx.controller.abort();
       state.result.reject(new RpcError("canceled"));
     };
-    state.pipeline = new LocalPipeline(
+    pipeline = new LocalPipeline(
       state.result,
       () => {
         liveRefs++;
       },
       dropInterest,
     );
+    state.pipeline = pipeline;
     state.onRelease = dropInterest;
     this.when(() => this.run(interfaceId, methodId, ctx, state));
     return state;
@@ -471,6 +576,15 @@ export class LocalClient extends RefHook implements ClientHook {
     const finish = (error?: unknown): void => {
       const params = ctx.params;
       params.release();
+      if (ctx.tailCalled) {
+        // Results (and any error) are already wired from `ctx.tailState`.
+        ctx.results.caps.forEach((c) => c.release());
+        if (error !== undefined) {
+          if (streaming) this.broken = toRpcError(error);
+          if (state.result.state === "pending") state.result.reject(error);
+        }
+        return;
+      }
       if (error !== undefined) {
         if (streaming) this.broken = toRpcError(error);
         state.result.reject(error);
