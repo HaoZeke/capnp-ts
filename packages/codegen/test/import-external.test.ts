@@ -99,5 +99,5 @@ struct Holder {
     const checked = typecheck(outDir, "user.ts");
     expect(checked.status).toBe(0);
     expect(checked.text).not.toContain("TS2304");
-  });
+  }, 60_000); // `bunx tsc` exceeds Bun's 5000 ms default on a slow CI runner.
 });

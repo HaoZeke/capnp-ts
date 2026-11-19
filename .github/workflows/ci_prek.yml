@@ -28,7 +28,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Install prek
-        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c9b9e9d03ab6044e6f # v2
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2
         with:
           # prek >= 0.4 discovers prek.toml; 0.3 looked only for .pre-commit-config.yaml
           tool: prek@0.4.4
