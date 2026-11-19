@@ -31,6 +31,7 @@ import {
   RETURN_PWORDS,
   Return,
   Return_getAnswerId,
+  Return_getReleaseParamCaps,
   Return_which,
 } from "../src/rpc.capnp.ts";
 import { MemoryTransportPair } from "../src/transport.ts";
@@ -255,11 +256,15 @@ describe("cancellation", () => {
     await settle();
     expect(ta.sent).toContain("finish");
     expect(slow.aborted).toBe(1);
-    // A canceled call is not answered.
-    expect(tb.sent.filter((k) => k === "return").length).toBe(1);
+    // A canceled call replies Return.canceled so the caller frees its question entry.
+    const returns = tb.frames
+      .map((f) => CapnpMessage.fromFlat(f).root())
+      .filter((r) => Message_which(r) === Message.return)
+      .map((r) => Return_which(Message_getReturn(r)));
+    expect(returns).toEqual([Return.results, Return.canceled]);
     slow.open();
     await settle();
-    expect(tb.sent.filter((k) => k === "return").length).toBe(1);
+    expect(tb.sent.filter((k) => k === "return").length).toBe(2);
   });
 
   test("without allowCancellation the call still runs to completion", async () => {
@@ -274,7 +279,11 @@ describe("cancellation", () => {
     slow.open();
     await settle();
     expect(slow.finished).toBe(1);
-    expect(tb.sent.filter((k) => k === "return").length).toBe(1);
+    const returns = tb.frames
+      .map((f) => CapnpMessage.fromFlat(f).root())
+      .filter((r) => Message_which(r) === Message.return)
+      .map((r) => Return_which(Message_getReturn(r)));
+    expect(returns).toEqual([Return.results, Return.canceled]);
   });
 
   test("the Finish for an unanswered call releases its result caps", async () => {
@@ -576,6 +585,135 @@ describe("results sent elsewhere", () => {
     expect(a.isAnswered(mine)).toBe(true);
     expect(a.isFailed(mine)).toBe(false);
     expect(a.answerContent(mine)?.getU32(0)).toBe(21);
+  });
+
+  test("a failing sendResultsTo.yourself call still returns resultsSentElsewhere", () => {
+    const pair = new MemoryTransportPair();
+    const failing: RpcServer = {
+      dispatch() {
+        throw new RpcError("tail failed", "overloaded");
+      },
+    };
+    const a = new RpcConnection(pair.a, failing);
+    const peer = pair.b;
+
+    const frame = (fill: (root: StructBuilder) => void): Uint8Array => {
+      const b = new MessageBuilder();
+      fill(b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS));
+      return b.toFlat();
+    };
+    peer.send(
+      frame((root) => {
+        root.setU16(0, Message.bootstrap);
+        root.initStruct(0, BOOTSTRAP_DWORDS, BOOTSTRAP_PWORDS).setU32(0, 1);
+      }),
+    );
+    a.pump();
+    peer.receive();
+
+    peer.send(
+      frame((root) => {
+        root.setU16(0, Message.call);
+        const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
+        call.setU32(0, 2);
+        call.setU16(6, Call_sendResultsTo.yourself);
+        const target = call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS);
+        target.setU16(4, MessageTarget.importedCap);
+        target.setU32(0, 0);
+        call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+      }),
+    );
+    const mine = a.sendBootstrap();
+    peer.receive();
+    a.pump();
+
+    const held = CapnpMessage.fromFlat(peer.receive()!).root();
+    const ret = Message_getReturn(held);
+    expect(Return_getAnswerId(ret)).toBe(2);
+    expect(Return_which(ret)).toBe(Return.resultsSentElsewhere);
+
+    peer.send(
+      frame((root) => {
+        root.setU16(0, Message.return);
+        const r = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+        r.setU32(0, mine);
+        r.setU16(6, Return.takeFromOtherQuestion);
+        r.setU32(8, 2);
+      }),
+    );
+    a.pump();
+    expect(a.isFailed(mine)).toBe(true);
+    expect(a.answerError(mine)?.type).toBe("overloaded");
+    expect(a.answerError(mine)?.message).toBe("tail failed");
+  });
+});
+
+describe("Return flags and disconnect cleanup", () => {
+  test("Return.exception sets releaseParamCaps = false so param caps are not double-released", async () => {
+    const paramCap = new Counter();
+    const failing: RpcServer = {
+      dispatch() {
+        throw new RpcError("reject with cap", "overloaded");
+      },
+    };
+    const { a, tb, settle } = link(undefined, failing);
+    const boot = a.bootstrap();
+    const out = boot.call(
+      IFACE,
+      0,
+      (p, b) => b.setCap(p, 0, Client.local(paramCap).hook),
+      0,
+      1,
+    );
+    await settle();
+    await expect(Promise.resolve(out)).rejects.toMatchObject({
+      message: "reject with cap",
+      type: "overloaded",
+    });
+    const excReturn = tb.frames
+      .map((f) => CapnpMessage.fromFlat(f).root())
+      .filter((r) => Message_which(r) === Message.return)
+      .map((r) => Message_getReturn(r))
+      .find((r) => Return_which(r) === Return.exception);
+    expect(excReturn).toBeDefined();
+    expect(Return_getReleaseParamCaps(excReturn!)).toBe(false);
+    expect(paramCap.disposed).toBe(1);
+    expect(a.liveExports()).toEqual([]);
+  });
+
+  test("Return.noFinishNeeded suppresses the outgoing Finish frame", () => {
+    const pair = new MemoryTransportPair();
+    const a = new RpcConnection(pair.a);
+    const q = a.sendCall(0, IFACE, 0);
+    pair.b.receive();
+
+    const b = new MessageBuilder();
+    const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+    root.setU16(0, Message.return);
+    const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+    ret.setU32(0, q);
+    ret.setU16(6, Return.results);
+    ret.setBool(32, false, true); // releaseParamCaps = false
+    ret.setBool(33, true, false); // noFinishNeeded = true
+    ret.initStruct(0, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+    pair.b.send(b.toFlat());
+    a.pump();
+
+    a.sendFinish(q);
+    expect(pair.b.receive()).toBeNull();
+  });
+
+  test("exportCap disposes the local server when its export is released", () => {
+    const pair = new MemoryTransportPair();
+    const server = new Counter();
+    const a = new RpcConnection(pair.a);
+    const id = a.exportCap(server);
+    expect(server.disposed).toBe(0);
+    const b = new RpcConnection(pair.b);
+    b.sendRelease(id, 1);
+    a.pump();
+    expect(a.liveExports()).toEqual([]);
+    expect(server.disposed).toBe(1);
   });
 });
 
