@@ -38,6 +38,7 @@ import {
   RpcError,
   type RpcServer,
   Settle,
+  type TailHandler,
   toRpcError,
 } from "./capability.ts";
 import { DEFAULT_STREAM_WINDOW } from "./flow.ts";
@@ -198,8 +199,10 @@ const OFF = {
   callQuestionId: 0,
   callInterfaceId: 8,
   callMethodId: 4,
+  callSendResultsTo: 6,
   returnAnswerId: 0,
   returnUnion: 6,
+  returnTakeFromOtherQuestion: 8,
   returnReleaseParamCaps: 32, // bit offset, default true
   finishReleaseResultCaps: 32, // bit offset, default true
   finishRequireEarly: 33, // bit offset, default true
@@ -312,6 +315,8 @@ interface QuestionState {
   finished: boolean;
   /** Peer's Return set noFinishNeeded, so no Finish message need be sent. */
   skipFinish: boolean;
+  /** True when the Call used `sendResultsTo.yourself`; expects `resultsSentElsewhere`. */
+  isTailCall: boolean;
 }
 
 /** A question the peer asked, from its Call until its Finish. */
@@ -321,6 +326,8 @@ interface AnswerState {
   resultExports: number[];
   /** The call said `sendResultsTo.yourself`: the results stay here for the caller to claim. */
   resultsElsewhere: boolean;
+  /** True once this answer was answered via `Return.takeFromOtherQuestion`. */
+  tailSent: boolean;
   returned: boolean;
   finished: boolean;
 }
@@ -835,6 +842,7 @@ export class RpcConnection implements RemoteHost {
       returned: false,
       finished: false,
       skipFinish: false,
+      isTailCall: false,
     };
     call.pipeline = {
       getPipelinedCap: (ops) => this.pipelineOf(id, q, ops),
@@ -915,7 +923,7 @@ export class RpcConnection implements RemoteHost {
     interfaceId: bigint,
     methodId: number,
     params: Payload,
-    _opts?: CallOptions,
+    opts?: CallOptions,
   ): CallState {
     const { id, q } = this.newQuestion();
     if (this.gone !== undefined) {
@@ -928,6 +936,10 @@ export class RpcConnection implements RemoteHost {
     call.setU32(OFF.callQuestionId, id);
     call.setU64(OFF.callInterfaceId, interfaceId);
     call.setU16(OFF.callMethodId, methodId);
+    if (opts?.sendResultsToYourself) {
+      call.setU16(OFF.callSendResultsTo, Call_sendResultsTo.yourself);
+      q.isTailCall = true;
+    }
     write(call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS));
     q.paramExports = this.writePayload(
       call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS),
@@ -1141,6 +1153,10 @@ export class RpcConnection implements RemoteHost {
 
     switch (which) {
       case Return.results: {
+        if (q.isTailCall) {
+          this.abort(new RpcError("Tail call Return must set resultsSentElsewhere, not results"));
+          return;
+        }
         const payload = Return_getResults(ret);
         // Our Finish already said to drop the results, so nothing is
         // imported for a question that was abandoned.
@@ -1149,10 +1165,24 @@ export class RpcConnection implements RemoteHost {
         break;
       }
       case Return.exception:
+        if (q.isTailCall) {
+          this.abort(new RpcError("Tail call Return must set resultsSentElsewhere, not exception"));
+          return;
+        }
         if (!q.finished) q.call.result.reject(readException(Return_getException(ret)));
         break;
       case Return.canceled:
         if (!q.finished) q.call.result.reject(new RpcError("call was canceled"));
+        break;
+      case Return.resultsSentElsewhere:
+        if (!q.isTailCall) {
+          this.abort(
+            new RpcError("Return had resultsSentElsewhere but this was not a tail call"),
+          );
+          return;
+        }
+        q.failed = false;
+        if (!q.finished) q.call.result.resolve(emptyPayload());
         break;
       case Return.takeFromOtherQuestion:
         this.takeResults(q, Return_getTakeFromOtherQuestion(ret));
@@ -1355,14 +1385,57 @@ export class RpcConnection implements RemoteHost {
     }
     const answer = this.newAnswer(questionId);
     answer.resultsElsewhere = sendTo === Call_sendResultsTo.yourself;
+    const tailHandler: TailHandler | undefined = answer.resultsElsewhere
+      ? undefined
+      : {
+          tryTailCall: (cap, iface, method, callParams) =>
+            this.trySendTailCall(questionId, answer, cap, iface, method, callParams),
+        };
     const state = target.call(
       Call_getInterfaceId(call),
       Call_getMethodId(call),
       new Payload(Payload_getContent(params), caps),
+      tailHandler !== undefined ? { tailHandler } : undefined,
     );
     target.release();
     answer.call = state;
     state.result.onSettled((s) => this.completeAnswer(questionId, answer, s));
+  }
+
+  /**
+   * Forward an incoming call back across the same connection with
+   * `sendResultsTo.yourself`, immediately answering the original call with
+   * `Return.takeFromOtherQuestion`.
+   */
+  private trySendTailCall(
+    questionId: number,
+    answer: AnswerState,
+    target: ClientHook,
+    interfaceId: bigint,
+    methodId: number,
+    params: Payload,
+  ): CallState | undefined {
+    if (this.gone !== undefined || answer.returned || answer.finished) return undefined;
+    const inner = innermost(target);
+    if (inner.brand !== this) return undefined;
+    const tail = this.sendCallTo(
+      (t) => (inner as RpcClientHook).writeTarget(t),
+      interfaceId,
+      methodId,
+      params,
+      { sendResultsToYourself: true },
+    );
+    const tailId = this.questionIdOf(tail);
+    answer.returned = true;
+    answer.tailSent = true;
+    const { b, root } = newMessage(Message.return);
+    const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+    ret.setU32(OFF.returnAnswerId, questionId);
+    ret.setU16(OFF.returnUnion, Return.takeFromOtherQuestion);
+    ret.setU32(OFF.returnTakeFromOtherQuestion, tailId);
+    ret.setBool(OFF.returnReleaseParamCaps, false, true);
+    this.transport.send(b.toFlat());
+    return tail;
   }
 
   private newAnswer(questionId: number): AnswerState {
@@ -1370,6 +1443,7 @@ export class RpcConnection implements RemoteHost {
       call: undefined as unknown as CallState,
       resultExports: [],
       resultsElsewhere: false,
+      tailSent: false,
       returned: false,
       finished: false,
     };
@@ -1393,6 +1467,10 @@ export class RpcConnection implements RemoteHost {
   }
 
   private completeAnswer(questionId: number, answer: AnswerState, s: Settle<Payload>): void {
+    if (answer.tailSent) {
+      if (answer.finished) this.answers.delete(questionId);
+      return;
+    }
     answer.returned = true;
     const finished = answer.finished;
     if (finished) this.answers.delete(questionId);

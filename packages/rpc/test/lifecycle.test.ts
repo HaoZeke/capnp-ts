@@ -15,12 +15,14 @@ import {
   CALL_DWORDS,
   CALL_PWORDS,
   Call_sendResultsTo,
+  Call_sendResultsTo_which,
   Finish_getReleaseResultCaps,
   MESSAGE_DWORDS,
   MESSAGE_PWORDS,
   MESSAGE_TARGET_DWORDS,
   MESSAGE_TARGET_PWORDS,
   Message,
+  Message_getCall,
   Message_getFinish,
   Message_getReturn,
   Message_which,
@@ -555,7 +557,8 @@ describe("promises over a connection", () => {
     // Now disconnect before the Disembargo echoes back.
     a.disconnect(new RpcError("link died", "disconnected"));
     await expect(Promise.resolve(duringEmbargo)).rejects.toMatchObject({ type: "disconnected" });
-    await expect(Promise.resolve(first)).rejects.toMatchObject({ type: "disconnected" });
+    // `first` was forwarded with sendResultsTo.yourself + takeFromOtherQuestion, so it settled on a.pump().
+    expect((await first).content.getU32(0)).toBe(2);
     expect(local.seen).toEqual([1]);
     void b;
   });
@@ -847,6 +850,118 @@ describe("results sent elsewhere", () => {
     expect(a.isFailed(mine)).toBe(true);
     expect(a.answerError(mine)?.type).toBe("overloaded");
     expect(a.answerError(mine)?.message).toBe("tail failed");
+  });
+
+  test("ctx.tailCall to a caller-hosted capability sends sendResultsTo.yourself and takeFromOtherQuestion", async () => {
+    const local = new Counter();
+    const proxy: RpcServer = {
+      dispatch(_i, _m, params, _r, ctx) {
+        const cap = new Client(ctx.getCap(params.getP(0)));
+        const n = params.getU32(0);
+        return ctx.tailCall(cap, IFACE, 0, arg(n), 1, 0).finally(() => cap.release());
+      },
+    };
+    const { a, ta, tb, settle } = link(undefined, proxy);
+    const boot = a.bootstrap();
+    const out = boot.call(
+      IFACE,
+      0,
+      (p, b) => {
+        p.setU32(0, 40);
+        b.setCap(p, 0, Client.local(local).hook);
+      },
+      1,
+      1,
+    );
+    await settle();
+    expect((await out).content.getU32(0)).toBe(41);
+    expect(local.seen).toEqual([40]);
+
+    const callsFromB = tb.frames
+      .map((f) => CapnpMessage.fromFlat(f).root())
+      .filter((r) => Message_which(r) === Message.call)
+      .map((r) => Call_sendResultsTo_which(Message_getCall(r)));
+    expect(callsFromB).toContain(Call_sendResultsTo.yourself);
+
+    const returnsFromB = tb.frames
+      .map((f) => CapnpMessage.fromFlat(f).root())
+      .filter((r) => Message_which(r) === Message.return)
+      .map((r) => Return_which(Message_getReturn(r)));
+    expect(returnsFromB).toContain(Return.takeFromOtherQuestion);
+
+    const returnsFromA = ta.frames
+      .map((f) => CapnpMessage.fromFlat(f).root())
+      .filter((r) => Message_which(r) === Message.return)
+      .map((r) => Return_which(Message_getReturn(r)));
+    expect(returnsFromA).toContain(Return.resultsSentElsewhere);
+  });
+
+  test("a failing ctx.tailCall back to the caller propagates the exception without aborting", async () => {
+    const failingLocal: RpcServer = {
+      dispatch() {
+        throw new RpcError("local tail boom", "overloaded");
+      },
+    };
+    const proxy: RpcServer = {
+      dispatch(_i, _m, params, _r, ctx) {
+        const cap = new Client(ctx.getCap(params.getP(0)));
+        return ctx.tailCall(cap, IFACE, 0).finally(() => cap.release());
+      },
+    };
+    const { a, b, settle } = link(undefined, proxy);
+    const boot = a.bootstrap();
+    const out = boot.call(
+      IFACE,
+      0,
+      (p, cb) => cb.setCap(p, 0, Client.local(failingLocal).hook),
+      0,
+      1,
+    );
+    await settle();
+    await expect(Promise.resolve(out)).rejects.toMatchObject({
+      message: "local tail boom",
+      type: "overloaded",
+    });
+    expect(a.disconnected).toBeUndefined();
+    expect(b.disconnected).toBeUndefined();
+  });
+
+  test("forwarding queued calls on a promise back to the caller uses sendResultsTo.yourself", async () => {
+    const local = new Counter();
+    let resolveP!: (c: Client) => void;
+    let held!: Client;
+    const server: RpcServer = {
+      dispatch(_i, m, params, _r, ctx) {
+        if (m === 0) {
+          held = new Client(ctx.getCap(params.getP(0)));
+          return;
+        }
+        const promise = Client.fromPromise(new Promise<Client>((r) => (resolveP = r)));
+        ctx.setResultCap(ctx.initResults(0, 1), 0, promise.hook);
+      },
+    };
+    const { a, tb, settle } = link(undefined, server);
+    const boot = a.bootstrap();
+    boot.call(IFACE, 0, (p, cb) => cb.setCap(p, 0, Client.local(local).hook), 0, 1);
+    const reply = boot.call(IFACE, 1);
+    await settle();
+    const results = await reply;
+    const promise = new Client(results.getCap(results.content.getP(0)));
+    const first = promise.call(IFACE, 0, arg(7));
+    await settle();
+    resolveP(held);
+    await settle();
+    expect((await first).content.getU32(0)).toBe(8);
+    const callsFromB = tb.frames
+      .map((f) => CapnpMessage.fromFlat(f).root())
+      .filter((r) => Message_which(r) === Message.call)
+      .map((r) => Call_sendResultsTo_which(Message_getCall(r)));
+    expect(callsFromB).toContain(Call_sendResultsTo.yourself);
+    const returnsFromB = tb.frames
+      .map((f) => CapnpMessage.fromFlat(f).root())
+      .filter((r) => Message_which(r) === Message.return)
+      .map((r) => Return_which(Message_getReturn(r)));
+    expect(returnsFromB).toContain(Return.takeFromOtherQuestion);
   });
 });
 
