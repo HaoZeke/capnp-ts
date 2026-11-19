@@ -11,6 +11,7 @@ export default defineConfig({
     canonical: "src/canonical.ts",
     schema: "src/schema.ts",
     dynamic: "src/dynamic.ts",
+    text: "src/text.ts",
   },
   format: ["esm"],
   target: "es2022",
