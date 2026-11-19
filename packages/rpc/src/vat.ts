@@ -56,6 +56,7 @@ import {
   CALL_PWORDS,
   Call_getInterfaceId,
   Call_getMethodId,
+  Call_getOnlyPromisePipeline,
   Call_getParams,
   Call_getQuestionId,
   Call_getTarget,
@@ -326,6 +327,11 @@ interface AnswerState {
   resultExports: number[];
   /** The call said `sendResultsTo.yourself`: the results stay here for the caller to claim. */
   resultsElsewhere: boolean;
+  /**
+   * `Call.onlyPromisePipeline`: keep the answer so the peer can pipeline,
+   * but do not send `Return` or export the result capabilities.
+   */
+  onlyPromisePipeline: boolean;
   /** True once this answer was answered via `Return.takeFromOtherQuestion`. */
   tailSent: boolean;
   returned: boolean;
@@ -1445,6 +1451,10 @@ export class RpcConnection implements RemoteHost {
     }
     const answer = this.newAnswer(questionId);
     answer.resultsElsewhere = sendTo === Call_sendResultsTo.yourself;
+    // Redirected results ignore onlyPromisePipeline: the peer is waiting
+    // on resultsSentElsewhere, not on a pipeline-only hint.
+    answer.onlyPromisePipeline =
+      !answer.resultsElsewhere && Call_getOnlyPromisePipeline(call);
     const tailHandler: TailHandler | undefined = answer.resultsElsewhere
       ? undefined
       : {
@@ -1503,6 +1513,7 @@ export class RpcConnection implements RemoteHost {
       call: undefined as unknown as CallState,
       resultExports: [],
       resultsElsewhere: false,
+      onlyPromisePipeline: false,
       tailSent: false,
       returned: false,
       finished: false,
@@ -1528,6 +1539,13 @@ export class RpcConnection implements RemoteHost {
 
   private completeAnswer(questionId: number, answer: AnswerState, s: Settle<Payload>): void {
     if (answer.tailSent) {
+      if (answer.finished) this.answers.delete(questionId);
+      return;
+    }
+    if (answer.onlyPromisePipeline) {
+      // The caller will pipeline and then Finish. A Return here would
+      // export capabilities the peer never Releases.
+      answer.returned = true;
       if (answer.finished) this.answers.delete(questionId);
       return;
     }
