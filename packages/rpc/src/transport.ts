@@ -16,6 +16,8 @@ export interface Transport {
   readonly pending: number;
   close(): void;
   readonly closed: boolean;
+  /** Optional dynamic send-buffer window in bytes, as capnp-C++'s `getSendBufferSize()`. */
+  getSendBufferSize?(): number | undefined;
 }
 
 /**
