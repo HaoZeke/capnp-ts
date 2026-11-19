@@ -26,7 +26,7 @@ Two package names are reserved for release, both ESM:
 
 | Package             | Role                                                    |
 |---------------------+---------------------------------------------------------|
-| =@haozeke/capnp=    | Wire runtime: pointer, message, builder, packed, canonical |
+| =@haozeke/capnp=    | Wire runtime, dynamic reflection, text/JSON codecs, =capnp-ts= CLI |
 | =@haozeke/capnpc-ts= | =capnp compile -o= plugin emitting typed ESM            |
 
 #+begin_src console
