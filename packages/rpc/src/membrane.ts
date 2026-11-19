@@ -40,9 +40,37 @@ import {
  * defaults.
  */
 export abstract class MembranePolicy {
-  /** Wrappers this root policy has made, keyed by the capability inside. */
+  /** Wrappers this policy has made, keyed by the capability inside. */
   readonly wrappers = new Map<ClientHook, MembraneHook>();
   readonly reverseWrappers = new Map<ClientHook, MembraneHook>();
+  /** Cached revocation error once `onRevoked()` settles. */
+  revokedError: RpcError | undefined;
+  private revocationWatched = false;
+
+  /** Watch `onRevoked()` once so wrappers created after revocation see it immediately. */
+  watchRevocation(onRevoke: (err: RpcError) => void): void {
+    if (this.revokedError !== undefined) {
+      onRevoke(this.revokedError);
+      return;
+    }
+    const p = this.onRevoked();
+    if (p === undefined) return;
+    if (!this.revocationWatched) {
+      this.revocationWatched = true;
+      p.then(
+        () => {
+          this.revokedError ??= new RpcError("onRevoked() resolved; it should only reject");
+        },
+        (e) => {
+          this.revokedError ??= toRpcError(e);
+        },
+      );
+    }
+    p.then(
+      () => onRevoke((this.revokedError ??= new RpcError("onRevoked() resolved; it should only reject"))),
+      (e) => onRevoke((this.revokedError ??= toRpcError(e))),
+    );
+  }
 
   /**
    * A call from outside the membrane to an object inside. Return nothing to
@@ -161,9 +189,10 @@ interface Flight {
 
 class MembraneHook extends RefHook implements ClientHook {
   readonly brand = MembraneHook;
-  private inner: ClientHook | undefined;
+  private inner: ClientHook;
+  private originalInner: ClientHook | undefined;
   private revoked: RpcError | undefined;
-  private revokedHook: ClientHook | undefined;
+  private disposed = false;
   private resolvedWrap: ClientHook | undefined;
   private readonly flights = new Set<Flight>();
 
@@ -175,61 +204,74 @@ class MembraneHook extends RefHook implements ClientHook {
   ) {
     super();
     this.inner = inner;
+    this.originalInner = inner;
     this.wrapperMap().set(inner, this);
-    this.policy.onRevoked()?.then(
-      () => this.revoke(new RpcError("onRevoked() resolved; it should only reject")),
-      (e) => this.revoke(toRpcError(e)),
-    );
+    this.policy.watchRevocation((err) => this.revoke(err));
   }
 
   private wrapperMap(): Map<ClientHook, MembraneHook> {
-    const root = this.policy.rootPolicy();
-    return this.reverse ? root.reverseWrappers : root.wrappers;
+    return this.reverse ? this.policy.reverseWrappers : this.policy.wrappers;
   }
 
   /** A new reference to what is inside, or a broken capability once revoked. */
   innerRef(): ClientHook {
-    return this.inner === undefined ? new BrokenClient(this.revoked!) : this.inner.addRef();
+    return this.inner.addRef();
   }
 
   private revoke(error: RpcError): void {
-    if (this.revoked !== undefined || this.inner === undefined) return;
+    if (this.disposed || this.revoked !== undefined) return;
     this.revoked = error;
     for (const f of [...this.flights]) {
       f.outer.result.reject(error);
       f.inner.release();
     }
     this.flights.clear();
-    this.dropInner();
+    const broken = new BrokenClient(error);
+    this.replaceInner(broken);
   }
 
-  private dropInner(): void {
-    const inner = this.inner;
-    if (inner === undefined) return;
-    this.inner = undefined;
-    const map = this.wrapperMap();
-    if (map.get(inner) === this) map.delete(inner);
-    inner.release();
+  private replaceInner(next: ClientHook): void {
+    const prev = this.inner;
+    const orig = this.originalInner;
+    if (orig !== undefined) {
+      const map = this.wrapperMap();
+      if (map.get(orig) === this) map.delete(orig);
+      this.originalInner = undefined;
+    }
+    this.inner = next;
+    prev.release();
   }
 
   get brokenError(): RpcError | undefined {
-    return this.revoked ?? this.inner?.brokenError;
+    return this.revoked ?? this.inner.brokenError;
   }
 
   getResolved(): ClientHook | undefined {
-    if (this.revoked !== undefined) return (this.revokedHook ??= new BrokenClient(this.revoked));
     if (this.resolvedWrap !== undefined) return this.resolvedWrap;
-    const resolved = this.inner!.getResolved();
+    const resolved = this.inner.getResolved();
     if (resolved === undefined) return undefined;
     this.resolvedWrap = wrapCap(resolved.addRef(), this.policy, this.reverse);
     return this.resolvedWrap;
   }
 
   whenMoreResolved(): Promise<ClientHook> | undefined {
-    if (this.revoked !== undefined) return Promise.resolve(this.getResolved()!);
-    const more = this.inner!.whenMoreResolved();
+    if (this.resolvedWrap !== undefined) return Promise.resolve(this.resolvedWrap);
+    const more = this.inner.whenMoreResolved();
     if (more === undefined) return undefined;
-    return more.then((next) => {
+    if (this.revoked !== undefined) return Promise.reject(this.revoked);
+    const onRevoked = this.policy.onRevoked();
+    const raced =
+      onRevoked === undefined
+        ? more
+        : Promise.race([
+            more,
+            onRevoked.then(
+              () => Promise.reject(new RpcError("onRevoked() resolved; it should only reject")),
+              (e) => Promise.reject(toRpcError(e)),
+            ),
+          ]);
+    return raced.then((next) => {
+      if (this.revoked !== undefined) throw this.revoked;
       this.resolvedWrap ??= wrapCap(next.addRef(), this.policy, this.reverse);
       return this.resolvedWrap;
     });
@@ -244,7 +286,7 @@ class MembraneHook extends RefHook implements ClientHook {
     methodId: number,
     params: Payload,
   ): { target: ClientHook; params: Payload; crossing: boolean } {
-    const inner = this.inner!;
+    const inner = this.inner;
     const asClient = new Client(inner.addRef());
     let redirect: Client | undefined;
     try {
@@ -258,10 +300,12 @@ class MembraneHook extends RefHook implements ClientHook {
       asClient.release();
     }
     if (redirect !== undefined) {
-      const pending = inner.getResolved() === undefined && inner.whenMoreResolved() !== undefined;
-      if (pending && this.policy.shouldResolveBeforeRedirecting()) {
-        redirect.release();
-        return { target: this.waitAndRetry(), params, crossing: false };
+      if (this.policy.shouldResolveBeforeRedirecting()) {
+        const more = this.whenMoreResolved();
+        if (more !== undefined) {
+          redirect.release();
+          return { target: this.waitAndRetry(more), params, crossing: false };
+        }
       }
       return { target: redirect.hook, params, crossing: false };
     }
@@ -274,20 +318,26 @@ class MembraneHook extends RefHook implements ClientHook {
   }
 
   /** A stand-in that sends calls to what this membrane resolves to, which applies the policy again. */
-  private waitAndRetry(): ClientHook {
+  private waitAndRetry(more: Promise<ClientHook>): ClientHook {
     const next = new Settle<ClientHook>();
-    this.whenMoreResolved()!.then(
-      (hook) => next.resolve(hook.addRef()),
-      (e) => next.reject(e),
+    this.addRef();
+    more.then(
+      (hook) => {
+        next.resolve(hook.addRef());
+        this.release();
+      },
+      (e) => {
+        next.reject(e);
+        this.release();
+      },
     );
     return new QueuedClient(next);
   }
 
   call(interfaceId: bigint, methodId: number, params: Payload, opts?: CallOptions): CallState {
-    if (this.revoked !== undefined) {
-      params.release();
-      return failedCall(this.revoked);
-    }
+    const resolved = this.getResolved();
+    if (resolved !== undefined) return resolved.call(interfaceId, methodId, params, opts);
+
     let routed;
     try {
       routed = this.route(interfaceId, methodId, params);
@@ -304,10 +354,11 @@ class MembraneHook extends RefHook implements ClientHook {
     routed.target.release();
     const outer = new CallState();
     const flight: Flight = { outer, inner };
-    this.flights.add(flight);
+    if (inner.result.state === "pending") this.flights.add(flight);
     outer.pipeline = new MembranePipeline(this, inner.pipeline);
     inner.result.onSettled((s) => {
       this.flights.delete(flight);
+      if (outer.result.state !== "pending") return;
       if (s.state === "ok") {
         outer.result.resolve(
           new Payload(
@@ -327,10 +378,9 @@ class MembraneHook extends RefHook implements ClientHook {
   }
 
   callStreaming(interfaceId: bigint, methodId: number, params: Payload): Promise<void> {
-    if (this.revoked !== undefined) {
-      params.release();
-      return Promise.reject(this.revoked);
-    }
+    const resolved = this.getResolved();
+    if (resolved !== undefined) return callStreaming(resolved, interfaceId, methodId, params);
+
     let routed;
     try {
       routed = this.route(interfaceId, methodId, params);
@@ -339,16 +389,35 @@ class MembraneHook extends RefHook implements ClientHook {
     }
     const done = callStreaming(routed.target, interfaceId, methodId, routed.params);
     routed.target.release();
-    return done;
+    if (!routed.crossing) return done;
+    if (this.revoked !== undefined) return Promise.reject(this.revoked);
+    const onRevoked = this.policy.onRevoked();
+    if (onRevoked === undefined) return done;
+    return Promise.race([
+      done,
+      onRevoked.then(
+        () => Promise.reject(new RpcError("onRevoked() resolved; it should only reject")),
+        (e) => Promise.reject(toRpcError(e)),
+      ),
+    ]);
   }
 
   flush(): Promise<void> {
-    return this.inner?.flush?.() ?? Promise.resolve();
+    const resolved = this.getResolved();
+    if (resolved !== undefined) return resolved.flush?.() ?? Promise.resolve();
+    if (this.revoked !== undefined) return Promise.reject(this.revoked);
+    return this.inner.flush?.() ?? Promise.resolve();
   }
 
   protected dispose(): void {
-    this.dropInner();
-    this.revokedHook?.release();
+    this.disposed = true;
+    const orig = this.originalInner;
+    if (orig !== undefined) {
+      const map = this.wrapperMap();
+      if (map.get(orig) === this) map.delete(orig);
+      this.originalInner = undefined;
+    }
+    this.inner.release();
     this.resolvedWrap?.release();
   }
 }
@@ -383,7 +452,7 @@ function wrapCap(cap: ClientHook, policy: MembranePolicy, reverse: boolean): Cli
       : root.exportExternal(inside, from, policy);
     return unwrapped.hook;
   }
-  const existing = (reverse ? root.reverseWrappers : root.wrappers).get(cap);
+  const existing = (reverse ? policy.reverseWrappers : policy.wrappers).get(cap);
   if (existing !== undefined) {
     cap.release();
     return existing.addRef();

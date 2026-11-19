@@ -366,3 +366,90 @@ describe("membranes over a connection", () => {
     expect(results.getCap(results.content.getP(0))).toBe(mine.hook);
   });
 });
+
+describe("membrane C++ semantics", () => {
+  test("a resolved promise pointing outside bypasses inboundCall", async () => {
+    const hub = new Hub();
+    const stand = new Counter();
+    class Intercepting extends Recorder {
+      override shouldResolveBeforeRedirecting(): boolean {
+        return true;
+      }
+    }
+    const policy = new Intercepting();
+    policy.redirects.set(0, Client.local(stand));
+    const outside = membrane(Client.local(hub), policy);
+    const mine = new Counter();
+    // Loop an outside capability through the membrane via a pipelined promise.
+    const looped = outside.call(IFACE, 1, capIn(Client.local(mine)), 0, 1).pipeline(0);
+    await looped.whenResolved();
+    const out = await looped.call(IFACE, 0, arg(10));
+    expect(out.content.getU32(0)).toBe(11);
+    expect(mine.seen).toEqual([10]);
+    expect(stand.seen).toEqual([]);
+  });
+
+  test("child policies sharing one rootPolicy keep distinct wrappers", async () => {
+    const root = new Recorder();
+    class ChildPolicy extends Recorder {
+      override rootPolicy(): MembranePolicy {
+        return root;
+      }
+    }
+    const childA = new ChildPolicy();
+    const childB = new ChildPolicy();
+    const target = Client.local(new Counter());
+    const wrapA = membrane(target.dup(), childA);
+    const wrapB = membrane(target.dup(), childB);
+    expect(wrapA.hook).not.toBe(wrapB.hook);
+    await wrapA.call(IFACE, 0, arg(1));
+    await wrapB.call(IFACE, 0, arg(2));
+    expect(childA.inbound).toEqual(["m0"]);
+    expect(childB.inbound).toEqual(["m0"]);
+    // Crossing back through childB unwraps what childA exported.
+    const unwrapped = reverseMembrane(wrapA, childB);
+    expect(unwrapped.hook).toBe(target.hook);
+    unwrapped.release();
+    wrapB.release();
+    target.release();
+  });
+
+  test("whenMoreResolved rejects if the membrane is revoked first", async () => {
+    const never = Client.fromPromise(new Promise<Client>(() => {}));
+    const policy = new RevocablePolicy();
+    const outside = membrane(never, policy);
+    const waiting = outside.whenResolved();
+    policy.revoke("cut");
+    await expect(waiting).rejects.toThrow("cut");
+    await expect(outside.flush()).rejects.toThrow("cut");
+  });
+
+  test("inboundCall still runs after revocation with a broken target", async () => {
+    const seenBroken: boolean[] = [];
+    class SpyRevocable extends RevocablePolicy {
+      override inboundCall(_i: bigint, _m: number, target: Client): Client | undefined {
+        seenBroken.push(target.isBroken);
+        return undefined;
+      }
+    }
+    const policy = new SpyRevocable();
+    const outside = membrane(Client.local(new Counter()), policy);
+    policy.revoke("revoked now");
+    await sleep(1);
+    await expect(Promise.resolve(outside.call(IFACE, 0, arg(1)))).rejects.toThrow("revoked now");
+    expect(seenBroken).toEqual([true]);
+  });
+
+  test("wrapping after revocation rejects synchronously without calling inside", async () => {
+    const inside = new Counter();
+    const policy = new RevocablePolicy();
+    const first = membrane(Client.local(new Counter()), policy);
+    policy.revoke("already revoked");
+    await sleep(1);
+    const second = membrane(Client.local(inside), policy);
+    await expect(Promise.resolve(second.call(IFACE, 0, arg(1)))).rejects.toThrow("already revoked");
+    expect(inside.seen).toEqual([]);
+    first.release();
+    second.release();
+  });
+});
