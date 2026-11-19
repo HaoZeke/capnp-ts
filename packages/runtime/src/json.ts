@@ -730,7 +730,9 @@ class AnnotatedStructHandler implements JsonCustomHandler {
     }
 
     if (discSpec) {
-      this.unionTagName = discSpec.name;
+      // An unnamed discriminator uses the union's own name when the union
+      // was flattened into its parent, and omits the tag otherwise.
+      this.unionTagName = discSpec.name ?? unionDeclName;
       if (this.unionTagName !== null) {
         this.fieldsByName.set(this.unionTagName, { kind: "unionTag" });
       }
@@ -779,7 +781,7 @@ class AnnotatedStructHandler implements JsonCustomHandler {
 
       let flattenHandler: AnnotatedStructHandler | null = null;
       if (field.isGroup()) {
-        const subName = flattened ? field.name : fName;
+        const subName = flattened ? field.name : null;
         const subH = codec._loadAnnotatedStructHandler(
           fType.asStruct(),
           subDisc,

@@ -377,4 +377,58 @@ describe("Cap'n Proto compat JSON codec", () => {
       }
     },
   );
+
+  test.skipIf(!hasCapnp)(
+    "flattened unnamed discriminator matches capnp 1.4.0",
+    () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), "capnp-json-flat-"));
+      try {
+        const edgePath = join(tmpDir, "json_flat.capnp");
+        writeFileSync(
+          edgePath,
+          [
+            "@0x8123456789abcde2;",
+            "annotation jsonFlatten @0x82d3e852af0336bf (field, group, union) :JsonFlattenOptions;",
+            "annotation jsonDiscriminator @0xcfa794e8d19a0162 (struct, union) :JsonDiscriminatorOptions;",
+            "struct JsonFlattenOptions { prefix @0 :Text = \"\"; }",
+            "struct JsonDiscriminatorOptions { name @0 :Text; valueName @1 :Text; }",
+            "struct Inner { x @0 :Int32; }",
+            "struct Flat {",
+            "  kind :union $jsonFlatten() $jsonDiscriminator() {",
+            "    empty @0 :Void;",
+            "    inner @1 :Inner;",
+            "  }",
+            "}",
+          ].join("\n"),
+        );
+        const cgr = spawnSync("capnp", ["compile", "-o-", edgePath]);
+        expect(cgr.status).toBe(0);
+        const loader = SchemaLoader.fromCgr(new Uint8Array(cgr.stdout));
+        const schema = loader.resolveStruct("Flat");
+        for (const text of ["(kind = (empty = void))", "(kind = (inner = (x = 42)))"]) {
+          const cliBin = new Uint8Array(
+            spawnSync("capnp", ["encode", edgePath, "Flat"], { input: text }).stdout,
+          );
+          const cliShort = spawnSync(
+            "capnp",
+            ["convert", "binary:json", "--short", edgePath, "Flat"],
+            { input: cliBin },
+          );
+          expect(cliShort.status).toBe(0);
+          const reader = DynamicStruct.fromMessage(Message.fromFlat(cliBin), schema);
+          const tsShort = encodeJson(reader, { pretty: false });
+          expect(`${tsShort}\n`).toBe(cliShort.stdout.toString("utf-8"));
+          const cliCanon = spawnSync(
+            "capnp",
+            ["convert", "json:canonical", edgePath, "Flat"],
+            { input: Buffer.from(`${tsShort}\n`, "utf-8") },
+          );
+          expect(cliCanon.status).toBe(0);
+          expect(canonicalize(decodeJson(tsShort, schema))).toEqual(new Uint8Array(cliCanon.stdout));
+        }
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
 });
