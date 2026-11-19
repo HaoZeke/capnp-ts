@@ -12,6 +12,7 @@ import {
   RpcConnection,
   RpcError,
   type RpcServer,
+  servePersistent,
   StreamTransport,
 } from "../packages/rpc/src/index.ts";
 import {
@@ -20,6 +21,7 @@ import {
   ECHO_INTERFACE_ID,
   Sink_methods,
   SINK_INTERFACE_ID,
+  KEEP_INTERFACE_ID,
 } from "./interop.capnp.ts";
 
 export {
@@ -28,6 +30,7 @@ export {
   ECHO_INTERFACE_ID,
   Sink_methods,
   SINK_INTERFACE_ID,
+  KEEP_INTERFACE_ID,
 };
 
 export function attach(sock: Socket, bootstrap?: RpcServer | Client): RpcConnection {
@@ -87,6 +90,19 @@ export class SinkImpl implements RpcServer {
     }
     ctx.initResults(1, 0).setU64(0, this.total);
   }
+}
+
+/** Keep: `Persistent(Text, Text)` plus value(). save returns "ref-for-<owner>". */
+export function keepServer(): RpcServer {
+  const base: RpcServer = {
+    dispatch(interfaceId, _m, _p, results) {
+      if (interfaceId !== KEEP_INTERFACE_ID) throw new RpcError("wrong interface", "unimplemented");
+      results.setU32(0, 7);
+    },
+  };
+  return servePersistent(base, (params, results) => {
+    results.setText(0, `ref-for-${params.getText(0)}`);
+  });
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -201,6 +217,9 @@ export class EchoImpl implements RpcServer {
           0,
           Client.local(new SinkImpl(params.getU32(0))).hook,
         );
+        return;
+      case m.openKeep.ordinal:
+        ctx.setResultCap(ctx.initResults(0, 1), 0, Client.local(keepServer()).hook);
         return;
       case m.die.ordinal:
         setImmediate(this.onDie);
