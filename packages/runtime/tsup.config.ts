@@ -12,6 +12,7 @@ export default defineConfig({
     schema: "src/schema.ts",
     dynamic: "src/dynamic.ts",
     text: "src/text.ts",
+    json: "src/json.ts",
   },
   format: ["esm"],
   target: "es2022",
