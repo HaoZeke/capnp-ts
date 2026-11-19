@@ -13,6 +13,12 @@ export {
   RevocablePolicy,
   reverseMembrane,
 } from "./membrane.ts";
+export {
+  PERSISTENT_INTERFACE_ID,
+  PERSISTENT_SAVE_METHOD,
+  savePersistent,
+  servePersistent,
+} from "./persistent.ts";
 export { DEFAULT_STREAM_WINDOW, WindowFlowController } from "./flow.ts";
 export { RpcStream } from "./stream.ts";
 export {
