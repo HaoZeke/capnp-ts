@@ -32,6 +32,6 @@ docs = ["docs"]
 [tasks]
 fixtures = "bash scripts/gen-sample-fixtures.sh"
 fixtures-check = { cmd = "bash scripts/gen-sample-fixtures.sh --check", description = "Assert goldens still match the capnp CLI" }
-test = "bun test --timeout 10000 packages/runtime"
+test = "bun test --timeout 10000 packages/runtime packages/codegen packages/rpc"
 build-peer = { cmd = "bash interop/build-peer.sh", description = "Build the capnp-C++ Adder peer for the RPC interop test" }
 rpc-interop = { cmd = "bash interop/run_rpc_interop.sh build-interop/rpc_peer_server interop/rpc_client.ts build-interop/rpc_peer", depends-on = ["build-peer"], description = "Run this vat against a live capnp-C++ peer, in both directions" }
