@@ -843,7 +843,8 @@ export class RpcConnection implements RemoteHost {
         return vine;
       }
       default:
-        return new BrokenClient(new RpcError("capability descriptor is empty or unknown"));
+        this.abort(new RpcError("unknown CapDescriptor type"));
+        return new BrokenClient(new RpcError("unknown CapDescriptor type"));
     }
   }
 
@@ -1167,10 +1168,18 @@ export class RpcConnection implements RemoteHost {
 
   private handleReturn(ret: Ptr, frame: Uint8Array): void {
     const answerId = Return_getAnswerId(ret);
+    // A pipeline-only question id has the high bit set. C++ ignores a
+    // Return for those, because the id may already have been reused.
+    if (answerId >= 0x80000000) return;
     const q = this.questions.get(answerId);
-    // A Return for a question we never asked is the peer's problem, not
-    // a reason to disturb our own tables.
-    if (q === undefined || q.returned) return;
+    if (q === undefined) {
+      this.abort(new RpcError("Invalid question ID in Return message."));
+      return;
+    }
+    if (q.returned) {
+      this.abort(new RpcError("Duplicate Return."));
+      return;
+    }
     q.returned = true;
     q.reply = frame;
     const which = Return_which(ret);
@@ -1185,7 +1194,9 @@ export class RpcConnection implements RemoteHost {
     switch (which) {
       case Return.results: {
         if (q.isTailCall) {
-          this.abort(new RpcError("Tail call Return must set resultsSentElsewhere, not results"));
+          this.abort(
+            new RpcError("Tail call `Return` must set `resultsSentElsewhere`, not `results`."),
+          );
           return;
         }
         const payload = Return_getResults(ret);
@@ -1197,18 +1208,26 @@ export class RpcConnection implements RemoteHost {
       }
       case Return.exception:
         if (q.isTailCall) {
-          this.abort(new RpcError("Tail call Return must set resultsSentElsewhere, not exception"));
+          this.abort(
+            new RpcError("Tail call `Return` must set `resultsSentElsewhere`, not `exception`."),
+          );
           return;
         }
         if (!q.finished) q.call.result.reject(readException(Return_getException(ret)));
         break;
       case Return.canceled:
-        if (!q.finished) q.call.result.reject(new RpcError("call was canceled"));
+        // Legal only as the reply to a Finish we already sent. C++ treats
+        // Return.canceled for a question the caller still holds as a
+        // protocol error and disconnects.
+        if (!q.finished) {
+          this.abort(new RpcError("Return message falsely claims call was canceled."));
+          return;
+        }
         break;
       case Return.resultsSentElsewhere:
         if (!q.isTailCall) {
           this.abort(
-            new RpcError("Return had resultsSentElsewhere but this was not a tail call"),
+            new RpcError("`Return` had `resultsSentElsewhere` but this was not a tail call."),
           );
           return;
         }
@@ -1219,10 +1238,8 @@ export class RpcConnection implements RemoteHost {
         this.takeResults(q, Return_getTakeFromOtherQuestion(ret));
         break;
       default:
-        if (!q.finished) {
-          q.call.result.reject(new RpcError("unsupported Return variant", "unimplemented"));
-        }
-        break;
+        this.abort(new RpcError("Unknown 'Return' type."));
+        return;
     }
     if (q.finished) this.questions.delete(answerId);
   }
@@ -1235,8 +1252,16 @@ export class RpcConnection implements RemoteHost {
    */
   private takeResults(q: QuestionState, otherAnswerId: number): void {
     const other = this.answers.get(otherAnswerId);
-    if (other === undefined || !other.resultsElsewhere) {
-      if (!q.finished) q.call.result.reject(new RpcError("takeFromOtherQuestion names no held answer"));
+    if (other === undefined) {
+      this.abort(new RpcError("`Return.takeFromOtherQuestion` had invalid answer ID."));
+      return;
+    }
+    if (!other.resultsElsewhere) {
+      this.abort(
+        new RpcError(
+          "`Return.takeFromOtherQuestion` referenced a call that did not use `sendResultsTo.yourself`.",
+        ),
+      );
       return;
     }
     if (q.finished) {
@@ -1593,7 +1618,14 @@ export class RpcConnection implements RemoteHost {
     const transform = PromisedAnswer_getTransform(promised);
     for (let i = 0; i < transform.listLen(); i++) {
       const op = transform.listGetP(i);
-      if (PromisedAnswer_Op_which(op) !== PromisedAnswer_Op.getPointerField) continue;
+      const opWhich = PromisedAnswer_Op_which(op);
+      // noop is a real op and does not move. Anything else is the
+      // unsupported-pipeline-op protocol error, which disconnects.
+      if (opWhich === PromisedAnswer_Op.noop) continue;
+      if (opWhich !== PromisedAnswer_Op.getPointerField) {
+        this.abort(new RpcError("Unsupported pipeline op."));
+        return undefined;
+      }
       ops.push(PromisedAnswer_Op_getGetPointerField(op));
     }
     return answer.call.pipeline.getPipelinedCap(ops);
@@ -1604,7 +1636,15 @@ export class RpcConnection implements RemoteHost {
   private handleResolve(resolve: Ptr): void {
     const id = Resolve_getPromiseId(resolve);
     const imp = this.imports.get(id);
-    if (imp !== undefined && imp.resolver === undefined && !imp.wasPromise && imp.importClient !== undefined) {
+    // C++ disconnects when Resolve names an import that was never a
+    // promise. A second Resolve of a real promise does not: the fulfiller
+    // is still in the table and a second fulfill is ignored.
+    if (
+      imp !== undefined &&
+      imp.resolver === undefined &&
+      !imp.wasPromise &&
+      imp.importClient !== undefined
+    ) {
       this.abort(new RpcError("Got Resolve for a non-promise import"));
       return;
     }
@@ -1734,6 +1774,7 @@ export class RpcConnection implements RemoteHost {
         return;
       }
       default:
+        this.abort(new RpcError("Unimplemented Disembargo type."));
         return;
     }
   }
