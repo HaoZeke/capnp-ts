@@ -145,6 +145,7 @@ import {
   Return,
   Return_getAnswerId,
   Return_getException,
+  Return_getNoFinishNeeded,
   Return_getReleaseParamCaps,
   Return_getTakeFromOtherQuestion,
   Return_getResults,
@@ -303,6 +304,8 @@ interface QuestionState {
   failed: boolean;
   returned: boolean;
   finished: boolean;
+  /** Peer's Return set noFinishNeeded, so no Finish message need be sent. */
+  skipFinish: boolean;
 }
 
 /** A question the peer asked, from its Call until its Finish. */
@@ -495,7 +498,18 @@ export class RpcConnection implements RemoteHost {
 
   /** Export a capability, or return the id it already has. */
   exportCap(server: RpcServer): number {
-    return this.exportInner(this.hookFor(server), () => {});
+    const existing = this.serverHooks.get(server);
+    if (
+      existing !== undefined &&
+      (existing === this.bootstrapHook || this.exportIdByHook.has(existing))
+    ) {
+      return this.exportInner(existing, () => {});
+    }
+    const hook = new LocalClient(server);
+    this.serverHooks.set(server, hook);
+    const id = this.exportInner(hook, () => {});
+    hook.release();
+    return id;
   }
 
   /**
@@ -736,6 +750,7 @@ export class RpcConnection implements RemoteHost {
       failed: false,
       returned: false,
       finished: false,
+      skipFinish: false,
     };
     call.pipeline = {
       getPipelinedCap: (ops) => this.pipelineOf(id, q, ops),
@@ -767,7 +782,7 @@ export class RpcConnection implements RemoteHost {
     if (q === undefined) return;
     q.finished = true;
     if (q.returned) this.questions.delete(id);
-    if (this.gone !== undefined) return;
+    if (this.gone !== undefined || q.skipFinish) return;
     const { b, root } = newMessage(Message.finish);
     const finish = root.initStruct(0, FINISH_DWORDS, FINISH_PWORDS);
     finish.setU32(0, id);
@@ -932,7 +947,11 @@ export class RpcConnection implements RemoteHost {
    * is also what a later `Disembargo.provide` names.
    */
   sendProvide(importedCapId: number, recipient: Introduction, nonce: bigint): number {
-    const { id } = this.newQuestion();
+    const { id, q } = this.newQuestion();
+    if (this.gone !== undefined) {
+      this.failQuestion(q, this.gone);
+      return id;
+    }
     const { b, root } = newMessage(Message.provide);
     const provide = root.initStruct(0, PROVIDE_DWORDS, PROVIDE_PWORDS);
     provide.setU32(0, id);
@@ -953,7 +972,11 @@ export class RpcConnection implements RemoteHost {
    * the question id; the answer carries the capability.
    */
   sendAccept(nonce: bigint, embargo = false): number {
-    const { id } = this.newQuestion();
+    const { id, q } = this.newQuestion();
+    if (this.gone !== undefined) {
+      this.failQuestion(q, this.gone);
+      return id;
+    }
     const { b, root } = newMessage(Message.accept);
     const accept = root.initStruct(0, ACCEPT_DWORDS, ACCEPT_PWORDS);
     accept.setU32(0, id);
@@ -970,7 +993,11 @@ export class RpcConnection implements RemoteHost {
    * peer answers once the last part has arrived. Returns the question id.
    */
   sendJoin(importedCapId: number, joinId: number, partCount: number, partNum: number): number {
-    const { id } = this.newQuestion();
+    const { id, q } = this.newQuestion();
+    if (this.gone !== undefined) {
+      this.failQuestion(q, this.gone);
+      return id;
+    }
     const { b, root } = newMessage(Message.join);
     const join = root.initStruct(0, JOIN_DWORDS, JOIN_PWORDS);
     join.setU32(0, id);
@@ -1026,6 +1053,7 @@ export class RpcConnection implements RemoteHost {
       for (const id of q.paramExports) this.releaseExport(id, 1);
     }
     q.paramExports = [];
+    if (Return_getNoFinishNeeded(ret)) q.skipFinish = true;
 
     switch (which) {
       case Return.results: {
@@ -1037,16 +1065,18 @@ export class RpcConnection implements RemoteHost {
         break;
       }
       case Return.exception:
-        q.call.result.reject(readException(Return_getException(ret)));
+        if (!q.finished) q.call.result.reject(readException(Return_getException(ret)));
         break;
       case Return.canceled:
-        q.call.result.reject(new RpcError("call was canceled"));
+        if (!q.finished) q.call.result.reject(new RpcError("call was canceled"));
         break;
       case Return.takeFromOtherQuestion:
         this.takeResults(q, Return_getTakeFromOtherQuestion(ret));
         break;
       default:
-        q.call.result.reject(new RpcError("unsupported Return variant", "unimplemented"));
+        if (!q.finished) {
+          q.call.result.reject(new RpcError("unsupported Return variant", "unimplemented"));
+        }
         break;
     }
     if (q.finished) this.questions.delete(answerId);
@@ -1061,10 +1091,15 @@ export class RpcConnection implements RemoteHost {
   private takeResults(q: QuestionState, otherAnswerId: number): void {
     const other = this.answers.get(otherAnswerId);
     if (other === undefined || !other.resultsElsewhere) {
-      q.call.result.reject(new RpcError("takeFromOtherQuestion names no held answer"));
+      if (!q.finished) q.call.result.reject(new RpcError("takeFromOtherQuestion names no held answer"));
+      return;
+    }
+    if (q.finished) {
+      other.call.release();
       return;
     }
     other.call.result.onSettled((s) => {
+      if (q.finished) return;
       if (s.state !== "ok") q.call.result.reject(s.error);
       else {
         q.failed = false;
@@ -1136,6 +1171,10 @@ export class RpcConnection implements RemoteHost {
     // message loop.
     if (provide.kind !== PtrKind.Struct) return;
     const questionId = Provide_getQuestionId(provide);
+    if (this.answers.has(questionId)) {
+      this.abort(new RpcError(`provide reuses question id ${questionId} still in use`));
+      return;
+    }
     const hook = this.targetHook(Provide_getTarget(provide));
     if (hook === undefined) {
       this.answerWithError(questionId, new RpcError("provide: no such capability"));
@@ -1158,6 +1197,10 @@ export class RpcConnection implements RemoteHost {
   private handleAccept(accept: Ptr): void {
     if (accept.kind !== PtrKind.Struct) return;
     const questionId = Accept_getQuestionId(accept);
+    if (this.answers.has(questionId)) {
+      this.abort(new RpcError(`accept reuses question id ${questionId} still in use`));
+      return;
+    }
     const nonce = ProvisionId_getNonce(Accept_getProvision(accept));
     const held = this.vat.provisions.get(nonce);
     if (held === undefined) {
@@ -1192,6 +1235,10 @@ export class RpcConnection implements RemoteHost {
   private handleBootstrap(bootstrap: Ptr): void {
     if (bootstrap.kind !== PtrKind.Struct) return;
     const questionId = Bootstrap_getQuestionId(bootstrap);
+    if (this.answers.has(questionId)) {
+      this.abort(new RpcError(`bootstrap reuses question id ${questionId} still in use`));
+      return;
+    }
     if (this.bootstrapHook === undefined) {
       this.answerWithError(questionId, new RpcError("no bootstrap capability"));
       return;
@@ -1206,6 +1253,11 @@ export class RpcConnection implements RemoteHost {
       this.abort(new RpcError(`call reuses question id ${questionId} still in use`));
       return;
     }
+    const sendTo = Call_sendResultsTo_which(call);
+    if (sendTo !== Call_sendResultsTo.caller && sendTo !== Call_sendResultsTo.yourself) {
+      this.abort(new RpcError("unsupported Call.sendResultsTo"));
+      return;
+    }
     // The cap table describes the message, not the dispatch: a call this
     // vat cannot route still told us where a third party's capability
     // lives.
@@ -1218,6 +1270,7 @@ export class RpcConnection implements RemoteHost {
       return;
     }
     const answer = this.newAnswer(questionId);
+    answer.resultsElsewhere = sendTo === Call_sendResultsTo.yourself;
     const state = target.call(
       Call_getInterfaceId(call),
       Call_getMethodId(call),
@@ -1225,7 +1278,6 @@ export class RpcConnection implements RemoteHost {
     );
     target.release();
     answer.call = state;
-    answer.resultsElsewhere = Call_sendResultsTo_which(call) === Call_sendResultsTo.yourself;
     state.result.onSettled((s) => this.completeAnswer(questionId, answer, s));
   }
 
@@ -1258,21 +1310,32 @@ export class RpcConnection implements RemoteHost {
 
   private completeAnswer(questionId: number, answer: AnswerState, s: Settle<Payload>): void {
     answer.returned = true;
-    if (answer.finished) {
-      // The caller said it no longer wants this, so no Return is sent.
-      this.answers.delete(questionId);
-      return;
-    }
+    const finished = answer.finished;
+    if (finished) this.answers.delete(questionId);
     if (this.gone !== undefined) return;
-    if (s.state === "ok" && answer.resultsElsewhere) {
-      // The caller will claim these with `takeFromOtherQuestion`.
+    if (answer.resultsElsewhere) {
+      // Even when the call failed or was canceled, a sendResultsTo.yourself
+      // Return must be resultsSentElsewhere so the peer does not abort.
       const { b, root } = newMessage(Message.return);
       const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
       ret.setU32(OFF.returnAnswerId, questionId);
       ret.setU16(OFF.returnUnion, Return.resultsSentElsewhere);
       ret.setBool(OFF.returnReleaseParamCaps, false, true);
       this.transport.send(b.toFlat());
-    } else if (s.state === "ok") {
+      return;
+    }
+    if (finished) {
+      // The caller sent Finish before we returned; reply Return.canceled so
+      // it can release the question table entry without waiting forever.
+      const { b, root } = newMessage(Message.return);
+      const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+      ret.setU32(OFF.returnAnswerId, questionId);
+      ret.setU16(OFF.returnUnion, Return.canceled);
+      ret.setBool(OFF.returnReleaseParamCaps, false, true);
+      this.transport.send(b.toFlat());
+      return;
+    }
+    if (s.state === "ok") {
       const { b, root } = newMessage(Message.return);
       const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
       ret.setU32(OFF.returnAnswerId, questionId);
@@ -1448,6 +1511,10 @@ export class RpcConnection implements RemoteHost {
   private handleJoin(join: Ptr): void {
     if (join.kind !== PtrKind.Struct) return;
     const questionId = Join_getQuestionId(join);
+    if (this.answers.has(questionId)) {
+      this.abort(new RpcError(`join reuses question id ${questionId} still in use`));
+      return;
+    }
     const keyPart = Join_getKeyPart(join);
     if (keyPart.kind !== PtrKind.Struct) {
       // Without a JoinKeyPart there is no way to tell which set this
@@ -1539,6 +1606,7 @@ export class RpcConnection implements RemoteHost {
     const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
     ret.setU32(OFF.returnAnswerId, questionId);
     ret.setU16(OFF.returnUnion, Return.exception);
+    ret.setBool(OFF.returnReleaseParamCaps, false, true);
     this.writeException(ret.initStruct(0, EXCEPTION_DWORDS, EXCEPTION_PWORDS), error);
     this.transport.send(b.toFlat());
   }
@@ -1580,8 +1648,21 @@ export class RpcConnection implements RemoteHost {
         const resolve = Message_getResolve(echoed);
         if (Resolve_which(resolve) !== Resolve.cap) return;
         const desc = Resolve_getCap(resolve);
-        if (desc.kind === PtrKind.Struct && CapDescriptor_which(desc) === CapDescriptor.senderHosted) {
-          this.releaseExport(CapDescriptor_getSenderHosted(desc), 1);
+        if (desc.kind !== PtrKind.Struct) return;
+        switch (CapDescriptor_which(desc)) {
+          case CapDescriptor.senderHosted:
+            this.releaseExport(CapDescriptor_getSenderHosted(desc), 1);
+            break;
+          case CapDescriptor.senderPromise:
+            this.releaseExport(CapDescriptor_getSenderPromise(desc), 1);
+            break;
+          case CapDescriptor.thirdPartyHosted: {
+            const tp = CapDescriptor_getThirdPartyHosted(desc);
+            if (tp.kind === PtrKind.Struct) {
+              this.releaseExport(ThirdPartyCapDescriptor_getVineId(tp), 1);
+            }
+            break;
+          }
         }
         return;
       }
@@ -1629,13 +1710,17 @@ export class RpcConnection implements RemoteHost {
     for (const q of this.questions.values()) {
       if (!q.returned) this.failQuestion(q, reason);
     }
-    for (const embargo of this.embargoes.values()) embargo.resolve();
+    for (const embargo of this.embargoes.values()) embargo.reject(reason);
     this.embargoes.clear();
-    for (const imp of this.imports.values()) imp.resolver?.reject(reason);
+    for (const imp of this.imports.values()) {
+      const resolver = imp.resolver;
+      imp.resolver = undefined;
+      resolver?.reject(reason);
+    }
 
     for (const answer of this.answers.values()) {
       answer.finished = true;
-      answer.call.release();
+      answer.call?.release();
     }
     this.answers.clear();
     for (const slot of this.exports.values()) slot.hook.release();
@@ -1643,7 +1728,12 @@ export class RpcConnection implements RemoteHost {
     this.exportIdByHook.clear();
     for (const hook of this.introductionHooks.values()) hook.release();
     this.introductionHooks.clear();
+    for (const held of this.heldAccepts.values()) held.hook.release();
     this.heldAccepts.clear();
+    for (const join of this.joins.values()) {
+      for (const part of join.parts) part?.hook?.release();
+    }
+    this.joins.clear();
     this.transport.close();
   }
 }

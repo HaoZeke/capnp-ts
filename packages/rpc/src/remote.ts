@@ -323,7 +323,13 @@ export class PromiseClient extends RefHook implements RpcClientHook {
       // echoes a Disembargo sent behind them.
       const lifted = this.host.startEmbargo(previous as RpcClientHook);
       const eventual = new Settle<ClientHook>();
-      lifted.onSettled(() => eventual.resolve(replacement));
+      lifted.onSettled((s) => {
+        if (s.state === "ok") eventual.resolve(replacement);
+        else {
+          replacement.release();
+          eventual.reject(s.error);
+        }
+      });
       this.cap = new QueuedClient(eventual);
     } else {
       this.cap = replacement;
