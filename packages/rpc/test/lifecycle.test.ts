@@ -687,6 +687,33 @@ describe("protocol errors", () => {
     const reply = CapnpMessage.fromFlat(pair.a.receive()!).root();
     expect(Message_which(reply)).toBe(Message.abort);
   });
+
+  test("a tail call answered with Return.results rejects when the connection aborts", async () => {
+    const pair = new MemoryTransportPair();
+    const a = new RpcConnection(pair.a);
+    const call = a.sendCallTo(
+      (t) => {
+        t.setU16(4, MessageTarget.importedCap);
+        t.setU32(0, 0);
+      },
+      IFACE,
+      0,
+      new CallBuilder(0, 0).toPayload(),
+      { sendResultsToYourself: true },
+    );
+    pair.b.receive();
+    const b = new MessageBuilder();
+    const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+    root.setU16(0, Message.return);
+    const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+    ret.setU32(0, 0);
+    ret.setU16(6, Return.results);
+    ret.initStruct(0, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+    pair.b.send(b.toFlat());
+    a.pump();
+    expect(a.disconnected).toBeDefined();
+    await expect(call.result.promise).rejects.toMatchObject({ type: "disconnected" });
+  });
 });
 
 describe("shutdown", () => {
