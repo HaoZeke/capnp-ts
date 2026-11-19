@@ -17,6 +17,7 @@ produced by upstream =capnp= rather than by each other.
    :maxdepth: 2
 
    architecture
+   rpc
 #+end_export
 
 * Install
