@@ -82,7 +82,7 @@ describe("interface stubs", () => {
     // Two Int64 arguments are two data words; one word would drop the
     // second argument on the wire without complaint.
     expect(src).toContain(
-      "add: { ordinal: 0, paramsDwords: 2, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0 }",
+      "add: { ordinal: 0, paramsDwords: 2, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] }",
     );
   });
 
@@ -90,7 +90,7 @@ describe("interface stubs", () => {
     expect(src).toContain("export class AdderClient");
     expect(src).toContain("export abstract class AdderServer");
     expect(src).toContain(
-      "abstract add(params: Ptr, results: StructBuilder): void;",
+      "abstract add(params: Adder_add_Params_Ptr, results: StructBuilder): void;",
     );
   });
 
@@ -113,7 +113,9 @@ describe("interface stubs", () => {
     const ast = adderAst();
     const noIface: CgrAst = {
       ...ast,
-      nodes: ast.nodes.filter((n) => n.which !== "interface"),
+      nodes: ast.nodes.filter(
+        (n) => n.which !== "interface" && n.which !== "struct",
+      ),
     };
     expect(emitModuleSource(noIface, "adder.capnp")).toContain(
       'import type { Ptr } from "@haozeke/capnp";',

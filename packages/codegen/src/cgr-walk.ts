@@ -18,7 +18,8 @@
  *
  * Method: 3 data words, 5 ptrs
  *   codeOrder u16 @0; paramStructType u64 @8; resultStructType u64 @16
- *   name Text ptr0; annotations ptr1
+ *   name Text ptr0; annotations ptr1; paramBrand ptr2; resultBrand ptr3
+ *   implicitParameters ptr4
  *
  * Field: 3 data words, 4 ptrs
  *   codeOrder u16 @0; discriminantValue u16 @2 (default 0xffff, wire XOR);
@@ -318,9 +319,15 @@ export type NodeAst = {
 /** One method on an interface node. */
 export type MethodAst = {
   name: string;
+  /** Position in the method list. This is the RPC method id. */
   ordinal: number;
+  codeOrder?: number;
   paramStructType: bigint;
   resultStructType: bigint;
+  paramBrand?: BrandAst;
+  resultBrand?: BrandAst;
+  /** Method.implicitParameters names, in declaration order. */
+  implicitParameters?: string[];
 };
 
 export type RequestedFileAst = {
@@ -670,8 +677,12 @@ function decodeMethods(list: Ptr): MethodAst[] {
     out.push({
       name: m.getText(0),
       ordinal: i,
+      codeOrder: m.getU16(0),
       paramStructType: m.getU64(8),
       resultStructType: m.getU64(16),
+      paramBrand: decodeBrand(m.getp(2)),
+      resultBrand: decodeBrand(m.getp(3)),
+      implicitParameters: decodeParameters(m.getp(4)),
     });
   }
   return out;

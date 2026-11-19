@@ -16,6 +16,7 @@ import type {
   BrandAst,
   CgrAst,
   FieldAst,
+  MethodAst,
   NodeAst,
   TypeAst,
   ValueAst,
@@ -185,6 +186,21 @@ function scalarDefaultExpr(
 /** All node ids nested under a file id (scopeId chain). */
 export function nodesForFile(ast: CgrAst, fileId: bigint): NodeAst[] {
   const ids = new Set<bigint>([fileId]);
+  // Auto-generated Method$Params and Method$Results nodes have scopeId 0.
+  // They still belong to the file named in displayName.
+  const file = ast.nodes.find((n) => n.id === fileId);
+  const prefix = file?.displayName ? `${file.displayName}:` : "";
+  if (prefix) {
+    for (const n of ast.nodes) {
+      if (
+        n.scopeId === 0n &&
+        n.which !== "file" &&
+        n.displayName.startsWith(prefix)
+      ) {
+        ids.add(n.id);
+      }
+    }
+  }
   let grew = true;
   while (grew) {
     grew = false;
@@ -249,6 +265,17 @@ function collectNodeTypeRefs(node: NodeAst, out: Set<bigint>): void {
   }
   if (node.const) {
     collectReferencedTypeIds(node.const.type, out);
+  }
+  for (const m of node.methods ?? []) {
+    out.add(m.paramStructType);
+    out.add(m.resultStructType);
+    for (const brand of [m.paramBrand, m.resultBrand]) {
+      for (const scope of brand?.scopes ?? []) {
+        for (const b of scope.bind ?? []) {
+          if (b) collectReferencedTypeIds(b, out);
+        }
+      }
+    }
   }
 }
 
@@ -392,6 +419,81 @@ function ptrTypeForInterface(
   if (fileId === ctx.currentFileId) return base + args;
   const alias = ctx.importAliases.get(fileId);
   return (alias ? `${alias}.${base}` : base) + args;
+}
+
+/**
+ * Parameter names a generated struct should carry. The node itself wins.
+ * Otherwise inherit them from the method brand or implicit parameters that
+ * name this struct as its params or results type.
+ */
+function effectiveParamNames(node: NodeAst, ctx: ModuleEmitContext): string[] {
+  const own = paramNames(node);
+  if (own.length > 0) return own;
+  const extra: string[] = [];
+  const add = (name: string): void => {
+    if (name && !extra.includes(name)) extra.push(name);
+  };
+  for (const other of ctx.byId.values()) {
+    for (const m of other.methods ?? []) {
+      const isParam = m.paramStructType === node.id;
+      const isResult = m.resultStructType === node.id;
+      if (!isParam && !isResult) continue;
+      const brand = isParam ? m.paramBrand : m.resultBrand;
+      for (const scope of brand?.scopes ?? []) {
+        if (scope.which !== "inherit") continue;
+        for (const name of paramNames(ctx.byId.get(scope.scopeId))) add(name);
+      }
+      for (const raw of m.implicitParameters ?? []) add(ident(raw) || raw);
+    }
+  }
+  return extra;
+}
+
+function nodeWithParams(node: NodeAst, names: string[]): NodeAst {
+  const current = paramNames(node);
+  if (
+    current.length === names.length &&
+    current.every((name, i) => name === names[i])
+  ) {
+    return node;
+  }
+  return { ...node, parameters: names };
+}
+
+function methodTypeParamClause(
+  m: MethodAst,
+  iface: NodeAst,
+  ctx: ModuleEmitContext,
+): string {
+  const names: string[] = [];
+  const add = (name: string): void => {
+    if (name && !names.includes(name)) names.push(name);
+  };
+  for (const id of [m.paramStructType, m.resultStructType]) {
+    const n = ctx.byId.get(id);
+    if (n) for (const name of effectiveParamNames(n, ctx)) add(name);
+  }
+  for (const name of paramNames(iface)) add(name);
+  for (const raw of m.implicitParameters ?? []) add(ident(raw) || raw);
+  if (names.length === 0) return "";
+  return `<${names
+    .map((name) => `${name} extends CapnpAnyPointer = CapnpAnyPointer`)
+    .join(", ")}>`;
+}
+
+function structAliasType(
+  id: bigint,
+  brand: BrandAst | undefined,
+  ctx: ModuleEmitContext,
+  owner: NodeAst,
+): string {
+  const n = ctx.byId.get(id);
+  if (!n || n.which !== "struct") return "Ptr";
+  const rendered = ptrTypeForStruct(id, ctx, brand, owner);
+  if (rendered.includes("<")) return rendered;
+  const names = effectiveParamNames(n, ctx);
+  if (names.length === 0) return rendered;
+  return `${rendered}<${names.join(", ")}>`;
 }
 
 function brandLiteral(brand: BrandAst | undefined): string {
@@ -1027,7 +1129,12 @@ function emitInterface(
     lines.push(
       `  ${m.name}: { ordinal: ${m.ordinal},` +
         ` paramsDwords: ${p.dw}, paramsPwords: ${p.pw},` +
-        ` resultsDwords: ${r.dw}, resultsPwords: ${r.pw} },`,
+        ` resultsDwords: ${r.dw}, resultsPwords: ${r.pw},` +
+        ` paramBrand: ${brandLiteral(m.paramBrand)},` +
+        ` resultBrand: ${brandLiteral(m.resultBrand)},` +
+        ` implicitParameters: [${(m.implicitParameters ?? [])
+          .map((name) => JSON.stringify(name))
+          .join(", ")}] },`,
     );
   }
   lines.push(`} as const;`, ``);
@@ -1076,8 +1183,15 @@ function emitInterface(
     `export abstract class ${typeName}Server {`,
   );
   for (const m of methods) {
+    const clause = methodTypeParamClause(m, node, ctx);
+    const paramsType = structAliasType(
+      m.paramStructType,
+      m.paramBrand,
+      ctx,
+      node,
+    );
     lines.push(
-      `  abstract ${m.name}(params: Ptr, results: StructBuilder): void;`,
+      `  abstract ${m.name}${clause}(params: ${paramsType}, results: StructBuilder): void;`,
     );
   }
   lines.push(
@@ -1130,7 +1244,8 @@ function emitStruct(
   lines.push(`export const ${upper}_PWORDS = ${s.pointerCount};`);
   lines.push(`export const ${typeName}_dataWordCount = ${s.dataWordCount};`);
   lines.push(`export const ${typeName}_pointerCount = ${s.pointerCount};`);
-  const names = paramNames(node);
+  const names = effectiveParamNames(node, ctx);
+  const owner = nodeWithParams(node, names);
   if (names.length > 0) {
     const clause = names
       .map((name) => `${name} extends CapnpAnyPointer = CapnpAnyPointer`)
@@ -1141,8 +1256,8 @@ function emitStruct(
   } else {
     lines.push(`export type ${typeName}_Ptr = Ptr;`);
   }
-  if (node.parameters && node.parameters.length > 0) {
-    const params = node.parameters.map((p) => JSON.stringify(p)).join(", ");
+  if (names.length > 0) {
+    const params = names.map((p) => JSON.stringify(p)).join(", ");
     lines.push(`export const ${typeName}_typeParameters = [${params}] as const;`);
   }
 
@@ -1154,7 +1269,7 @@ function emitStruct(
     lines.push(
       `/** Union discriminant byte offset (u16). */`,
       `export const ${typeName}_discriminantOffset = ${discByte};`,
-      `export function ${typeName}_which${ownerGenericClause(node)}(ptr: ${
+      `export function ${typeName}_which${ownerGenericClause(owner)}(ptr: ${
         names.length > 0 ? `${typeName}_Ptr<${names.join(", ")}>` : "Ptr"
       }): number {`,
       `  return ptr.getU16(${discByte});`,
@@ -1195,7 +1310,7 @@ function emitStruct(
         names.length > 0 ? `${typeName}_Ptr<${names.join(", ")}>` : "Ptr";
       lines.push(
         `/** Group field \`${f.name}\` — same wire Ptr as parent; see group node helpers. */`,
-        `export function ${typeName}_get${gName[0]!.toUpperCase()}${gName.slice(1)}${ownerGenericClause(node)}(ptr: ${recvType}): ${recvType} {`,
+        `export function ${typeName}_get${gName[0]!.toUpperCase()}${gName.slice(1)}${ownerGenericClause(owner)}(ptr: ${recvType}): ${recvType} {`,
         `  return ptr;`,
         `}`,
         ``,
@@ -1207,8 +1322,8 @@ function emitStruct(
       );
       continue;
     }
-    emitFieldGetter(node, typeName, f, ctx, lines);
-    emitFieldSetter(node, typeName, f, discriminantByte, ctx, lines);
+    emitFieldGetter(owner, typeName, f, ctx, lines);
+    emitFieldSetter(owner, typeName, f, discriminantByte, ctx, lines);
   }
 }
 
@@ -1256,10 +1371,12 @@ export function emitModuleSource(
   // Declare the pointer alias here so the reference type-checks.
   const localExternalAliases: string[] = [];
   const seenLocalAlias = new Set<string>();
+  const emittedIds = new Set(nodes.map((n) => n.id));
   let needsLocalGenericAlias = false;
   for (const typeId of referencedTypeIds) {
     const n = byId.get(typeId);
     if (!n || (n.which !== "struct" && n.which !== "interface")) continue;
+    if (emittedIds.has(typeId)) continue;
     const owner = ownerFileByNodeId.get(typeId) ?? 0n;
     if (owner === resolvedId) continue;
     if (owner !== 0n && importAliases.has(owner)) continue;
