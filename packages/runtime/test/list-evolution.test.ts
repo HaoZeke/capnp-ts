@@ -13,9 +13,14 @@ import {
   ElemSize,
   Message,
   PtrKind,
+  listGetF64,
   listGetStruct,
   listGetText,
+  listGetU16,
+  listGetU64,
+  listGetU8,
   listGetU32,
+  storeU16,
   storeU32,
   storeU64,
   storeU8,
@@ -159,6 +164,58 @@ describe("list upgrade: Void allowed, Bool refused", () => {
     expect(el.getU64(0, 7n)).toBe(7n);
     expect(list.listGetStruct(41).kind).toBe(PtrKind.Struct);
     expect(list.listGetU32(0, 99)).toBe(99);
+  });
+});
+
+describe("cross-width primitive list demotion matrix", () => {
+  function oneElemList(esize: number): Message {
+    const words = [wpMakeStruct(0, 0, 1), wpMakeList(0, esize, 1), 0n];
+    return msgFromWords(words);
+  }
+
+  test("numeric getters match field@0 struct-view semantics across 1/2/4/8-byte lists", () => {
+    const dfltU8 = 0x11;
+    const dfltU16 = 0x2222;
+    const dfltU32 = 0x33333333;
+    const dfltU64 = 0x4444444444444444n;
+    const dfltF64 = 9.25;
+
+    const m8 = oneElemList(ElemSize.Byte);
+    storeU8(m8.segments[0]!, 16, 0xab);
+    const l8 = m8.root().getP(0);
+    expect(listGetU8(l8, 0, dfltU8)).toBe(0xab);
+    expect(listGetU16(l8, 0, dfltU16)).toBe(dfltU16);
+    expect(listGetU32(l8, 0, dfltU32)).toBe(dfltU32);
+    expect(listGetU64(l8, 0, dfltU64)).toBe(dfltU64);
+    expect(listGetF64(l8, 0, dfltF64)).toBe(dfltF64);
+
+    const m16 = oneElemList(ElemSize.TwoBytes);
+    storeU16(m16.segments[0]!, 16, 0xcdef);
+    const l16 = m16.root().getP(0);
+    expect(listGetU8(l16, 0, dfltU8)).toBe(0xef);
+    expect(listGetU16(l16, 0, dfltU16)).toBe(0xcdef);
+    expect(listGetU32(l16, 0, dfltU32)).toBe(dfltU32);
+    expect(listGetU64(l16, 0, dfltU64)).toBe(dfltU64);
+    expect(listGetF64(l16, 0, dfltF64)).toBe(dfltF64);
+
+    const m32 = oneElemList(ElemSize.FourBytes);
+    storeU32(m32.segments[0]!, 16, 0x89abcdef);
+    const l32 = m32.root().getP(0);
+    expect(listGetU8(l32, 0, dfltU8)).toBe(0xef);
+    expect(listGetU16(l32, 0, dfltU16)).toBe(0xcdef);
+    expect(listGetU32(l32, 0, dfltU32)).toBe(0x89abcdef >>> 0);
+    expect(listGetU64(l32, 0, dfltU64)).toBe(dfltU64);
+    expect(listGetF64(l32, 0, dfltF64)).toBe(dfltF64);
+
+    const m64 = oneElemList(ElemSize.EightBytes);
+    const piBits = 0x400921fb54442d18n;
+    storeU64(m64.segments[0]!, 16, piBits);
+    const l64 = m64.root().getP(0);
+    expect(listGetU8(l64, 0, dfltU8)).toBe(0x18);
+    expect(listGetU16(l64, 0, dfltU16)).toBe(0x2d18);
+    expect(listGetU32(l64, 0, dfltU32)).toBe(0x54442d18);
+    expect(listGetU64(l64, 0, dfltU64)).toBe(piBits);
+    expect(listGetF64(l64, 0, dfltF64)).toBeCloseTo(Math.PI);
   });
 });
 

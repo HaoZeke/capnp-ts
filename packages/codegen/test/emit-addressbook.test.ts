@@ -332,9 +332,9 @@ describe("Field.defaultValue walk", () => {
       const scores = gen.Sink_getScores(sink);
       expect(scores.kind).toBe(PtrKind.List);
       expect(scores.listLen()).toBe(3);
-      expect(scores.listGetU16(0)).toBe(0);
-      expect(scores.listGetU16(1)).toBe(0);
-      expect(scores.listGetU16(2)).toBe(0);
+      expect(scores.listGetU16(0)).toBe(3);
+      expect(scores.listGetU16(1)).toBe(1);
+      expect(scores.listGetU16(2)).toBe(4);
     } finally {
       rmSync(outDir, { recursive: true, force: true });
     }

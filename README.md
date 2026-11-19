@@ -42,7 +42,8 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
 - Text, Data, pointer lists, primitive lists, bit-lists; composite list elements
 - Schema-evolution list upgrade/downgrade for supported shapes (see runtime
   `list-evolution.ts`): encoding.html Void upgrades, Bool/bit refuses; prim and
-  pointer list → struct field `@0` views; composite downgrade to prim/Text
+  pointer list → struct field `@0` views; composite downgrade to prim/Text;
+  cross-width primitive demotion matrix (u64/u32/u16/u8 field-`@0` reads)
 - Stream segment-table serialize (`serializeToFlat` / `frameSegments`)
 - Multi-segment `MessageBuilder` arena with far / double-far pointer paths
 - Same-message orphan `disown` / `adopt`; cross-message `deepCopyPtr` / `structSetP`
@@ -64,8 +65,8 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
   `which`, Text/Data setters, shape-aware struct and `List(Struct)` initializers,
   List(Text) via `listGetText`, u64probe-safe `getU64`/`bigint`)
 
-Current limits: generated primitive/pointer-list element builders, dynamic
-reflection, and the cross-width list-demotion matrix beyond the covered suite.
+Current limits: generated primitive/pointer-list element builders and dynamic
+reflection.
 
 `@haozeke/capnp-rpc` is the vat: levels 1 through 4, tested against a live
 capnp-C++ `EzRpcServer` peer (`interop/run_rpc_interop.sh`).
@@ -83,7 +84,7 @@ present. Do not treat this table as a green checklist for unbuilt work.
 | Packed codec | yes | yes | yes | yes | **yes** (C++ 1.4.0 `0xff` fewer-than-two-zeros heuristic; AddressBook golden) |
 | Zero-copy reads from caller buffer | yes | yes | yes | yes | **yes** (`Message.viewFlat`) |
 | Traversal and depth limits | no | yes | yes | yes | **yes** (8 Mi words + depth 64; far/`getP`/`listGetP` accumulate; see SECURITY.md) |
-| Schema-evolution reads (defaults past end, list up/downgrade) | partial | yes | yes | yes | **partial** (Void upgrade + Bool refuse per encoding.html; prim/pointer upgrade + composite downgrade; not every demotion edge) |
+| Schema-evolution reads (defaults past end, list up/downgrade) | partial | yes | yes | yes | **yes** (Void upgrade + Bool refuse per encoding.html; prim/pointer upgrade; composite downgrade; cross-width primitive demotion matrix) |
 | Builder / deep copy / orphans | limited | yes | yes | partial | **yes** (multi-seg arena + far/double-far; orphan disown/adopt; deepCopyPtr) |
 | Canonical form | no | yes | yes | yes | **yes** (AddressBook golden byte-identical to CLI) |
 | Code generator (`capnp compile -o`) | yes | yes | yes | yes | **yes** (structs/enums/unions; default-aware getters and setters; struct and `List(Struct)` init helpers) |

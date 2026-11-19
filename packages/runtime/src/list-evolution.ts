@@ -11,6 +11,7 @@
  * | List(pointer) e.g. List(Text)| List(Struct) pointer @0        | listGetStruct + getText/getP |
  * | List(Struct) data word 0     | List(UInt*) field @0            | listGetU8/U16/U32/U64/F64 |
  * | List(Struct) pointer 0       | List(Text) / pointer list       | listGetText |
+ * | List(UInt64/32/16/8)         | List(UInt32/16/8) field @0      | listGetU* low-byte demotion |
  *
  * Upgrade views limit `dataBits` to the element width so oversize field reads
  * return the caller default and never spill into the next element.
@@ -21,8 +22,8 @@
  * - List(Void) (C=0) **does** upgrade: zero-size struct view (no data, no ptrs).
  * - List(Bool) (C=1 bit) **does not** upgrade: listGetStruct throws KIND.
  *
- * Explicit non-goal: cross-width primitive demotion without a composite
- * (not claimed; refused or undefined — do not treat as silent partial success).
+ * Cross-width primitive reads follow field-@0 width checks: demotions read
+ * low-order bytes while promotions return the caller default.
  *
  * Implementation lives on {@link Ptr} in message.ts; this module re-exports
  * free-function aliases matching the janet `capnp_list_get_*` surface.
