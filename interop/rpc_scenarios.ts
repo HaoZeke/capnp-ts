@@ -9,7 +9,7 @@ import { connect, type Socket } from "node:net";
 import { strict as assert } from "node:assert";
 import type { StructBuilder } from "@haozeke/capnp";
 
-import { Client, membrane, RevocablePolicy, RpcError, RpcStream, type RpcConnection } from "../packages/rpc/src/index.ts";
+import { Client, membrane, savePersistent, RevocablePolicy, RpcError, RpcStream, type RpcConnection } from "../packages/rpc/src/index.ts";
 import type { ImportClient } from "../packages/rpc/src/remote.ts";
 import {
   attach,
@@ -17,6 +17,7 @@ import {
   CounterImpl,
   SINK_INTERFACE_ID,
   Sink_methods,
+  KEEP_INTERFACE_ID,
   Echo_methods as M,
   ECHO_INTERFACE_ID,
 } from "./rpc_common.ts";
@@ -255,6 +256,34 @@ const scenarios: Record<string, () => Promise<void>> = {
       /sink full/,
     );
     sink.release();
+  },
+
+  async persistent() {
+    // Level 2 as capnp-C++ has it: the Persistent interface, saved by the app.
+    const opened = await echo(M.openKeep);
+    const keep = new Client(opened.getCap(opened.content.getP(0)));
+    assert.equal(
+      await u32(keep.call(KEEP_INTERFACE_ID, 0, undefined, 0, 0)),
+      7,
+    );
+    const saved = await savePersistent(keep, (p) => p.setText(0, "bob"));
+    assert.equal(saved.content.getText(0), "ref-for-bob");
+    keep.release();
+  },
+
+  async levels() {
+    // capnp-C++ implements neither the level 3 handoff nor level 4 Join, and
+    // answers them Unimplemented.
+    const provide = conn.sendProvide(0, { vineId: 0, host: "127.0.0.1", port: 1 }, 5n);
+    const accept = conn.sendAccept(6n);
+    const join = conn.sendJoin(0, 1, 1, 0);
+    for (let i = 0; i < 50 && !(conn.isAnswered(provide) && conn.isAnswered(accept) && conn.isAnswered(join)); i++) {
+      await wait(10);
+    }
+    for (const [name, q] of [["provide", provide], ["accept", accept], ["join", join]] as const) {
+      assert.ok(conn.isFailed(q), `${name} did not fail`);
+      assert.equal(conn.answerError(q)?.type, "unimplemented", `${name}: ${conn.answerError(q)?.message}`);
+    }
   },
 
   async membrane() {
