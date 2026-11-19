@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -281,6 +282,7 @@ describe("Cap'n Proto compat JSON codec", () => {
       // JsonCustom annotated variants differential check
       for (const jcText of [
         "(emptyVariant = void)",
+        "(boxedUnion = (none = void))",
         '(renamedField = "r", hexBlob = 0x"01ab", b64Blob = "xyz", textVariant = "tv", boxedUnion = (label = "lbl"))',
         '(flatTag = (key = "fk", code = -3), flatVariant = (key = "vk", code = 8), prio = critical, boxedUnion = (num = -999))',
       ]) {
@@ -314,6 +316,64 @@ describe("Cap'n Proto compat JSON codec", () => {
         expect(canonicalize(decodeJson(tsPretty, jcSchema))).toEqual(
           new Uint8Array(cliCanon.stdout),
         );
+      }
+
+      // $Json.discriminator without explicit name omits the tag field, matching C++
+      const tmpDir = mkdtempSync(join(tmpdir(), "capnp-json-edge-"));
+      try {
+        const edgePath = join(tmpDir, "json_edge.capnp");
+        writeFileSync(
+          edgePath,
+          [
+            "@0x8123456789abcde1;",
+            "annotation jsonFlatten @0x82d3e852af0336bf (field, group, union) :JsonFlattenOptions;",
+            "annotation jsonDiscriminator @0xcfa794e8d19a0162 (struct, union) :JsonDiscriminatorOptions;",
+            "struct JsonFlattenOptions { prefix @0 :Text = \"\"; }",
+            "struct JsonDiscriminatorOptions { name @0 :Text; valueName @1 :Text; }",
+            "struct Inner { x @0 :Int32; }",
+            "struct Edge {",
+            "  flatNull @0 :Inner $jsonFlatten();",
+            "  u :union $jsonDiscriminator() {",
+            "    ua @1 :Void;",
+            "    ub @2 :Inner $jsonFlatten(prefix = \"p_\");",
+            "  }",
+            "  v :union $jsonDiscriminator(valueName = \"val\") {",
+            "    va @3 :Void;",
+            "    vb @4 :Text;",
+            "  }",
+            "}",
+          ].join("\n"),
+        );
+        const cgr = spawnSync("capnp", ["compile", "-o-", edgePath]);
+        expect(cgr.status).toBe(0);
+        const eLoader = SchemaLoader.fromCgr(new Uint8Array(cgr.stdout));
+        const edgeSchema = eLoader.resolveStruct("Edge");
+
+        for (const edgeText of [
+          "(u = (ua = void), v = (va = void))",
+          '(u = (ub = (x = 77)), v = (vb = "hi"))',
+        ]) {
+          const cliBin = new Uint8Array(
+            spawnSync("capnp", ["encode", edgePath, "Edge"], {
+              input: edgeText,
+            }).stdout,
+          );
+          const cliShort = spawnSync(
+            "capnp",
+            ["convert", "binary:json", "--short", edgePath, "Edge"],
+            { input: cliBin },
+          );
+          expect(cliShort.status).toBe(0);
+          const reader = DynamicStruct.fromMessage(
+            Message.fromFlat(cliBin),
+            edgeSchema,
+          );
+          expect(`${encodeJson(reader, { pretty: false })}\n`).toBe(
+            cliShort.stdout.toString("utf-8"),
+          );
+        }
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
       }
     },
   );
