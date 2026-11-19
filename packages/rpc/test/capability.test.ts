@@ -132,6 +132,26 @@ describe("promise pipelining on local calls", () => {
     const missing = f.call(IFACE, 0).pipeline(0);
     await expect(Promise.resolve(missing.call(IFACE, 0))).rejects.toThrow("null capability");
   });
+
+  test("dropping the call handle does not cancel a local call with a live pipelined cap", async () => {
+    const factory = new Factory();
+    let release!: () => void;
+    const asyncFactory: RpcServer = {
+      dispatch(i, m, p, r, ctx) {
+        ctx.allowCancellation();
+        return new Promise<void>((res) => (release = res)).then(() => {
+          factory.dispatch(i, m, p, r, ctx);
+        });
+      },
+    };
+    const f = Client.local(asyncFactory);
+    const pending = f.call(IFACE, 0);
+    const counter = pending.pipeline(0);
+    pending.release();
+    const out = counter.call(IFACE, 0, arg(4));
+    release();
+    expect((await out).content.getU32(0)).toBe(5);
+  });
 });
 
 describe("broken capabilities", () => {
