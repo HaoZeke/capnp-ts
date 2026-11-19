@@ -19,7 +19,7 @@ import type {
   TypeAst,
   ValueAst,
 } from "./cgr-walk.ts";
-import { NO_DISCRIMINANT } from "./cgr-walk.ts";
+import { NO_DISCRIMINANT, formatType } from "./cgr-walk.ts";
 import { basename, dirname, join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
 
@@ -215,6 +215,91 @@ function emitEnum(node: NodeAst, lines: string[]): void {
     `export type ${name} = (typeof ${name})[keyof typeof ${name}];`,
   );
   lines.push(``);
+}
+
+function isPointerValue(v: ValueAst): boolean {
+  return (
+    v.which === "list" ||
+    v.which === "struct" ||
+    v.which === "interface" ||
+    v.which === "anyPointer"
+  );
+}
+
+function emitConst(node: NodeAst, lines: string[]): void {
+  const c = node.const;
+  if (!c) return;
+  const name = ident(shortTypeName(node.displayName));
+  const v = c.value;
+  lines.push(
+    `/** Const ${node.displayName}: ${formatType(c.type)}. */`,
+  );
+  switch (v.which) {
+    case "void":
+      lines.push(`export const ${name} = undefined as const;`, ``);
+      return;
+    case "bool":
+      lines.push(`export const ${name} = ${v.value ? "true" : "false"} as const;`, ``);
+      return;
+    case "int8":
+    case "int16":
+    case "int32":
+    case "uint8":
+    case "uint16":
+    case "uint32":
+    case "enum":
+      lines.push(`export const ${name} = ${jsNumberLiteral(v.value)} as const;`, ``);
+      return;
+    case "int64":
+    case "uint64":
+      lines.push(`export const ${name} = ${v.value}n as const;`, ``);
+      return;
+    case "float32":
+    case "float64":
+      lines.push(`export const ${name} = ${jsNumberLiteral(v.value)} as const;`, ``);
+      return;
+    case "text":
+      lines.push(`export const ${name} = ${JSON.stringify(v.value)} as const;`, ``);
+      return;
+    case "data":
+      lines.push(
+        `export const ${name} = new Uint8Array([${Array.from(v.value).join(", ")}]);`,
+        ``,
+      );
+      return;
+    case "list":
+    case "struct":
+    case "interface":
+    case "anyPointer": {
+      if (!v.pointerBytes || v.pointerBytes.length === 0) {
+        lines.push(`export const ${name} = null as const;`, ``);
+        return;
+      }
+      const base = upperSnake(name);
+      lines.push(
+        `const ${base}_BYTES = new Uint8Array([${v.pointerBytes.join(", ")}]);`,
+        `const ${base}_PTR = Message.fromFlat(${base}_BYTES).root();`,
+        `export const ${name}: Ptr = ${base}_PTR;`,
+        ``,
+      );
+      return;
+    }
+    default:
+      return;
+  }
+}
+
+function emitAnnotation(node: NodeAst, lines: string[]): void {
+  const a = node.annotation;
+  if (!a) return;
+  const base = upperSnake(ident(shortTypeName(node.displayName)));
+  lines.push(
+    `/** Annotation ${node.displayName}. */`,
+    `export const ${base}_ANNOTATION_ID = 0x${node.id.toString(16)}n;`,
+    `export const ${base}_ANNOTATION_TARGETS_MASK = ${a.targetsMask};`,
+    `export const ${base}_ANNOTATION_TYPE = ${JSON.stringify(formatType(a.type))} as const;`,
+    ``,
+  );
 }
 
 function emitFieldGetter(
@@ -752,6 +837,9 @@ export function emitModuleSource(
     resolvedId === 0n
       ? ast.nodes.filter((n) => n.which !== "file")
       : nodesForFile(ast, resolvedId);
+  const needsMessageImport = nodes.some(
+    (n) => n.which === "const" && !!n.const && isPointerValue(n.const.value),
+  );
 
   const lines: string[] = [];
   lines.push(`/**`);
@@ -779,6 +867,9 @@ export function emitModuleSource(
       ? `import type { Ptr, StructBuilder } from "@haozeke/capnp";`
       : `import type { Ptr } from "@haozeke/capnp";`,
   );
+  if (needsMessageImport) {
+    lines.push(`import { Message } from "@haozeke/capnp";`);
+  }
   lines.push(``);
   lines.push(
     `export const __capnpcTsMeta = {`,
@@ -799,6 +890,12 @@ export function emitModuleSource(
   // Enums first (referenced by struct field comments / types).
   for (const n of nodes) {
     if (n.which === "enum") emitEnum(n, lines);
+  }
+  for (const n of nodes) {
+    if (n.which === "const") emitConst(n, lines);
+  }
+  for (const n of nodes) {
+    if (n.which === "annotation") emitAnnotation(n, lines);
   }
   for (const n of nodes) {
     if (n.which === "struct") emitStruct(n, byId, lines);

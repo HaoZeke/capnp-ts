@@ -50,6 +50,8 @@ import {
   wpListCount,
 } from "../../runtime/src/pointer.ts";
 import type { Ptr } from "../../runtime/src/message.ts";
+import { MessageBuilder } from "../../runtime/src/builder.ts";
+import { deepCopyPtrToSlot } from "../../runtime/src/copy.ts";
 
 // ---------------------------------------------------------------------------
 // Rich AST types (schema.capnp Node / Field / Type / Enumerant)
@@ -187,6 +189,7 @@ export type ValueAst =
         | "struct"
         | "interface"
         | "anyPointer";
+      pointerBytes?: number[];
     };
 
 /** One struct field (slot or group). */
@@ -249,6 +252,17 @@ export type NodeAst = {
   enumerants?: EnumerantAst[];
   /** Set when which === "interface". */
   methods?: MethodAst[];
+  /** Set when which === "const". */
+  const?: {
+    type: TypeAst;
+    value: ValueAst;
+  };
+  /** Set when which === "annotation". */
+  annotation?: {
+    type: TypeAst;
+    /** Raw target bitmask from schema.capnp Node.annotation.targets*. */
+    targetsMask: number;
+  };
 };
 
 /** One method on an interface node. */
@@ -429,16 +443,29 @@ function decodeValue(v: Ptr): ValueAst {
     case TYPE_ENUM:
       return { which: "enum", value: v.getU16(2) };
     case TYPE_LIST:
-      return { which: "list" };
+      return { which: "list", pointerBytes: materializePointerValue(v.getp(0)) };
     case TYPE_STRUCT:
-      return { which: "struct" };
+      return { which: "struct", pointerBytes: materializePointerValue(v.getp(0)) };
     case TYPE_INTERFACE:
-      return { which: "interface" };
+      return {
+        which: "interface",
+        pointerBytes: materializePointerValue(v.getp(0)),
+      };
     case TYPE_ANY_POINTER:
-      return { which: "anyPointer" };
+      return {
+        which: "anyPointer",
+        pointerBytes: materializePointerValue(v.getp(0)),
+      };
     default:
       return { which: "void" };
   }
+}
+
+function materializePointerValue(ptr: Ptr): number[] | undefined {
+  if (ptr.kind === PtrKind.Null) return undefined;
+  const b = new MessageBuilder({ forceSingle: true });
+  deepCopyPtrToSlot(b, b.rootSlot(), ptr, 0);
+  return Array.from(b.toFlat());
 }
 
 function decodeField(f: Ptr): FieldAst {
@@ -562,6 +589,16 @@ function decodeNode(n: Ptr): NodeAst {
     base.enumerants = decodeEnumerants(n.getp(3));
   } else if (which === "interface") {
     base.methods = decodeMethods(n.getp(3));
+  } else if (which === "const") {
+    base.const = {
+      type: decodeType(n.getp(3)),
+      value: decodeValue(n.getp(4)),
+    };
+  } else if (which === "annotation") {
+    base.annotation = {
+      type: decodeType(n.getp(3)),
+      targetsMask: n.getU32(8) >>> 0,
+    };
   }
 
   return base;
@@ -627,6 +664,16 @@ export function formatNode(node: NodeAst): string {
       const e = node.enumerants[i]!;
       lines.push(`  enumerant ${i} ${e.name} codeOrder=${e.codeOrder}`);
     }
+  }
+  if (node.const) {
+    lines.push(
+      `  const type=${formatType(node.const.type)} value=${node.const.value.which}`,
+    );
+  }
+  if (node.annotation) {
+    lines.push(
+      `  annotation type=${formatType(node.annotation.type)} targetsMask=${node.annotation.targetsMask}`,
+    );
   }
   return lines.join("\n");
 }
