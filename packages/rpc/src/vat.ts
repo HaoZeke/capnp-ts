@@ -53,6 +53,8 @@ import {
   Call_getParams,
   Call_getQuestionId,
   Call_getTarget,
+  Call_sendResultsTo,
+  Call_sendResultsTo_which,
   CAP_DESCRIPTOR_DWORDS,
   CAP_DESCRIPTOR_PWORDS,
   CapDescriptor,
@@ -141,6 +143,7 @@ import {
   Return_getAnswerId,
   Return_getException,
   Return_getReleaseParamCaps,
+  Return_getTakeFromOtherQuestion,
   Return_getResults,
   Return_which,
   Release_getId,
@@ -302,6 +305,8 @@ interface AnswerState {
   call: CallState;
   /** Exports made for the results, released if Finish says to. */
   resultExports: number[];
+  /** The call said `sendResultsTo.yourself`: the results stay here for the caller to claim. */
+  resultsElsewhere: boolean;
   returned: boolean;
   finished: boolean;
 }
@@ -986,11 +991,35 @@ export class RpcConnection implements RemoteHost {
       case Return.canceled:
         q.call.result.reject(new RpcError("call was canceled"));
         break;
+      case Return.takeFromOtherQuestion:
+        this.takeResults(q, Return_getTakeFromOtherQuestion(ret));
+        break;
       default:
         q.call.result.reject(new RpcError("unsupported Return variant", "unimplemented"));
         break;
     }
     if (q.finished) this.questions.delete(answerId);
+  }
+
+  /**
+   * The peer forwarded our call back to us with `sendResultsTo.yourself`
+   * and answers this question with "take them from that one". The
+   * results are the ones this vat computed for the forwarded call, so
+   * they never crossed the wire twice.
+   */
+  private takeResults(q: QuestionState, otherAnswerId: number): void {
+    const other = this.answers.get(otherAnswerId);
+    if (other === undefined || !other.resultsElsewhere) {
+      q.call.result.reject(new RpcError("takeFromOtherQuestion names no held answer"));
+      return;
+    }
+    other.call.result.onSettled((s) => {
+      if (s.state !== "ok") q.call.result.reject(s.error);
+      else {
+        q.failed = false;
+        q.call.result.resolve(new Payload(s.value.content, s.value.caps.map((c) => c.addRef())));
+      }
+    });
   }
 
   // --- level 3: introductions handed to us --------------------------
@@ -1145,6 +1174,7 @@ export class RpcConnection implements RemoteHost {
     );
     target.release();
     answer.call = state;
+    answer.resultsElsewhere = Call_sendResultsTo_which(call) === Call_sendResultsTo.yourself;
     state.result.onSettled((s) => this.completeAnswer(questionId, answer, s));
   }
 
@@ -1152,6 +1182,7 @@ export class RpcConnection implements RemoteHost {
     const answer: AnswerState = {
       call: undefined as unknown as CallState,
       resultExports: [],
+      resultsElsewhere: false,
       returned: false,
       finished: false,
     };
@@ -1182,7 +1213,15 @@ export class RpcConnection implements RemoteHost {
       return;
     }
     if (this.gone !== undefined) return;
-    if (s.state === "ok") {
+    if (s.state === "ok" && answer.resultsElsewhere) {
+      // The caller will claim these with `takeFromOtherQuestion`.
+      const { b, root } = newMessage(Message.return);
+      const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+      ret.setU32(OFF.returnAnswerId, questionId);
+      ret.setU16(OFF.returnUnion, Return.resultsSentElsewhere);
+      ret.setBool(OFF.returnReleaseParamCaps, false, true);
+      this.transport.send(b.toFlat());
+    } else if (s.state === "ok") {
       const { b, root } = newMessage(Message.return);
       const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
       ret.setU32(OFF.returnAnswerId, questionId);

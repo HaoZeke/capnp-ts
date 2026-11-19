@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Ptr, StructBuilder } from "@haozeke/capnp";
+import { type Ptr, type StructBuilder, MessageBuilder } from "@haozeke/capnp";
 
 import {
   CallBuilder,
@@ -9,7 +9,31 @@ import {
   type RpcServer,
 } from "../src/index.ts";
 import { Message as CapnpMessage } from "@haozeke/capnp";
-import { Finish_getReleaseResultCaps, Message_getFinish } from "../src/rpc.capnp.ts";
+import {
+  BOOTSTRAP_DWORDS,
+  BOOTSTRAP_PWORDS,
+  CALL_DWORDS,
+  CALL_PWORDS,
+  Call_sendResultsTo,
+  Finish_getReleaseResultCaps,
+  MESSAGE_DWORDS,
+  MESSAGE_PWORDS,
+  MESSAGE_TARGET_DWORDS,
+  MESSAGE_TARGET_PWORDS,
+  Message,
+  Message_getFinish,
+  Message_getReturn,
+  MessageTarget,
+  PAYLOAD_DWORDS,
+  PAYLOAD_PWORDS,
+  RETURN_DWORDS,
+  RETURN_PWORDS,
+  Return,
+  Return_getAnswerId,
+  Return_which,
+} from "../src/rpc.capnp.ts";
+import { MemoryTransportPair } from "../src/transport.ts";
+import { RpcConnection } from "../src/vat.ts";
 import { IFACE, link } from "./support.ts";
 
 function finishFlags(frame: Uint8Array): { releaseResultCaps: boolean } {
@@ -489,5 +513,67 @@ describe("shutdown", () => {
       type: "disconnected",
     });
     expect(ta.frames.length).toBe(sent);
+  });
+});
+
+describe("results sent elsewhere", () => {
+  // The peer forwards a call back with sendResultsTo.yourself, then answers
+  // our own question with takeFromOtherQuestion pointing at it. Frames are
+  // built by hand because this vat never forwards that way itself.
+  test("a held answer is claimed by takeFromOtherQuestion", async () => {
+    const pair = new MemoryTransportPair();
+    const server = new Counter();
+    const a = new RpcConnection(pair.a, server);
+    const peer = pair.b;
+
+    const frame = (fill: (root: StructBuilder, b: MessageBuilder) => void): Uint8Array => {
+      const b = new MessageBuilder();
+      fill(b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS), b);
+      return b.toFlat();
+    };
+    peer.send(
+      frame((root) => {
+        root.setU16(0, Message.bootstrap);
+        root.initStruct(0, BOOTSTRAP_DWORDS, BOOTSTRAP_PWORDS).setU32(0, 1);
+      }),
+    );
+    a.pump();
+    peer.receive();
+
+    peer.send(
+      frame((root) => {
+        root.setU16(0, Message.call);
+        const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
+        call.setU32(0, 2);
+        call.setU16(6, Call_sendResultsTo.yourself);
+        const target = call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS);
+        target.setU16(4, MessageTarget.importedCap);
+        target.setU32(0, 0);
+        call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS).initStruct(0, 1, 0).setU32(0, 20);
+      }),
+    );
+    const mine = a.sendBootstrap();
+    peer.receive(); // our bootstrap question
+    a.pump();
+
+    const held = CapnpMessage.fromFlat(peer.receive()!).root();
+    const ret = Message_getReturn(held);
+    expect(Return_getAnswerId(ret)).toBe(2);
+    expect(Return_which(ret)).toBe(Return.resultsSentElsewhere);
+    expect(server.seen).toEqual([20]);
+
+    peer.send(
+      frame((root) => {
+        root.setU16(0, Message.return);
+        const r = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+        r.setU32(0, mine);
+        r.setU16(6, Return.takeFromOtherQuestion);
+        r.setU32(8, 2);
+      }),
+    );
+    a.pump();
+    expect(a.isAnswered(mine)).toBe(true);
+    expect(a.isFailed(mine)).toBe(false);
+    expect(a.answerContent(mine)?.getU32(0)).toBe(21);
   });
 });
