@@ -30,6 +30,7 @@
     "test": "bun test",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "tsup",
+    "prepack": "tsup",
     "prepublishOnly": "tsup"
   },
   "devDependencies": {

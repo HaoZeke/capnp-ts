@@ -129,11 +129,14 @@ $ pixi run fixtures   # or: bun run fixtures
 $ pixi run test
 ```
 
-Consume the runtime from the workspace path (or a published tarball when
-tagged):
+Consume the runtime from a workspace path or local tarball today. Registry
+publication for `@haozeke/*` is staged but not live yet.
 
 ```console
-$ bun add @haozeke/capnp
+$ bun add /path/to/capnp-ts/packages/runtime
+# or
+$ cd packages/runtime && npm pack
+$ bun add ./haozeke-capnp-0.1.0-dev.tgz
 ```
 
 Package exports (dual):
