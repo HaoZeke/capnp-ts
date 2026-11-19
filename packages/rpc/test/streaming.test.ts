@@ -2,12 +2,15 @@ import { describe, expect, test } from "bun:test";
 import type { Ptr, StructBuilder } from "@haozeke/capnp";
 
 import {
+  AdaptiveStreamWindow,
   type CallContext,
   Client,
+  RpcConnection,
   RpcError,
   RpcStream,
   type RpcServer,
   Settle,
+  StreamTransport,
   WindowFlowController,
 } from "../src/index.ts";
 import { ImportClient } from "../src/remote.ts";
@@ -120,6 +123,63 @@ describe("flow controller", () => {
     const blocked = flow.send(10, ack());
     a.reject(new RpcError("late"));
     await expect(blocked).rejects.toThrow("late");
+  });
+
+  test("skips querying window when inFlight is within maxMessageSize", async () => {
+    let calls = 0;
+    const flow = new WindowFlowController(() => {
+      calls++;
+      return 100;
+    });
+    const a = ack();
+    await flow.send(50, a);
+    expect(calls).toBe(0);
+    await flow.send(50, ack());
+    expect(calls).toBe(1);
+    a.resolve();
+  });
+
+  test("AdaptiveStreamWindow grows when saturated at low RTT and backs off on congestion", async () => {
+    let clock = 0;
+    const win = new AdaptiveStreamWindow({
+      initialWindow: 100,
+      minWindow: 100,
+      maxWindow: 500,
+      minRttFloorMs: 1,
+      now: () => clock,
+    });
+    const flow = new WindowFlowController(win);
+    const a = ack();
+    const b = ack();
+    const c = ack();
+    await flow.send(60, a);
+    await flow.send(60, b);
+    const blocked = flow.send(60, c);
+    clock = 2; // low RTT while saturated -> grows window
+    a.resolve();
+    await blocked;
+    const grown = win.getWindow();
+    expect(grown).toBeGreaterThan(100);
+
+    // High RTT spike -> multiplicative backoff, clamped at minWindow.
+    clock = 50;
+    b.resolve();
+    expect(win.getWindow()).toBeLessThan(grown);
+    expect(win.getWindow()).toBeGreaterThanOrEqual(100);
+    c.resolve();
+  });
+
+  test("RpcConnection tracks a dynamic transport sendBufferSize window", () => {
+    let bufSize = 16384;
+    const t = new StreamTransport(() => {}, () => bufSize);
+    const conn = new RpcConnection(t);
+    expect(conn.streamWindow).toBe(16384);
+    bufSize = 131072;
+    expect(conn.streamWindow).toBe(131072);
+    // Undefined falls back to adaptive default.
+    const t2 = new StreamTransport(() => {});
+    const conn2 = new RpcConnection(t2);
+    expect(conn2.streamWindow).toBe(65536);
   });
 });
 

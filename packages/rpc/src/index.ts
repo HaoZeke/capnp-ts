@@ -19,7 +19,14 @@ export {
   savePersistent,
   servePersistent,
 } from "./persistent.ts";
-export { DEFAULT_STREAM_WINDOW, WindowFlowController } from "./flow.ts";
+export {
+  type AdaptiveWindowOptions,
+  AdaptiveStreamWindow,
+  DEFAULT_STREAM_WINDOW,
+  MAX_ADAPTIVE_STREAM_WINDOW,
+  WindowFlowController,
+  type WindowGetter,
+} from "./flow.ts";
 export { RpcStream } from "./stream.ts";
 export {
   BrokenClient,
