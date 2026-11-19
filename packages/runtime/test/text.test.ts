@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CapnpError,
+  DynamicCapability,
   DynamicEnum,
   DynamicStruct,
   Message,
@@ -96,7 +98,7 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
         i32 = -0x20,
         u16 = 0755,
         f32 = -0.0,
-        f64 = +inf,
+        f64 = inf,
         title = "part1-" "part2-" \`raw line
         ,
         raw = 0x"de ad\nbe ef",
@@ -138,7 +140,7 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
         .asInt32(),
     ).toBe(9);
 
-    // Rejections
+    // Rejections matching capnp encode
     expect(() => decodeText("(unknownField = 1)", sinkSchema)).toThrow(
       CapnpError,
     );
@@ -146,6 +148,17 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
       CapnpError,
     );
     expect(() => decodeText("(i8 = 999)", sinkSchema)).toThrow(CapnpError);
+    for (const badText of [
+      "(i8 = +1)",
+      "(f64 = +1.5)",
+      "(f64 = +inf)",
+      "(f64 = +nan)",
+      "(f64 = -nan)",
+      "(f64 = .5)",
+      "(f64 = -.5)",
+    ]) {
+      expect(() => decodeText(badText, sinkSchema)).toThrow(CapnpError);
+    }
   });
 
   test.skipIf(!hasCapnp)(
@@ -269,6 +282,78 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
       expect(`${codecShort.encode(unkRoot.asReader())}\n`).toBe(
         unkCliShort.stdout.toString("utf-8"),
       );
+
+      // AnyPointer, AnyStruct, AnyList, Capability, List(Interface), and union disc-0 edges
+      const tmpDir = mkdtempSync(join(tmpdir(), "capnp-text-edge-"));
+      try {
+        const edgePath = join(tmpDir, "edge.capnp");
+        writeFileSync(
+          edgePath,
+          [
+            "@0xabcdef0123456791;",
+            "interface MyCap { ping @0 () -> (); }",
+            "struct Sub { a @0 :Int32 = 5; b @1 :Text = \"hi\"; }",
+            "struct Edge {",
+            "  anyP @0 :AnyPointer;",
+            "  anyS @1 :AnyStruct;",
+            "  anyL @2 :AnyList;",
+            "  cap @3 :MyCap;",
+            "  anyCap @4 :Capability;",
+            "  listCap @5 :List(MyCap);",
+            "  uGrp :union { g :group { x @6 :Int32; } v @7 :Void; }",
+            "  uVal :union { dflt @8 :Int32 = 42; other @9 :Text; }",
+            "  uPtr :union { t @10 :Text = \"dflt\"; n @11 :Int32; }",
+            "}",
+          ].join("\n"),
+        );
+        const cgr = spawnSync("capnp", ["compile", "-o-", edgePath]);
+        expect(cgr.status).toBe(0);
+        const eLoader = SchemaLoader.fromCgr(new Uint8Array(cgr.stdout));
+        const edgeSchema = eLoader.resolveStruct("Edge");
+        const subSchema = eLoader.resolveStruct("Sub");
+        const capSchema = eLoader.resolve("MyCap").asInterface();
+
+        const b = new MessageBuilder();
+        const r = DynamicStruct.initRoot(b, edgeSchema);
+        const subMsg = new MessageBuilder();
+        DynamicStruct.initRoot(subMsg, subSchema).set("a", 99);
+        r.set("anyP", DynamicStruct.fromMessage(Message.fromFlat(subMsg.toFlat()), subSchema));
+        r.set("anyS", DynamicStruct.fromMessage(Message.fromFlat(subMsg.toFlat()), subSchema));
+        const listMsg = new MessageBuilder();
+        const listRoot = listMsg.initRoot(0, 1);
+        listRoot.initPrimList(0, 4, 2, 4, new Uint8Array([1, 0, 0, 0, 2, 0, 0, 0]));
+        r.set("anyL", Message.fromFlat(listMsg.toFlat()).root().getP(0));
+        r.init("listCap", 0);
+
+        const edgeFlat = b.toFlat();
+        const cliEdgePretty = spawnSync("capnp", ["decode", edgePath, "Edge"], {
+          input: edgeFlat,
+        });
+        const cliEdgeShort = spawnSync("capnp", ["decode", "--short", edgePath, "Edge"], {
+          input: edgeFlat,
+        });
+        expect(cliEdgePretty.status).toBe(0);
+        expect(cliEdgeShort.status).toBe(0);
+
+        const dynEdge = DynamicStruct.fromMessage(Message.fromFlat(edgeFlat), edgeSchema);
+        expect(`${codecPretty.encode(dynEdge)}\n`).toBe(
+          cliEdgePretty.stdout.toString("utf-8"),
+        );
+        expect(`${codecShort.encode(dynEdge)}\n`).toBe(
+          cliEdgeShort.stdout.toString("utf-8"),
+        );
+
+        // Capability and List(MyCap) with non-null caps match C++ prettyPrint output
+        r.set("cap", new DynamicCapability.Client(capSchema, 0));
+        r.set("anyCap", new DynamicCapability.Client(capSchema, 1));
+        const lc = r.init("listCap", 2).asList();
+        lc.set(0, new DynamicCapability.Client(capSchema, 2));
+        expect(codecShort.encode(r)).toBe(
+          "(anyP = <opaque pointer>, anyS = <opaque pointer>, anyL = <opaque pointer>, cap = <external capability>, anyCap = <opaque pointer>, listCap = [<external capability>, <external capability>], uGrp = (g = (x = 0)), uVal = (dflt = 42), uPtr = ())",
+        );
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
     },
   );
 });
