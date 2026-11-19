@@ -110,6 +110,17 @@ $ bun install
 $ bun test
 ```
 
+`bun test` runs the core suites by default. The pycapnp bidirectional interop
+suite requires an explicit local Python environment (the CI job sets this up
+and enforces it with `CAPNP_REQUIRE_PYCAPNP=1`):
+
+```console
+$ python3 -m venv .venv-pycapnp
+$ .venv-pycapnp/bin/pip install --upgrade pip pycapnp
+$ .venv-pycapnp/bin/python scripts/pycapnp_interop.py write-all
+$ CAPNP_REQUIRE_PYCAPNP=1 bun test packages/runtime/test/pycapnp-interop.test.ts
+```
+
 Toolchain for fixture regen (Cap'n CLI 1.4.*) via [pixi](https://pixi.sh):
 
 ```console
