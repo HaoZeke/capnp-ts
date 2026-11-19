@@ -22,6 +22,7 @@ import {
   CallState,
   callStreaming,
   Client,
+  type StreamingPromise,
   type ClientHook,
   failedCall,
   isNullCap,
@@ -185,6 +186,42 @@ export class RevocablePolicy extends MembranePolicy {
 interface Flight {
   outer: CallState;
   inner: CallState;
+}
+
+/**
+ * First of the stream call and revocation wins. Revocation cancels the
+ * call, which is what capnp-C++'s exclusiveJoin does to sendStreaming.
+ */
+function joinRevocation(done: StreamingPromise, onRevoked: Promise<unknown>): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    done.then(
+      () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      },
+      (e) => {
+        if (settled) return;
+        settled = true;
+        reject(toRpcError(e));
+      },
+    );
+    onRevoked.then(
+      () => {
+        if (settled) return;
+        settled = true;
+        done.cancel();
+        reject(new RpcError("onRevoked() resolved; it should only reject"));
+      },
+      (e) => {
+        if (settled) return;
+        settled = true;
+        done.cancel();
+        reject(toRpcError(e));
+      },
+    );
+  });
 }
 
 class MembraneHook extends RefHook implements ClientHook {
@@ -394,16 +431,15 @@ class MembraneHook extends RefHook implements ClientHook {
     const done = callStreaming(routed.target, interfaceId, methodId, routed.params);
     routed.target.release();
     if (!routed.crossing) return done;
-    if (this.revoked !== undefined) return Promise.reject(this.revoked);
+    if (this.revoked !== undefined) {
+      done.cancel();
+      return Promise.reject(this.revoked);
+    }
     const onRevoked = this.policy.onRevoked();
     if (onRevoked === undefined) return done;
-    return Promise.race([
-      done,
-      onRevoked.then(
-        () => Promise.reject(new RpcError("onRevoked() resolved; it should only reject")),
-        (e) => Promise.reject(toRpcError(e)),
-      ),
-    ]);
+    // exclusiveJoin: revocation cancels the stream call, so a local
+    // server's AbortSignal fires. Promise.race leaves the call running.
+    return joinRevocation(done, onRevoked);
   }
 
   flush(): Promise<void> {
