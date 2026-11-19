@@ -530,9 +530,7 @@ class TextParser {
     }
     if (
       c === 0x2d /* '-' */ ||
-      c === 0x2b /* '+' */ ||
-      (c >= 0x30 && c <= 0x39) ||
-      c === 0x2e /* '.' */
+      (c >= 0x30 && c <= 0x39)
     ) {
       return this.parseNumberOrSignedIdent();
     }
@@ -640,9 +638,8 @@ class TextParser {
 
   private parseNumberOrSignedIdent(): TextAst {
     let neg = false;
-    const first = this.src[this.pos];
-    if (first === "-" || first === "+") {
-      neg = first === "-";
+    if (this.src[this.pos] === "-") {
+      neg = true;
       this.pos++;
       this.skipSpaceAndComments();
     }
@@ -651,9 +648,8 @@ class TextParser {
     }
     if (isIdentStart(this.src.charCodeAt(this.pos))) {
       const id = this.readIdentifier();
-      if (id === "inf") return { kind: "float", value: neg ? -Infinity : Infinity };
-      if (id === "nan") return { kind: "float", value: NaN };
-      this.fail(`unexpected signed identifier '${neg ? "-" : "+"}${id}'`);
+      if (id === "inf") return { kind: "float", value: -Infinity };
+      this.fail(`unexpected signed identifier '-${id}'`);
     }
 
     const start = this.pos;
@@ -686,6 +682,9 @@ class TextParser {
       this.src.charCodeAt(this.pos) <= 0x39
     ) {
       this.pos++;
+    }
+    if (this.pos === start) {
+      this.fail("invalid numeric literal");
     }
     if (this.pos < this.src.length && this.src[this.pos] === ".") {
       isFloat = true;
