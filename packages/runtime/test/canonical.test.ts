@@ -1,17 +1,22 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { MessageBuilder } from "../src/builder.ts";
 import {
   canonicalize,
   canonicalizeFlat,
   messageFromRawSegment,
 } from "../src/canonical.ts";
+import { deepCopyPtrToSlot } from "../src/copy.ts";
 import { storeU32, storeU64 } from "../src/endian.ts";
+import { ElemSize } from "../src/kinds.ts";
 import { Message } from "../src/message.ts";
 import { wpMakeStruct } from "../src/pointer.ts";
 
 const goldenDir = join(dirname(fileURLToPath(import.meta.url)), "golden");
+const hasCapnp = spawnSync("capnp", ["--version"]).status === 0;
 
 function hex(bytes: Uint8Array): string {
   return Array.from(bytes)
@@ -64,5 +69,37 @@ describe("capnp canonical form", () => {
     const out = canonicalizeFlat(framed);
     expect(out.length).toBe(8);
     expect(out).toEqual(framed.subarray(8, 16));
+  });
+
+  test("zero-word nested lists point at the preorder segment cursor", () => {
+    const tmp = new MessageBuilder();
+    const holder = tmp.initRoot(0, 3);
+    holder.initPrimList(0, ElemSize.FourBytes, 2, 4, new Uint8Array([1, 0, 0, 0, 2, 0, 0, 0]));
+    holder.initPrimList(1, ElemSize.FourBytes, 0, 4);
+    holder.initPrimList(2, ElemSize.FourBytes, 1, 4, new Uint8Array([3, 0, 0, 0]));
+    const srcRoot = Message.fromFlat(tmp.toFlat()).root();
+
+    const b2 = new MessageBuilder();
+    const r2 = b2.initRoot(0, 1);
+    const slots = r2.initPointerList(0, 3);
+    deepCopyPtrToSlot(b2, slots.add(0), srcRoot.getP(0), 0);
+    deepCopyPtrToSlot(b2, slots.add(1), srcRoot.getP(1), 0);
+    deepCopyPtrToSlot(b2, slots.add(2), srcRoot.getP(2), 0);
+
+    const canon = canonicalizeFlat(b2.toFlat());
+    // Middle empty list slot sits at word 3; after [1,2] allocates word 5, cursor is 6 -> offset = 6 - 3 - 1 = 2 (byte0 = 9)
+    expect(canon[3 * 8]).toBe(9);
+
+    if (hasCapnp) {
+      const cli = spawnSync("capnp", ["convert", "binary:canonical"], {
+        input: b2.toFlat(),
+      });
+      expect(cli.status).toBe(0);
+      expect(canon).toEqual(new Uint8Array(cli.stdout));
+      const checkValid = spawnSync("capnp", ["convert", "canonical:binary"], {
+        input: canon,
+      });
+      expect(checkValid.status).toBe(0);
+    }
   });
 });
