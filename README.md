@@ -24,7 +24,7 @@ npm packages:
 
 | Package | Role |
 |---------|------|
-| [`@haozeke/capnp`](packages/runtime) | Wire runtime (kinds, pointer, message, builder, packed, canonical) |
+| [`@haozeke/capnp`](packages/runtime) | Wire runtime, dynamic reflection, text/JSON codecs, `capnp-ts` CLI |
 | [`@haozeke/capnpc-ts`](packages/codegen) | `capnp compile -o` plugin (typed struct/enum/union emit) |
 
 Not a soft fork of the unmaintained `jdiaz5513/capnp-ts`, not a libcapnp /
@@ -65,6 +65,10 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
 - Cap'n Proto compat JSON codec (`JsonCodec`, `encodeJson`, `decodeJson`,
   `splitJsonMessages`) matching `capnp/compat/json.h` defaults and `$Json`
   annotations (`name`, `flatten`, `discriminator`, `hex`, `base64`)
+- `capnp-ts` CLI (`packages/runtime/bin/capnp-ts`, `@haozeke/capnp/cli`)
+  implementing `encode`, `decode`, `convert` across `binary`, `packed`, `flat`,
+  `flat-packed`, `canonical`, `text`, and `json`, plus `eval` for schema
+  constants and field defaults
 - Traversal word budget (8 Mi words) and nesting depth limit (64), matching
   Cap'n C++ reader defaults (`DEFAULT_TRAVERSAL_WORDS` / `DEFAULT_DEPTH_LIMIT`;
   far hops and `getP` / `listGetP` accumulate depth)
@@ -246,6 +250,31 @@ const canonical = canonicalizeFlat(bytes); // single-segment preorder form
 For stream-framed message input, `pack()` mirrors `capnp convert binary:packed`
 behavior by compacting reachable objects to a single segment before encoding.
 Use `pack(bytes, { compactFramed: false })` for raw word-stream packing.
+
+Dynamic reflection, text format, JSON codec, and `capnp-ts` CLI:
+
+```typescript
+import {
+  DynamicStruct,
+  Message,
+  SchemaLoader,
+  encodeJson,
+  encodeText,
+} from "@haozeke/capnp";
+
+const loader = SchemaLoader.fromCgr(cgrBytes);
+const bookSchema = loader.resolveStruct("AddressBook");
+const book = DynamicStruct.fromMessage(Message.fromFlat(bytes), bookSchema);
+
+console.log(encodeText(book)); // capnp decode format
+console.log(encodeJson(book)); // capnp/compat/json.h format
+```
+
+```console
+$ ./packages/runtime/bin/capnp-ts decode schema/addressbook.capnp AddressBook < packages/runtime/test/golden/addressbook.bin
+$ ./packages/runtime/bin/capnp-ts convert binary:json schema/addressbook.capnp AddressBook < packages/runtime/test/golden/addressbook.bin
+$ ./packages/runtime/bin/capnp-ts eval schema/dynamic-kitchen.capnp extremeConst.matrix[0][1]
+```
 
 Regenerate goldens (needs system `capnp` 1.4.*):
 
