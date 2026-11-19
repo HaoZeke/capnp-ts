@@ -6,12 +6,13 @@
  * the two are pumped in lockstep.
  */
 import { describe, expect, test } from "bun:test";
-import { MessageBuilder, Ptr, type StructBuilder } from "../../runtime/src/index.ts";
+import { Message as CapnpMessage, MessageBuilder, Ptr, type StructBuilder } from "../../runtime/src/index.ts";
 
 import {
   MESSAGE_DWORDS,
   MESSAGE_PWORDS,
   Message,
+  Message_which,
   PAYLOAD_DWORDS,
   PAYLOAD_PWORDS,
   RETURN_DWORDS,
@@ -91,7 +92,7 @@ describe("client questions", () => {
     expect(client.answerContent(q)).toBeUndefined();
   });
 
-  test("a Return for a question we never asked is ignored", () => {
+  test("a Return for a question we never asked aborts the connection", () => {
     const pair = new MemoryTransportPair();
     const client = new RpcConnection(pair.a);
 
@@ -106,9 +107,8 @@ describe("client questions", () => {
     pair.b.send(b.toFlat());
 
     expect(client.pump()).toBe(1);
-    // Recording it would let a peer plant answers to questions we never
-    // asked, which later pipelining would then trust.
+    expect(client.disconnected?.message).toContain("Invalid question ID");
     expect(client.isAnswered(77)).toBe(false);
-    expect(client.answerContent(77)).toBeUndefined();
+    expect(Message_which(CapnpMessage.fromFlat(pair.b.receive()!).root())).toBe(Message.abort);
   });
 });
