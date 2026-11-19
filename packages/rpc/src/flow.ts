@@ -46,6 +46,14 @@ export class WindowFlowController {
     return this.inFlightBytes;
   }
 
+  get failed(): boolean {
+    return this.failure !== undefined;
+  }
+
+  get failureError(): RpcError | undefined {
+    return this.failure;
+  }
+
   /**
    * Account for a message that has just been sent. `ack` settles when its
    * Return arrives.
