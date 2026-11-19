@@ -204,6 +204,11 @@ export function readMessagesInFormat(
 export interface WriteFormatOptions {
   short?: boolean;
   segmentSize?: number;
+  /**
+   * Apply `$Json` annotations. `capnp convert` compiles and applies them.
+   * `capnp eval` drops annotations, so eval passes false.
+   */
+  annotations?: boolean;
 }
 
 function rebuildMessageRoot(msg: Message, segmentSize = 0): MessageBuilder {
@@ -274,7 +279,10 @@ export function writeMessageInFormat(
       });
       const reader = DynamicStruct.fromMessage(fresh, rootSchema);
       return UTF8_ENC.encode(
-        `${encodeJson(reader, { pretty, annotations: true })}\n`,
+        `${encodeJson(reader, {
+          pretty,
+          annotations: opts?.annotations ?? true,
+        })}\n`,
       );
     }
   }
@@ -289,15 +297,8 @@ export function convertStream(
   opts?: WriteFormatOptions,
 ): Uint8Array {
   const messages = readMessagesInFormat(input, from, rootSchema);
-  if (
-    (to === "flat" || to === "flat-packed" || to === "canonical") &&
-    messages.length > 1
-  ) {
-    throw new CapnpError(
-      "ARG",
-      `cannot write multiple messages to single-message format '${to}'`,
-    );
-  }
+  // capnp writes one flat or canonical message after another. A multi-message
+  // stream is the concatenation of those single-segment bodies.
   const chunks = messages.map((m) =>
     writeMessageInFormat(m, to, rootSchema, opts),
   );
@@ -727,6 +728,16 @@ function readStdinSync(): Uint8Array {
   return new Uint8Array(readFileSync(0));
 }
 
+/**
+ * `capnp` calls `BufferedInputStream::getReadBuffer()` before converting.
+ * An empty stream throws "Premature EOF" unless `--quiet` skipped that check.
+ */
+function assertStdinPresent(input: Uint8Array, quiet: boolean): void {
+  if (input.byteLength === 0 && !quiet) {
+    throw new CapnpError("FRAMING", "Premature EOF");
+  }
+}
+
 export async function runCli(
   argv: readonly string[],
   io?: CliIo,
@@ -771,6 +782,7 @@ export async function runCli(
       const { loader, fileId } = loadSchemaFromFile(args[0]!, flags);
       const rootSchema = loader.resolveStruct(args[1]!, fileId);
       const input = io?.stdin ?? readStdinSync();
+      assertStdinPresent(input, false);
       const out = convertStream(input, "text", to, rootSchema, {
         segmentSize: flags.segmentSize,
       });
@@ -793,6 +805,7 @@ export async function runCli(
       const { loader, fileId } = loadSchemaFromFile(args[0]!, flags);
       const rootSchema = loader.resolveStruct(args[1]!, fileId);
       const input = io?.stdin ?? readStdinSync();
+      assertStdinPresent(input, flags.quiet);
       const out = convertStream(input, from, "text", rootSchema, {
         short: flags.short,
       });
@@ -839,6 +852,7 @@ export async function runCli(
       }
 
       const input = io?.stdin ?? readStdinSync();
+      assertStdinPresent(input, flags.quiet);
       const out = convertStream(input, from, to, rootSchema, {
         short: flags.short,
         segmentSize: flags.segmentSize,
@@ -875,6 +889,8 @@ export async function runCli(
       const out = formatEvaluatedValue(value, type, outFmt, {
         short: flags.short,
         segmentSize: flags.segmentSize,
+        // eval drops annotations; convert is what applies $Json names.
+        annotations: false,
       });
       writeOut(out);
       return 0;

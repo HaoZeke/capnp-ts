@@ -35,10 +35,16 @@ import {
   PtrKind,
   WORD_BYTES,
   assertCapnp,
+  assertDataBlobSize,
+  assertListElementCount,
+  assertTextBlobSize,
+  bytesToWords,
+  compositeContentWords,
   listStepBits,
+  primitiveBodySize,
 } from "./kinds.ts";
 import { Message, Ptr } from "./message.ts";
-import { wpMakeCap, wpMakeStruct } from "./pointer.ts";
+import { wpCompositeElementCount, wpMakeCap, wpMakeStruct } from "./pointer.ts";
 import {
   AppliedAnnotation,
   ConstSchema,
@@ -979,7 +985,7 @@ export class DynamicOrphan {
 function orphanToListPtr(msg: Message, orphan: Orphan): Ptr {
   if (orphan.esize === ElemSize.Composite) {
     const tag = msg.readWord(orphan.seg, orphan.word);
-    const nelem = Number((tag >> 2n) & 0x3fff_ffffn);
+    const nelem = wpCompositeElementCount(tag);
     const dw = Number((tag >> 32n) & 0xffffn);
     const pw = Number((tag >> 48n) & 0xffffn);
     return Ptr.list(
@@ -1558,6 +1564,7 @@ export class DynamicStructBuilder {
     const slot = this.sb.slot(field.offset);
 
     if (t.isList()) {
+      assertListElementCount(size);
       const lb = DynamicListBuilder.allocateAtSlot(
         this.sb.builder,
         slot,
@@ -1567,11 +1574,13 @@ export class DynamicStructBuilder {
       return new DynamicValueBuilder(DynamicValueType.LIST, lb);
     }
     if (t.isText()) {
+      assertTextBlobSize(size, "integer overflow");
       const bytes = new Uint8Array(size);
       this.sb.setText(field.offset, new TextDecoder().decode(bytes));
       return new DynamicValueBuilder(DynamicValueType.TEXT, "\0".repeat(size));
     }
     if (t.isData()) {
+      assertDataBlobSize(size, "integer overflow");
       const bytes = new Uint8Array(size);
       this.sb.setData(field.offset, bytes);
       const resolved = this.sb.builder.resolveSlot(slot);
@@ -2390,7 +2399,7 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
   ): DynamicListBuilder {
     if (orphan.esize === ElemSize.Composite) {
       const tag = builder.loadW(orphan.seg, orphan.word);
-      const nelem = Number((tag >> 2n) & 0x3fff_ffffn);
+      const nelem = wpCompositeElementCount(tag);
       const dw = Number((tag >> 32n) & 0xffffn);
       const pw = Number((tag >> 48n) & 0xffffn);
       return new DynamicListBuilder({
@@ -2426,7 +2435,7 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
     pw: number,
   ): DynamicListBuilder {
     const step = dw + pw;
-    const contentWords = count * step;
+    const contentWords = compositeContentWords(count, step);
     const { seg: tagSeg, word: tagWord } = builder.allocWords(1 + contentWords);
     builder.storeW(tagSeg, tagWord, wpMakeStruct(count | 0, dw, pw));
     builder.writeListPtr(
@@ -2456,6 +2465,7 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
     schema: ListSchema,
     count: number,
   ): DynamicListBuilder {
+    assertListElementCount(count);
     const elemType = schema.getElementType();
     const esize = schema.wireElementSize();
 
@@ -2501,9 +2511,7 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
     }
 
     const stepBits = listStepBits(esize);
-    const bits = stepBits <= 0 ? 0 : count * stepBits;
-    const nbytes = (bits + 7) >>> 3;
-    const nwords = (nbytes + 7) >>> 3;
+    const { nwords } = primitiveBodySize(count, stepBits);
     let startSeg: number;
     let startWord: number;
     if (nwords > 0) {
@@ -2663,10 +2671,12 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
       );
     }
     if (elemType.isData()) {
+      assertDataBlobSize(subSize, "integer overflow");
       writeDataToSlot(this.builder, slot, new Uint8Array(subSize));
       return new DynamicValueBuilder(DynamicValueType.DATA, new Uint8Array(subSize));
     }
     if (elemType.isText()) {
+      assertTextBlobSize(subSize, "integer overflow");
       writeTextToSlot(this.builder, slot, "\0".repeat(subSize));
       return new DynamicValueBuilder(DynamicValueType.TEXT, "\0".repeat(subSize));
     }
@@ -2924,8 +2934,9 @@ function writeTextToSlot(
   text: string,
 ): void {
   const enc = new TextEncoder().encode(text);
+  assertTextBlobSize(enc.length, "text blob too big");
   const nbytes = enc.length + 1;
-  const nwords = (nbytes + 7) >> 3;
+  const nwords = bytesToWords(nbytes);
   const { seg, word } = builder.allocWords(nwords);
   const data = builder.segBytes(seg);
   const base = word * WORD_BYTES;
@@ -2939,7 +2950,8 @@ function writeDataToSlot(
   slot: BuilderPointer,
   bytes: Uint8Array,
 ): void {
-  const nwords = (bytes.length + 7) >> 3;
+  assertDataBlobSize(bytes.length, "text blob too big");
+  const nwords = bytesToWords(bytes.length);
   let seg: number;
   let word: number;
   if (nwords > 0) {
@@ -3077,7 +3089,7 @@ function upgradeStructListAtSlot(
 
   if (resolved.esize === ElemSize.Composite) {
     const tag = builder.loadW(resolved.seg, resolved.word);
-    const nelem = Number((tag >> 2n) & 0x3fff_ffffn);
+    const nelem = wpCompositeElementCount(tag);
     const dw = Number((tag >> 32n) & 0xffffn);
     const pw = Number((tag >> 48n) & 0xffffn);
     if (dw >= subSchema.dataWordCount && pw >= subSchema.pointerCount) {

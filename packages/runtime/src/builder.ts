@@ -26,6 +26,12 @@ import {
   WORD_BYTES,
   WireKind,
   assertCapnp,
+  assertDataBlobSize,
+  assertListElementCount,
+  assertTextBlobSize,
+  bytesToWords,
+  compositeContentWords,
+  exactProduct,
 } from "./kinds.ts";
 import { serializeToFlat } from "./serialize.ts";
 import { Message, type Ptr } from "./message.ts";
@@ -678,8 +684,9 @@ export class StructBuilder {
 
   setText(ptrIndex: number, text: string): void {
     const enc = new TextEncoder().encode(text);
+    assertTextBlobSize(enc.length, "text blob too big");
     const nbytes = enc.length + 1; // trailing NUL
-    const nwords = (nbytes + 7) >> 3;
+    const nwords = bytesToWords(nbytes);
     const slot = this.slot(ptrIndex);
     const { seg: startSeg, word: startWord } = this.builder.allocWords(nwords);
     const data = this.builder.segBytes(startSeg);
@@ -697,8 +704,9 @@ export class StructBuilder {
   }
 
   setData(ptrIndex: number, bytes: Uint8Array): void {
+    assertDataBlobSize(bytes.length, "text blob too big");
     const slot = this.slot(ptrIndex);
-    const nwords = (bytes.length + 7) >> 3;
+    const nwords = bytesToWords(bytes.length);
     let startSeg: number;
     let startWord: number;
     if (nwords) {
@@ -733,7 +741,7 @@ export class StructBuilder {
   ): StructBuilder {
     const slot = this.slot(ptrIndex);
     const step = elemDwords + elemPwords;
-    const contentWords = count * step;
+    const contentWords = compositeContentWords(count, step);
     const need = 1 + contentWords;
     const { seg: tagSeg, word: tagWord } = this.builder.allocWords(need);
     this.builder.storeW(
@@ -770,6 +778,7 @@ export class StructBuilder {
 
   /** Init List of pointer-sized elements (e.g. List(Text) slots). */
   initPointerList(ptrIndex: number, count: number): BuilderPointer {
+    assertListElementCount(count);
     const slot = this.slot(ptrIndex);
     let listSeg: number;
     let listStart: number;
@@ -798,9 +807,10 @@ export class StructBuilder {
     itemBytes: number,
     items?: Uint8Array,
   ): BuilderPointer {
+    assertListElementCount(count);
     const slot = this.slot(ptrIndex);
-    const nbytes = count * itemBytes;
-    const nwords = (nbytes + 7) >> 3;
+    const nbytes = exactProduct(count, itemBytes);
+    const nwords = bytesToWords(nbytes);
     let startSeg: number;
     let startWord: number;
     if (nwords) {

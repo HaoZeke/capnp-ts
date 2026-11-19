@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalizeFlat, loadU32, unpack } from "../src/index.ts";
@@ -41,6 +42,18 @@ async function execCliInMemory(
     off += c.byteLength;
   }
   return { code, stdout: out, stderr: errs.join("\n") };
+}
+
+function execCapnp(
+  argv: string[],
+  stdin: Uint8Array = new Uint8Array(0),
+): { code: number; stdout: Uint8Array; stderr: string } {
+  const proc = spawnSync("capnp", argv, { input: Buffer.from(stdin) });
+  return {
+    code: proc.status ?? 1,
+    stdout: new Uint8Array(proc.stdout ?? Buffer.alloc(0)),
+    stderr: (proc.stderr ?? Buffer.alloc(0)).toString("utf8"),
+  };
 }
 
 const ALL_FORMATS: readonly WireFormat[] = [
@@ -425,6 +438,139 @@ describe("capnp-ts CLI (encode, decode, convert, eval)", () => {
         ]);
         expect(ours.code).toBe(0);
         expect(ours.stdout).toEqual(new Uint8Array(ref.stdout));
+      }
+    },
+  );
+});
+
+describe("CLI empty input, multi-message flat, and eval annotations", () => {
+  const abSchemaPath = join(repoRoot, "schema/addressbook.capnp");
+
+  test.skipIf(!hasCapnp)(
+    "empty stdin is Premature EOF unless --quiet",
+    async () => {
+      const cases: string[][] = [
+        ["encode", abSchemaPath, "AddressBook"],
+        ["decode", abSchemaPath, "AddressBook"],
+        ["convert", "binary:flat", abSchemaPath, "AddressBook"],
+        ["convert", "text:canonical", abSchemaPath, "AddressBook"],
+      ];
+      for (const args of cases) {
+        const ref = execCapnp(args);
+        const ours = await execCliInMemory(args);
+        expect(ref.code).toBe(1);
+        expect(ours.code).toBe(ref.code);
+        expect(ours.stdout).toEqual(ref.stdout);
+        expect(ref.stderr).toContain("Premature EOF");
+        expect(ours.stderr).toContain("Premature EOF");
+      }
+
+      for (const args of [
+        ["decode", "--quiet", abSchemaPath, "AddressBook"],
+        ["convert", "--quiet", "binary:flat", abSchemaPath, "AddressBook"],
+        ["convert", "--quiet", "text:json", abSchemaPath, "AddressBook"],
+      ]) {
+        const ref = execCapnp(args);
+        const ours = await execCliInMemory(args);
+        expect(ref.code).toBe(0);
+        expect(ours.code).toBe(0);
+        expect(ours.stdout).toEqual(ref.stdout);
+        expect(ours.stdout.byteLength).toBe(0);
+      }
+    },
+  );
+
+  test.skipIf(!hasCapnp)(
+    "multi-message flat, canonical, and flat-packed streams match capnp",
+    async () => {
+      const one = readGolden("addressbook.bin");
+      const two = new Uint8Array(one.byteLength * 2);
+      two.set(one, 0);
+      two.set(one, one.byteLength);
+      for (const spec of ["binary:flat", "binary:canonical", "binary:flat-packed", "text:flat"]) {
+        const input =
+          spec === "text:flat"
+            ? (() => {
+                const text = execCapnp(
+                  ["convert", "binary:text", abSchemaPath, "AddressBook"],
+                  one,
+                );
+                expect(text.code).toBe(0);
+                const both = new Uint8Array(text.stdout.byteLength * 2);
+                both.set(text.stdout, 0);
+                both.set(text.stdout, text.stdout.byteLength);
+                return both;
+              })()
+            : two;
+        const from = spec === "text:flat" ? "text:flat" : spec;
+        const args = ["convert", from, abSchemaPath, "AddressBook"];
+        const ref = execCapnp(args, input);
+        const ours = await execCliInMemory(args, input);
+        expect(ref.code).toBe(0);
+        expect(ours.code).toBe(0);
+        expect(ours.stdout).toEqual(ref.stdout);
+        expect(ours.stdout.byteLength).toBeGreaterThan(one.byteLength);
+      }
+    },
+  );
+
+  test.skipIf(!hasCapnp)(
+    "eval -ojson drops annotations and convert applies them",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "capnp-ann-"));
+      const schemaPath = join(dir, "ann.capnp");
+      writeFileSync(
+        schemaPath,
+        `@0x8a1b2c3d4e5f6071;
+using Json = import "/capnp/compat/json.capnp";
+struct Box {
+  renamed @0 :Text $Json.name("renamed_field");
+  blob @1 :Data $Json.hex;
+}
+const sample :Box = (renamed = "hi", blob = 0x"dead");
+`,
+      );
+      try {
+        const text = new TextEncoder().encode(
+          '(renamed = "hi", blob = 0x"dead")\n',
+        );
+        const cases: { args: string[]; stdin?: Uint8Array }[] = [
+          { args: ["eval", "-ojson", schemaPath, "sample"] },
+          { args: ["eval", "--short", "-ojson", schemaPath, "sample"] },
+          {
+            args: ["convert", "text:json", schemaPath, "Box"],
+            stdin: text,
+          },
+          {
+            args: ["convert", "--short", "text:json", schemaPath, "Box"],
+            stdin: text,
+          },
+        ];
+        for (const c of cases) {
+          const ref = execCapnp(c.args, c.stdin);
+          const ours = await execCliInMemory(c.args, c.stdin);
+          expect(ref.code).toBe(0);
+          expect(ours.code).toBe(0);
+          expect(ours.stdout).toEqual(ref.stdout);
+        }
+        const evalJson = new TextDecoder().decode(
+          (await execCliInMemory(["eval", "-ojson", schemaPath, "sample"]))
+            .stdout,
+        );
+        const convertJson = new TextDecoder().decode(
+          (
+            await execCliInMemory(
+              ["convert", "text:json", schemaPath, "Box"],
+              text,
+            )
+          ).stdout,
+        );
+        expect(evalJson).toContain('"renamed"');
+        expect(evalJson).not.toContain("renamed_field");
+        expect(convertJson).toContain("renamed_field");
+        expect(convertJson).toContain('"dead"');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
       }
     },
   );
