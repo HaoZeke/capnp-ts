@@ -461,9 +461,160 @@ describe("promises over a connection", () => {
     await settle();
     expect(ta.sent).not.toContain("disembargo");
   });
+
+  test("pipelining a call onto a null capability does not send Disembargo or abort", async () => {
+    const returnsNull: RpcServer = {
+      dispatch(_i, m, params, results) {
+        if (m === 1) results.setU32(0, params.getU32(0) + 1);
+        // m === 0 leaves pointer slot 0 null.
+      },
+    };
+    const { a, b, ta, tb, settle } = link(undefined, returnsNull);
+    const boot = a.bootstrap();
+    const missing = boot.call(IFACE, 0, undefined, 0, 1).pipeline(0);
+    const bad = missing.call(IFACE, 0, arg(1));
+    await settle();
+    await expect(Promise.resolve(bad)).rejects.toThrow(/null|no such|cap/i);
+    expect(ta.sent).not.toContain("disembargo");
+    expect(tb.sent).not.toContain("abort");
+    expect(a.disconnected).toBeUndefined();
+    expect(b.disconnected).toBeUndefined();
+    const ok = boot.call(IFACE, 1, arg(9));
+    await settle();
+    expect((await ok).content.getU32(0)).toBe(10);
+  });
+
+  test("a two-step promise chain resolving back to the caller still embargoes", async () => {
+    const local = new Counter();
+    let resolveP1!: (c: Client) => void;
+    let resolveP2!: (c: Client) => void;
+    let held!: Client;
+    const p2 = Client.fromPromise(new Promise<Client>((r) => (resolveP2 = r)));
+    const server: RpcServer = {
+      dispatch(_i, m, params, _r, ctx) {
+        if (m === 0) {
+          held = new Client(ctx.getCap(params.getP(0)));
+          return;
+        }
+        const p1 = Client.fromPromise(new Promise<Client>((r) => (resolveP1 = r)));
+        ctx.setResultCap(ctx.initResults(0, 1), 0, p1.hook);
+      },
+    };
+    const { a, ta, settle } = link(undefined, server);
+    const boot = a.bootstrap();
+    boot.call(IFACE, 0, (p, b) => b.setCap(p, 0, Client.local(local).hook), 0, 1);
+    const reply = boot.call(IFACE, 1);
+    await settle();
+    const results = await reply;
+    const promise = new Client(results.getCap(results.content.getP(0)));
+
+    const first = promise.call(IFACE, 0, arg(1));
+    await settle();
+    resolveP1(p2);
+    await settle();
+    resolveP2(held);
+    await settle();
+    await promise.whenResolved();
+    const second = promise.call(IFACE, 0, arg(2));
+    await settle();
+    await Promise.all([first, second]);
+
+    expect(local.seen).toEqual([1, 2]);
+    expect(ta.sent).toContain("disembargo");
+  });
+
+  test("a pending embargo rejects on disconnect instead of lifting", async () => {
+    const local = new Counter();
+    let resolveP!: (c: Client) => void;
+    let held!: Client;
+    const server: RpcServer = {
+      dispatch(_i, m, params, _r, ctx) {
+        if (m === 0) {
+          held = new Client(ctx.getCap(params.getP(0)));
+          return;
+        }
+        const promise = Client.fromPromise(new Promise<Client>((r) => (resolveP = r)));
+        ctx.setResultCap(ctx.initResults(0, 1), 0, promise.hook);
+      },
+    };
+    const { a, b, settle } = link(undefined, server);
+    const boot = a.bootstrap();
+    boot.call(IFACE, 0, (p, cb) => cb.setCap(p, 0, Client.local(local).hook), 0, 1);
+    const reply = boot.call(IFACE, 1);
+    await settle();
+    const results = await reply;
+    const promise = new Client(results.getCap(results.content.getP(0)));
+
+    const first = promise.call(IFACE, 0, arg(1));
+    await settle();
+    resolveP(held);
+    await new Promise((r) => setImmediate(r));
+    // Pump A only so A receives Resolve and sends Disembargo, before B echoes it.
+    a.pump();
+    const duringEmbargo = promise.call(IFACE, 0, arg(2));
+    // Now disconnect before the Disembargo echoes back.
+    a.disconnect(new RpcError("link died", "disconnected"));
+    await expect(Promise.resolve(duringEmbargo)).rejects.toMatchObject({ type: "disconnected" });
+    await expect(Promise.resolve(first)).rejects.toMatchObject({ type: "disconnected" });
+    expect(local.seen).toEqual([1]);
+    void b;
+  });
 });
 
 describe("protocol errors", () => {
+  test("an unknown receiverLoopback embargo id aborts the connection", () => {
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.b, new Counter());
+    const b = new MessageBuilder();
+    const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+    root.setU16(0, Message.disembargo);
+    const dis = root.initStruct(0, 1, 1);
+    dis.setU16(4, 1); // receiverLoopback
+    dis.setU32(0, 999);
+    pair.a.send(b.toFlat());
+    vat.pump();
+    expect(vat.disconnected).toBeInstanceOf(RpcError);
+    expect(Message_which(CapnpMessage.fromFlat(pair.a.receive()!).root())).toBe(Message.abort);
+  });
+
+  test("senderLoopback Disembargo waits for a pending promise target before echoing", async () => {
+    const local = new Counter();
+    let resolveP!: (c: Client) => void;
+    let held!: Client;
+    const server: RpcServer = {
+      dispatch(_i, m, params, _r, ctx) {
+        if (m === 0) {
+          held = new Client(ctx.getCap(params.getP(0)));
+          return;
+        }
+        const promise = Client.fromPromise(new Promise<Client>((r) => (resolveP = r)));
+        ctx.setResultCap(ctx.initResults(0, 1), 0, promise.hook);
+      },
+    };
+    const { a, b, tb, settle } = link(undefined, server);
+    const boot = a.bootstrap();
+    boot.call(IFACE, 0, (p, cb) => cb.setCap(p, 0, Client.local(local).hook), 0, 1);
+    const reply = boot.call(IFACE, 1);
+    await settle();
+    const results = await reply;
+    const promise = new Client(results.getCap(results.content.getP(0)));
+    // Send senderLoopback while B's export for the promise has NOT yet resolved.
+    const emb = (a as unknown as { startEmbargo(t: unknown): { state: string } }).startEmbargo({
+      writeTarget(t: StructBuilder) {
+        t.setU16(4, 0);
+        t.setU32(0, 1); // export 1 is the unresolved promise on B
+      },
+    });
+    b.pump();
+    // B must wait instead of aborting.
+    expect(b.disconnected).toBeUndefined();
+    expect(tb.sent).not.toContain("abort");
+    resolveP(held);
+    await settle();
+    expect(emb.state).toBe("ok");
+    expect(b.disconnected).toBeUndefined();
+    promise.release();
+  });
   test("a senderLoopback Disembargo aimed at a local object aborts", async () => {
     const { a, b, settle, tb } = link(undefined, new Counter());
     a.bootstrap();

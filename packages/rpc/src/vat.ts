@@ -24,13 +24,17 @@ import {
 import {
   BrokenClient,
   CallBuilder,
+  callStreaming,
   CallState,
   Client,
   type CallOptions,
   type ClientHook,
   type ExceptionType,
+  isNullCap,
   LocalClient,
+  newNullCap,
   Payload,
+  RefHook,
   RpcError,
   type RpcServer,
   Settle,
@@ -289,6 +293,8 @@ interface ImportState {
   remoteRefs: number;
   /** Settles the promise client when a `Resolve` arrives. */
   resolver?: Settle<ClientHook>;
+  /** True once this import has ever been introduced as a `senderPromise`. */
+  wasPromise?: boolean;
 }
 
 /** A question this vat asked, from send until its Return and Finish. */
@@ -337,6 +343,39 @@ function innermost(hook: ClientHook): ClientHook {
   let h = hook;
   for (let r = h.getResolved(); r !== undefined; r = h.getResolved()) h = r;
   return h;
+}
+
+/**
+ * Prevents `PromiseClient.resolve` from misclassifying a `receiverHosted`
+ * export that already resolved back over this same connection as a regular
+ * remote capability, which would skip the required Tribble-race Disembargo.
+ */
+class TribbleRaceBlocker extends RefHook implements ClientHook {
+  readonly brand = TribbleRaceBlocker;
+  constructor(private readonly inner: ClientHook) {
+    super();
+  }
+  get brokenError(): RpcError | undefined {
+    return this.inner.brokenError;
+  }
+  getResolved(): undefined {
+    return undefined;
+  }
+  whenMoreResolved(): undefined {
+    return undefined;
+  }
+  call(interfaceId: bigint, methodId: number, params: Payload, opts?: CallOptions): CallState {
+    return this.inner.call(interfaceId, methodId, params, opts);
+  }
+  callStreaming(interfaceId: bigint, methodId: number, params: Payload): Promise<void> {
+    return callStreaming(this.inner, interfaceId, methodId, params);
+  }
+  flush(): Promise<void> {
+    return this.inner.flush?.() ?? Promise.resolve();
+  }
+  protected dispose(): void {
+    this.inner.release();
+  }
 }
 
 /** A single capability as a payload whose content is the capability. */
@@ -547,6 +586,10 @@ export class RpcConnection implements RemoteHost {
    */
   private writeDescriptor(hook: ClientHook, desc: StructBuilder): number | undefined {
     const inner = innermost(hook);
+    if (isNullCap(inner)) {
+      desc.setU16(OFF.capDescriptorUnion, CapDescriptor.none);
+      return undefined;
+    }
     if (inner.brand === this) {
       (inner as RpcClientHook).writeDescriptor(desc);
       return undefined;
@@ -558,6 +601,19 @@ export class RpcConnection implements RemoteHost {
       );
       desc.setU32(OFF.capDescriptorId, id);
     });
+  }
+
+  /**
+   * Unwrap resolved promises and, for this connection, unresolved
+   * `PromiseClient`s to their backing `ImportClient`/`PipelineClient` so
+   * a later `Disembargo` reflects on the original wire identity.
+   */
+  private innermostForExport(hook: ClientHook): ClientHook {
+    const inner = innermost(hook);
+    if (inner.brand === this && inner instanceof PromiseClient) {
+      return inner.getInnermostClient();
+    }
+    return inner;
   }
 
   /**
@@ -582,12 +638,22 @@ export class RpcConnection implements RemoteHost {
       (resolution) => {
         const slot = this.exports.get(exportId);
         if (slot === undefined || slot.hook !== promiseHook) return;
-        const target = innermost(resolution);
+        const target = this.innermostForExport(resolution);
         if (this.exportIdByHook.get(slot.hook) === exportId) this.exportIdByHook.delete(slot.hook);
         const old = slot.hook;
         slot.hook = target.addRef();
         slot.pendingResolve = false;
         old.release();
+        if (isNullCap(target)) {
+          send((resolve) => {
+            resolve.setU16(OFF.resolveUnion, Resolve.exception);
+            this.writeException(
+              resolve.initStruct(0, EXCEPTION_DWORDS, EXCEPTION_PWORDS),
+              target.brokenError,
+            );
+          });
+          return;
+        }
         send((resolve) => {
           resolve.setU16(OFF.resolveUnion, Resolve.cap);
           const desc = resolve.initStruct(0, CAP_DESCRIPTOR_DWORDS, CAP_DESCRIPTOR_PWORDS);
@@ -674,6 +740,7 @@ export class RpcConnection implements RemoteHost {
       importClient.release();
       return imp.appClient.addRef();
     }
+    imp.wasPromise = true;
     imp.resolver = new Settle<ClientHook>();
     const promise = new PromiseClient(this, importClient, imp.resolver, importId);
     imp.appClient = promise;
@@ -687,21 +754,30 @@ export class RpcConnection implements RemoteHost {
     if (this.gone === undefined && imp.remoteRefs > 0) this.sendRelease(importId, imp.remoteRefs);
   }
 
+  promiseDropped(importId: number, client: ClientHook): void {
+    const imp = this.imports.get(importId);
+    if (imp !== undefined && imp.appClient === client) imp.appClient = undefined;
+  }
+
   /** Make a hook from one entry of a received cap table. */
   private receiveCap(desc: Ptr): ClientHook {
     if (desc.kind !== PtrKind.Struct) {
-      return new BrokenClient(new RpcError("null capability descriptor"));
+      return newNullCap();
     }
     switch (CapDescriptor_which(desc)) {
+      case CapDescriptor.none:
+        return newNullCap();
       case CapDescriptor.senderHosted:
         return this.importCap(CapDescriptor_getSenderHosted(desc), false);
       case CapDescriptor.senderPromise:
         return this.importCap(CapDescriptor_getSenderPromise(desc), true);
       case CapDescriptor.receiverHosted: {
         const slot = this.exports.get(CapDescriptor_getReceiverHosted(desc));
-        return slot === undefined
-          ? new BrokenClient(new RpcError("descriptor names an export that does not exist"))
-          : slot.hook.addRef();
+        if (slot === undefined) {
+          return new BrokenClient(new RpcError("descriptor names an export that does not exist"));
+        }
+        const hook = slot.hook.addRef();
+        return hook.brand === this ? new TribbleRaceBlocker(hook) : hook;
       }
       case CapDescriptor.receiverAnswer: {
         const hook = this.pipelinedCap(CapDescriptor_getReceiverAnswer(desc));
@@ -1411,15 +1487,26 @@ export class RpcConnection implements RemoteHost {
   private handleResolve(resolve: Ptr): void {
     const id = Resolve_getPromiseId(resolve);
     const imp = this.imports.get(id);
+    if (imp !== undefined && imp.resolver === undefined && !imp.wasPromise && imp.importClient !== undefined) {
+      this.abort(new RpcError("Got Resolve for a non-promise import"));
+      return;
+    }
     const resolver = imp?.resolver;
     if (imp !== undefined) imp.resolver = undefined;
     if (Resolve_which(resolve) === Resolve.cap) {
-      const hook = this.receiveCap(Resolve_getCap(resolve));
+      const desc = Resolve_getCap(resolve);
+      if (desc.kind !== PtrKind.Struct || CapDescriptor_which(desc) === CapDescriptor.none) {
+        this.abort(new RpcError("Resolve contained CapDescriptor.none"));
+        return;
+      }
+      const hook = this.receiveCap(desc);
       // A promise nobody holds any more still sent us a reference.
       if (resolver === undefined) hook.release();
       else resolver.resolve(hook);
-    } else {
+    } else if (Resolve_which(resolve) === Resolve.exception) {
       resolver?.reject(readException(Resolve_getException(resolve)));
+    } else {
+      this.abort(new RpcError("Unknown Resolve type"));
     }
   }
 
@@ -1459,9 +1546,10 @@ export class RpcConnection implements RemoteHost {
       case Disembargo_context.receiverLoopback: {
         const id = Disembargo_context_getReceiverLoopback(context);
         const embargo = this.embargoes.get(id);
-        // An id we never issued is ignored rather than echoed, which
-        // would bounce forever between the two vats.
-        if (embargo === undefined) return;
+        if (embargo === undefined) {
+          this.abort(new RpcError("Invalid embargo ID in Disembargo.context.receiverLoopback"));
+          return;
+        }
         this.embargoes.delete(id);
         embargo.resolve();
         return;
@@ -1473,25 +1561,59 @@ export class RpcConnection implements RemoteHost {
           this.abort(new RpcError("Disembargo target does not exist"));
           return;
         }
-        const inner = innermost(hook);
-        if (inner.brand !== this) {
-          hook.release();
-          this.abort(
-            new RpcError("Disembargo senderLoopback sent to an object that does not point back"),
+        const finishLoopback = (resolved: ClientHook): void => {
+          if (this.gone !== undefined) {
+            resolved.release();
+            return;
+          }
+          const inner = innermost(resolved);
+          if (inner.brand !== this) {
+            resolved.release();
+            this.abort(
+              new RpcError("Disembargo senderLoopback sent to an object that does not point back"),
+            );
+            return;
+          }
+          const { b, root } = newMessage(Message.disembargo);
+          const out = root.initStruct(0, DISEMBARGO_DWORDS, DISEMBARGO_PWORDS);
+          (inner as RpcClientHook).writeTarget(
+            out.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS),
           );
+          resolved.release();
+          // `context` is a group, so it shares Disembargo's own data section
+          // rather than living behind a pointer.
+          out.setU16(OFF.disembargoContextUnion, Disembargo_context.receiverLoopback);
+          out.setU32(OFF.disembargoContextValue, id);
+          this.transport.send(b.toFlat());
+        };
+        const current = innermost(hook);
+        if (current.whenMoreResolved() === undefined) {
+          finishLoopback(hook);
           return;
         }
-        const { b, root } = newMessage(Message.disembargo);
-        const out = root.initStruct(0, DISEMBARGO_DWORDS, DISEMBARGO_PWORDS);
-        (inner as RpcClientHook).writeTarget(
-          out.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS),
-        );
-        hook.release();
-        // `context` is a group, so it shares Disembargo's own data section
-        // rather than living behind a pointer.
-        out.setU16(OFF.disembargoContextUnion, Disembargo_context.receiverLoopback);
-        out.setU32(OFF.disembargoContextValue, id);
-        this.transport.send(b.toFlat());
+        // Target is still a pending promise (for example behind an embargo on
+        // a middle hop); wait until it settles before checking and echoing.
+        void (async () => {
+          let h = hook;
+          try {
+            for (;;) {
+              const cur = innermost(h);
+              const more = cur.whenMoreResolved();
+              if (more === undefined) break;
+              const next = (await more).addRef();
+              h.release();
+              h = next;
+            }
+            finishLoopback(h);
+          } catch (e) {
+            h.release();
+            this.abort(
+              new RpcError(
+                `Disembargo target failed while resolving: ${e instanceof Error ? e.message : String(e)}`,
+              ),
+            );
+          }
+        })();
         return;
       }
       default:

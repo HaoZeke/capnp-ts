@@ -220,7 +220,7 @@ describe("disembargo", () => {
     expect(vat.disconnected).toBeDefined();
   });
 
-  test("receiverLoopback is absorbed rather than echoed", () => {
+  test("receiverLoopback for an unknown embargo id aborts rather than echoing", () => {
     const pair = new MemoryTransportPair();
     const vat = new RpcConnection(pair.b, new CountingServer());
 
@@ -233,7 +233,9 @@ describe("disembargo", () => {
     pair.a.send(b.toFlat());
     vat.pump();
 
-    // Echoing it would bounce forever between the two vats.
-    expect(pair.a.pending).toBe(0);
+    const frame = pair.a.receive();
+    expect(frame).not.toBeNull();
+    expect(Message_which(CapnpMessage.fromFlat(frame!).root())).toBe(Message.abort);
+    expect(vat.disconnected).toBeDefined();
   });
 });
