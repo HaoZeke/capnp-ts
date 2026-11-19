@@ -7,8 +7,21 @@ export { MemoryTransportPair, type Transport } from "./transport.ts";
 export { frameLength, StreamTransport } from "./socket.ts";
 export { RpcStream, StreamError } from "./stream.ts";
 export {
-  type Introduction,
-  RpcConnection,
+  BrokenClient,
+  CallBuilder,
+  type CallContext,
+  CallState,
+  Client,
+  type ClientHook,
+  type DispatchResult,
+  LocalClient,
+  newBrokenCap,
+  Payload,
+  type PipelineHook,
+  QueuedClient,
+  RpcError,
+  RpcPromise,
   type RpcServer,
-  Vat,
-} from "./vat.ts";
+  Settle,
+} from "./capability.ts";
+export { type Introduction, RpcConnection, Vat } from "./vat.ts";
