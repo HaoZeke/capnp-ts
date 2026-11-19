@@ -280,7 +280,7 @@ describe("capnp-ts CLI (encode, decode, convert, eval)", () => {
         bunProc.stdout.toString("utf-8"),
       );
     }
-  });
+  }, 60_000); // `capnp`, `bun`, and `node` exceed Bun's 5000 ms default on a slow CI runner.
 
   test.skipIf(!hasCapnp)(
     "differential parity against official capnp encode, decode, convert, and eval",
