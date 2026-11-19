@@ -79,10 +79,11 @@ kept: later sends and =Client.flush()= reject with it.
 On the serving side a method that declares itself streaming
 (=RpcServer.isStreaming=, or a =DispatchResult= with =streaming=) makes
 later calls wait for it, and its failure breaks the capability, so the
-error also reaches the next ordinary call. By default the window tracks
-=Transport.getSendBufferSize()= if supplied or adapts with
-=AdaptiveStreamWindow= (starting at 64 KiB); pass a fixed number or
-=WindowGetter= via the =streamWindow= option to override it.
+error also reaches the next ordinary call. The default window matches
+capnp-C++ two-party: =Transport.getSendBufferSize()= when the transport
+reports one, otherwise a fixed 64 KiB. =AdaptiveStreamWindow= is not the
+default; pass it, a fixed number, or another =WindowGetter= via the
+=streamWindow= option to opt in.
 
 * Membranes
 
