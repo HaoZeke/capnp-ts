@@ -21,13 +21,45 @@ describe("generic emit and cross-module type wiring", () => {
     expect(src).toContain("export type CapnpAnyPointer = Ptr;");
     expect(src).toContain("export type CapnpAnyStruct = Ptr;");
     expect(src).toContain("export type CapnpAnyList = Ptr;");
-    expect(src).toContain("export type Box_Ptr = Ptr;");
+    expect(src).toContain("export type CapnpBranded<T> = { readonly __capnpBrand?: T };");
+    expect(src).toContain("export type CapnpText = Ptr;");
+    expect(src).toContain(
+      "export type CapnpList<T = CapnpAnyPointer> = Ptr & CapnpBranded<[T]>;",
+    );
+    expect(src).toContain(
+      "export type Box_Ptr<T extends CapnpAnyPointer = CapnpAnyPointer> = Ptr & CapnpBranded<[T]>;",
+    );
+    expect(src).toContain(
+      "export type Nest_Ptr<T extends CapnpAnyPointer = CapnpAnyPointer> = Ptr & CapnpBranded<[T]>;",
+    );
+    expect(src).toContain("export type BoxUse_Ptr = Ptr;");
     expect(src).toContain('export const Box_typeParameters = ["T"] as const;');
     expect(src).toContain(
-      "export function Box_getValue<T extends CapnpAnyPointer = CapnpAnyPointer>(ptr: Ptr): T {",
+      "export function Box_getValue<T extends CapnpAnyPointer = CapnpAnyPointer>(ptr: Box_Ptr<T>): T {",
     );
     expect(src).toContain(
       "export function Box_setValue<T extends CapnpAnyPointer = CapnpAnyPointer>(ptr: StructBuilder, value: T): void {",
+    );
+    expect(src).toContain(
+      "export function BoxUse_getTextBox(ptr: Ptr): Box_Ptr<CapnpText> {",
+    );
+    expect(src).toContain(
+      "export function BoxUse_setTextBox(ptr: StructBuilder, value: Box_Ptr<CapnpText>): void {",
+    );
+    expect(src).toContain(
+      "export function BoxUse_getListBox(ptr: Ptr): Box_Ptr<CapnpList<CapnpText>> {",
+    );
+    expect(src).toContain(
+      "export function BoxUse_getBoxesAt(ptr: Ptr, index: number): Box_Ptr<CapnpText> {",
+    );
+    expect(src).toContain(
+      "export function BoxUse_getNest(ptr: Ptr): Nest_Ptr<CapnpText> {",
+    );
+    expect(src).toContain(
+      "export function Nest_getInner<T extends CapnpAnyPointer = CapnpAnyPointer>(ptr: Nest_Ptr<T>): Box_Ptr<T> {",
+    );
+    expect(src).toContain(
+      "export function Nest_getBoxesAt<T extends CapnpAnyPointer = CapnpAnyPointer>(ptr: Nest_Ptr<T>, index: number): Box_Ptr<T> {",
     );
     expect(src).toContain("export const BOX_USE_TEXT_BOX_TYPE = ");
     expect(src).toContain("brand{scope(");
