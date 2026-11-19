@@ -24,6 +24,12 @@
       "import": "./dist/canonical.js",
       "default": "./dist/canonical.js"
     },
+    "./schema": {
+      "bun": "./src/schema.ts",
+      "types": "./dist/schema.d.ts",
+      "import": "./dist/schema.js",
+      "default": "./dist/schema.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
