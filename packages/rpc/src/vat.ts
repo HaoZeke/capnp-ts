@@ -1281,6 +1281,9 @@ export class RpcConnection implements RemoteHost {
       );
       return;
     }
+    // The first claim consumes the redirected answer. A second claim of the
+    // same answer is a protocol error, as in capnp-C++.
+    other.resultsElsewhere = false;
     if (q.finished) {
       other.call.release();
       return;

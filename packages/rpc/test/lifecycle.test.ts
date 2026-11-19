@@ -1167,4 +1167,62 @@ describe("pipeline-only calls", () => {
     expect(factory.made[0]!.disposed).toBe(1);
     expect(vat.disconnected).toBeUndefined();
   });
+
+  test("a second takeFromOtherQuestion for the same answer aborts", () => {
+    const pair = new MemoryTransportPair();
+    const server = new Counter();
+    const a = new RpcConnection(pair.a, server);
+    const peer = pair.b;
+
+    peer.send(
+      frame((root) => {
+        root.setU16(0, Message.bootstrap);
+        root.initStruct(0, BOOTSTRAP_DWORDS, BOOTSTRAP_PWORDS).setU32(0, 1);
+      }),
+    );
+    a.pump();
+    peer.receive();
+
+    peer.send(
+      frame((root) => {
+        root.setU16(0, Message.call);
+        const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
+        call.setU32(0, 10);
+        call.setU16(6, Call_sendResultsTo.yourself);
+        const target = call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS);
+        target.setU16(4, MessageTarget.importedCap);
+        target.setU32(0, 0);
+        call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS).initStruct(0, 1, 0).setU32(0, 76);
+      }),
+    );
+    const first = a.sendBootstrap();
+    const second = a.sendBootstrap();
+    peer.receive();
+    peer.receive();
+    a.pump();
+    expect(server.seen).toEqual([76]);
+    const held = CapnpMessage.fromFlat(peer.receive()!).root();
+    expect(Return_which(Message_getReturn(held))).toBe(Return.resultsSentElsewhere);
+
+    const claim = (questionId: number): void => {
+      peer.send(
+        frame((root) => {
+          root.setU16(0, Message.return);
+          const r = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+          r.setU32(0, questionId);
+          r.setU16(6, Return.takeFromOtherQuestion);
+          r.setU32(8, 10);
+        }),
+      );
+    };
+    claim(first);
+    a.pump();
+    expect(a.disconnected).toBeUndefined();
+    expect(a.answerContent(first)?.getU32(0)).toBe(77);
+
+    claim(second);
+    a.pump();
+    expect(a.disconnected?.message).toContain("sendResultsTo.yourself");
+    expect(a.answerContent(first)?.getU32(0)).toBe(77);
+  });
 });
