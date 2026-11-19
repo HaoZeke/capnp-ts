@@ -668,4 +668,52 @@ describe("dynamic list builder storage", () => {
     expect([...dataList.get(0).asData()]).toEqual([9, 8, 7, 6]);
     expect([...dataList.get(1).asData()]).toEqual([1, 2, 3, 4]);
   });
+
+  test("bool set rejects pointer and void lists without writing", () => {
+    const b = new MessageBuilder();
+    const root = b.initRoot(0, 2);
+    const pointers = root.initPointerList(0, 1);
+    b.storeW(pointers.seg, pointers.word, 0xdeadbeef12345678n);
+    const boolOnPtr = DynamicList.Builder.fromResolvedOrphan(
+      b,
+      ListSchema.of(Type.BOOL),
+      b.resolveSlot(root.slot(0)),
+    );
+    const ptrBefore = b.loadW(pointers.seg, pointers.word);
+    expect(() => boolOnPtr.set(0, true)).toThrow(CapnpError);
+    try {
+      boolOnPtr.set(0, true);
+    } catch (e) {
+      expect(e).toBeInstanceOf(CapnpError);
+      expect((e as CapnpError).code).toBe("SCHEMA");
+    }
+    expect(b.loadW(pointers.seg, pointers.word)).toBe(ptrBefore);
+
+    root.initPrimList(1, ElemSize.Void, 4, 0);
+    const boolOnVoid = DynamicList.Builder.fromResolvedOrphan(
+      b,
+      ListSchema.of(Type.BOOL),
+      b.resolveSlot(root.slot(1)),
+    );
+    const segBefore = b.segBytes(0).slice();
+    expect(() => boolOnVoid.set(0, true)).toThrow(CapnpError);
+    try {
+      boolOnVoid.set(0, true);
+    } catch (e) {
+      expect((e as CapnpError).code).toBe("SCHEMA");
+    }
+    expect([...b.segBytes(0)]).toEqual([...segBefore]);
+
+    const bits = new MessageBuilder();
+    const bitRoot = bits.initRoot(0, 1);
+    const bitList = DynamicList.Builder.allocateAtSlot(
+      bits,
+      bitRoot.slot(0),
+      ListSchema.of(Type.BOOL),
+      3,
+    );
+    bitList.set(0, true);
+    expect(bitList.get(0).asBool()).toBe(true);
+    expect(bitList.get(1).asBool()).toBe(false);
+  });
 });

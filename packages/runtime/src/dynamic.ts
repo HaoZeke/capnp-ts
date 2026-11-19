@@ -2783,6 +2783,18 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
             "Schema mismatch: Found struct list where bit list was expected; upgrading boolean lists to structs is no longer supported.",
           );
         }
+        if (
+          this.esize !== ElemSize.Bit &&
+          this.esize !== ElemSize.Byte &&
+          this.esize !== ElemSize.TwoBytes &&
+          this.esize !== ElemSize.FourBytes &&
+          this.esize !== ElemSize.EightBytes
+        ) {
+          throw new CapnpError(
+            "SCHEMA",
+            "Schema mismatch: Expected a primitive list where bool elements can be stored.",
+          );
+        }
         // C++ ListReader::getDataElement<bool> ignores element step and reads
         // packed bits. Writes follow that layout.
         const b = val.asBool();
