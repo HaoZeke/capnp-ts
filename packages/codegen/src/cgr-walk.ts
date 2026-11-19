@@ -40,19 +40,18 @@ import {
   ElemSize,
   WireKind,
   WORD_BYTES,
-} from "../../runtime/src/kinds.ts";
-import { loadU32, loadU64 } from "../../runtime/src/endian.ts";
-import {
+  loadU32,
+  loadU64,
   wpKind,
   wpOffset,
   wpStructDwords,
   wpStructPwords,
   wpListEsize,
   wpListCount,
-} from "../../runtime/src/pointer.ts";
-import type { Ptr } from "../../runtime/src/message.ts";
-import { MessageBuilder } from "../../runtime/src/builder.ts";
-import { deepCopyPtrToSlot } from "../../runtime/src/copy.ts";
+  MessageBuilder,
+  deepCopyPtrToSlot,
+} from "@haozeke/capnp";
+import type { Ptr } from "@haozeke/capnp";
 
 // ---------------------------------------------------------------------------
 // Rich AST types (schema.capnp Node / Field / Type / Enumerant)
@@ -383,7 +382,7 @@ export function summaryFromAst(ast: CgrAst): CgrSummary {
  * enumerants. Uses Message.fromFlat (far pointers, multi-segment).
  */
 export async function walkCgr(bytes: Uint8Array): Promise<CgrAst> {
-  const { Message } = await import("../../runtime/src/message.ts");
+  const { Message } = await import("@haozeke/capnp");
   // Schema graphs are deep and wide, so both budgets are raised at open
   // rather than mutated afterwards: depthLimit is readonly on Message.
   const msg = Message.fromFlat(bytes, {
