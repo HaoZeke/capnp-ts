@@ -30,6 +30,7 @@ const goldenDir = join(here, "golden");
 const pyDir = join(goldenDir, "pycapnp");
 const py = join(repoRoot, ".venv-pycapnp/bin/python");
 const script = join(repoRoot, "scripts/pycapnp_interop.py");
+const requirePycapnp = process.env.CAPNP_REQUIRE_PYCAPNP === "1";
 
 function load(name: string): Uint8Array {
   return new Uint8Array(readFileSync(join(goldenDir, name)));
@@ -90,7 +91,9 @@ function decodeAbWithTs(bytes: Uint8Array) {
   return out;
 }
 
-describe("pycapnp interop", () => {
+const pycapnpDescribe = hasPycapnp() || requirePycapnp ? describe : describe.skip;
+
+pycapnpDescribe("pycapnp interop", () => {
   test("venv and fixtures present", () => {
     expect(hasPycapnp()).toBe(true);
     expect(existsSync(join(pyDir, "addressbook_pycapnp.bin"))).toBe(true);

@@ -45,6 +45,8 @@ jobs:
           .venv-pycapnp/bin/python -c "import capnp; print('pycapnp ok')"
 
       - name: Test
+        env:
+          CAPNP_REQUIRE_PYCAPNP: "1"
         run: bun test
 
       - name: Typecheck packages
