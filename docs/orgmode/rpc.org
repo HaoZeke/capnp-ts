@@ -74,7 +74,8 @@ cannot run ahead of the receiver. =Client.callStreaming= (and =RpcStream=)
 sends at once and resolves when the bytes in flight (each message's size,
 until its =Return= comes back) are within the window plus the largest
 message sent, as capnp-C++'s flow controller does. The first failure is
-kept: later sends and =Client.flush()= reject with it.
+kept and later sends reject with it. =Client.flush()= is =waitAllAcked=,
+which still resolves once those acks settle.
 
 On the serving side a method that declares itself streaming
 (=RpcServer.isStreaming=, or a =DispatchResult= with =streaming=) makes
@@ -83,7 +84,9 @@ error also reaches the next ordinary call. The default window matches
 capnp-C++ two-party: =Transport.getSendBufferSize()= when the transport
 reports one, otherwise a fixed 64 KiB. =AdaptiveStreamWindow= is not the
 default; pass it, a fixed number, or another =WindowGetter= via the
-=streamWindow= option to opt in.
+=streamWindow= option to opt in. Once a stream call has failed, later
+sends reject with that error and =waitAllAcked= still resolves when the
+outstanding acks settle.
 
 * Membranes
 

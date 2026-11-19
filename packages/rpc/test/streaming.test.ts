@@ -107,13 +107,17 @@ describe("flow controller", () => {
     expect(flow.inFlight).toBe(0);
   });
 
-  test("after a failure every later send rejects and so does waitAllAcked", async () => {
+  test("after a failure later sends reject and waitAllAcked still resolves", async () => {
     const flow = new WindowFlowController(() => 1000);
     const a = ack();
     void flow.send(10, a);
     a.reject(new RpcError("boom"));
-    await expect(flow.send(10, ack())).rejects.toThrow("boom");
-    await expect(flow.waitAllAcked()).rejects.toThrow("boom");
+    const b = ack();
+    await expect(flow.send(10, b)).rejects.toThrow("boom");
+    expect(flow.inFlight).toBe(10);
+    b.resolve(undefined);
+    await flow.waitAllAcked();
+    expect(flow.inFlight).toBe(0);
   });
 
   test("a sender blocked when a call fails is released with the failure", async () => {
@@ -278,12 +282,12 @@ describe("streaming over a connection", () => {
     clearInterval(timer);
 
     // Writes 0 to 2 were accepted; the 3rd failed and broke the capability.
+    // finish() is waitAllAcked, which resolves once the acks settle.
     expect(results.slice(0, 3).every((r) => r.status === "fulfilled")).toBe(true);
-    const failures = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
-    expect(failures.length).toBeGreaterThan(0);
-    for (const f of failures) expect(f.reason).toMatchObject({ message: "disk full" });
-    expect(results[results.length - 2]!.status).toBe("rejected");
+    expect(results[results.length - 2]!.status).toBe("fulfilled");
     expect(results[results.length - 1]!.status).toBe("rejected");
+    const failures = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+    for (const f of failures) expect(f.reason).toMatchObject({ message: "disk full" });
     // After the failure the server did no more writes.
     expect(sink.writes).toEqual([0, 1, 2, 3]);
   });
@@ -294,7 +298,8 @@ describe("streaming over a connection", () => {
     void stream.send(IFACE, WRITE, chunk(0, 8), 1, 1).catch(() => {});
     await settle();
     await expect(stream.send(IFACE, WRITE, chunk(1, 8), 1, 1)).rejects.toThrow("disk full");
-    await expect(stream.finish()).rejects.toThrow("disk full");
+    await settle();
+    await stream.finish();
   });
 
   test("streaming to a local capability resolves when the call returns", async () => {
@@ -331,7 +336,7 @@ describe("streaming over a connection", () => {
     openGate();
     await settle();
     await Promise.allSettled(sends);
-    await expect(stream.finish()).rejects.toThrow("disk full");
+    await stream.finish();
     await expect(stream.send(IFACE, WRITE, chunk(4, 16), 1, 1)).rejects.toThrow("disk full");
   });
 });
