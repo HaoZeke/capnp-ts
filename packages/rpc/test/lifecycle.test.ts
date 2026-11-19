@@ -1112,3 +1112,59 @@ describe("promise chains shorten", () => {
     expect(b.disconnected).toBeUndefined();
   });
 });
+
+describe("pipeline-only calls", () => {
+  const frame = (fill: (root: StructBuilder) => void): Uint8Array => {
+    const b = new MessageBuilder();
+    fill(b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS));
+    return b.toFlat();
+  };
+
+  test("onlyPromisePipeline exports nothing and sends no Return", () => {
+    const factory = new Factory();
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.a, factory);
+    const peer = pair.b;
+
+    peer.send(
+      frame((root) => {
+        root.setU16(0, Message.bootstrap);
+        root.initStruct(0, BOOTSTRAP_DWORDS, BOOTSTRAP_PWORDS).setU32(0, 1);
+      }),
+    );
+    vat.pump();
+    expect(peer.receive()).not.toBeNull();
+    expect(vat.liveExports()).toEqual([0]);
+
+    peer.send(
+      frame((root) => {
+        root.setU16(0, Message.call);
+        const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
+        call.setU32(0, 0x80000000);
+        call.setBool(130, true);
+        const target = call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS);
+        target.setU16(4, MessageTarget.importedCap);
+        target.setU32(0, 0);
+        call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+      }),
+    );
+    vat.pump();
+    expect(peer.receive()).toBeNull();
+    expect(vat.liveExports()).toEqual([0]);
+    expect(factory.made[0]!.disposed).toBe(0);
+
+    peer.send(
+      frame((root) => {
+        root.setU16(0, Message.finish);
+        const fin = root.initStruct(0, 1, 0);
+        fin.setU32(0, 0x80000000);
+        fin.setBool(32, false, true);
+      }),
+    );
+    vat.pump();
+    expect(peer.receive()).toBeNull();
+    expect(vat.liveExports()).toEqual([0]);
+    expect(factory.made[0]!.disposed).toBe(1);
+    expect(vat.disconnected).toBeUndefined();
+  });
+});
