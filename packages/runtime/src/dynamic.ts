@@ -3215,9 +3215,11 @@ export function upgradeDynamicRoot(
       ? Math.min(srcPtr.dwords * WORD_BYTES, (srcPtr.dataBits + 7) >>> 3)
       : srcPtr.dwords * WORD_BYTES;
   if (copyBytes > 0) {
+    const srcSeg = srcPtr.msg.segs[srcPtr.seg]!;
+    const srcOff = srcPtr.word * WORD_BYTES + (srcPtr.bodyByte || 0);
     builder
       .segBytes(sb.seg)
-      .set(srcPtr.dataBytes().subarray(0, copyBytes), sb.word * WORD_BYTES);
+      .set(srcSeg.data.subarray(srcOff, srcOff + copyBytes), sb.word * WORD_BYTES);
   }
   for (let k = 0; k < srcPtr.pwords; k++) {
     deepCopyPtrToSlot(builder, sb.slot(k), srcPtr.getP(k), 0);
