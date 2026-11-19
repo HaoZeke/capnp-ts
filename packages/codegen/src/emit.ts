@@ -13,6 +13,7 @@
  */
 
 import type {
+  BrandAst,
   CgrAst,
   FieldAst,
   NodeAst,
@@ -197,6 +198,134 @@ export function nodesForFile(ast: CgrAst, fileId: bigint): NodeAst[] {
   return ast.nodes.filter((n) => ids.has(n.id) && n.which !== "file");
 }
 
+type ModuleEmitContext = {
+  byId: Map<bigint, NodeAst>;
+  ownerFileByNodeId: Map<bigint, bigint>;
+  currentFileId: bigint;
+  importAliases: Map<bigint, string>;
+};
+
+function buildOwnerFileMap(ast: CgrAst, byId: Map<bigint, NodeAst>): Map<bigint, bigint> {
+  const memo = new Map<bigint, bigint>();
+  const resolve = (id: bigint): bigint => {
+    const cached = memo.get(id);
+    if (cached !== undefined) return cached;
+    const n = byId.get(id);
+    if (!n) return 0n;
+    if (n.which === "file") {
+      memo.set(id, n.id);
+      return n.id;
+    }
+    const owner = resolve(n.scopeId);
+    memo.set(id, owner);
+    return owner;
+  };
+  for (const n of ast.nodes) resolve(n.id);
+  return memo;
+}
+
+function collectReferencedTypeIds(t: TypeAst, out: Set<bigint>): void {
+  if (t.which === "list") {
+    collectReferencedTypeIds(t.elementType, out);
+    return;
+  }
+  if (t.which === "struct" || t.which === "interface" || t.which === "enum") {
+    out.add(t.typeId);
+    if (t.brand) {
+      for (const scope of t.brand.scopes) {
+        for (const b of scope.bind ?? []) {
+          if (b) collectReferencedTypeIds(b, out);
+        }
+      }
+    }
+  }
+}
+
+function collectNodeTypeRefs(node: NodeAst, out: Set<bigint>): void {
+  if (node.struct) {
+    for (const f of node.struct.fields) {
+      if (f.slot) collectReferencedTypeIds(f.slot.type, out);
+    }
+  }
+  if (node.const) {
+    collectReferencedTypeIds(node.const.type, out);
+  }
+}
+
+function ptrTypeForStruct(typeId: bigint, ctx: ModuleEmitContext): string {
+  const n = ctx.byId.get(typeId);
+  if (!n) return "Ptr";
+  const base = `${shortTypeName(n.displayName)}_Ptr`;
+  const owner = ctx.ownerFileByNodeId.get(typeId) ?? ctx.currentFileId;
+  if (owner === ctx.currentFileId) return base;
+  const alias = ctx.importAliases.get(owner);
+  return alias ? `${alias}.${base}` : base;
+}
+
+function ptrTypeForInterface(typeId: bigint, ctx: ModuleEmitContext): string {
+  const n = ctx.byId.get(typeId);
+  if (!n) return "Ptr";
+  const base = `${shortTypeName(n.displayName)}_Capability`;
+  const owner = ctx.ownerFileByNodeId.get(typeId) ?? ctx.currentFileId;
+  if (owner === ctx.currentFileId) return base;
+  const alias = ctx.importAliases.get(owner);
+  return alias ? `${alias}.${base}` : base;
+}
+
+function brandLiteral(brand: BrandAst | undefined): string {
+  if (!brand || brand.scopes.length === 0) return "[]";
+  const scopes = brand.scopes
+    .map((scope) => {
+      if (scope.which === "inherit") {
+        return `{ scopeId: 0x${scope.scopeId.toString(16)}n, which: "inherit" }`;
+      }
+      const bind = (scope.bind ?? [])
+        .map((b) => (b ? JSON.stringify(formatType(b)) : "null"))
+        .join(", ");
+      return (
+        `{ scopeId: 0x${scope.scopeId.toString(16)}n, which: "bind", ` +
+        `bind: [${bind}] }`
+      );
+    })
+    .join(", ");
+  return `[${scopes}]`;
+}
+
+function anyPointerTsType(
+  t: TypeAst & { which: "anyPointer" },
+  owner: NodeAst,
+  byId: Map<bigint, NodeAst>,
+): { typeName: string; genericParam?: string } {
+  if (t.constraint.which === "parameter") {
+    const scopeNode = byId.get(t.constraint.scopeId);
+    const rawName =
+      scopeNode?.parameters?.[t.constraint.parameterIndex] ??
+      `T${t.constraint.parameterIndex}`;
+    const paramName = ident(rawName) || `T${t.constraint.parameterIndex}`;
+    return {
+      typeName: paramName,
+      genericParam: `${paramName} extends CapnpAnyPointer = CapnpAnyPointer`,
+    };
+  }
+  if (t.constraint.which === "implicitMethodParameter") {
+    const paramName = `M${t.constraint.parameterIndex}`;
+    return {
+      typeName: paramName,
+      genericParam: `${paramName} extends CapnpAnyPointer = CapnpAnyPointer`,
+    };
+  }
+  switch (t.constraint.anyKind) {
+    case "struct":
+      return { typeName: "CapnpAnyStruct" };
+    case "list":
+      return { typeName: "CapnpAnyList" };
+    case "capability":
+      return { typeName: "CapnpCapability" };
+    default:
+      return { typeName: "CapnpAnyPointer" };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Emit one module
 // ---------------------------------------------------------------------------
@@ -303,8 +432,10 @@ function emitAnnotation(node: NodeAst, lines: string[]): void {
 }
 
 function emitFieldGetter(
+  owner: NodeAst,
   typeName: string,
   field: FieldAst,
+  ctx: ModuleEmitContext,
   lines: string[],
 ): void {
   if (!field.slot) return;
@@ -315,6 +446,17 @@ function emitFieldGetter(
   const dv = field.slot.defaultValue;
   const dfltExpr = scalarDefaultExpr(t.which, dv);
   const byteOff = dataByteOffset(t.which, off);
+  const typeFmt = formatType(t);
+  if (
+    typeFmt.includes("brand{") ||
+    typeFmt.startsWith("AnyPointer(parameter") ||
+    typeFmt.startsWith("AnyPointer(implicitMethodParameter")
+  ) {
+    lines.push(
+      `export const ${upperSnake(typeName)}_${upperSnake(fname)}_TYPE = ${JSON.stringify(typeFmt)} as const;`,
+      ``,
+    );
+  }
 
   switch (t.which) {
     case "void":
@@ -452,24 +594,45 @@ function emitFieldGetter(
     case "list":
     case "struct":
     case "interface":
-    case "anyPointer":
+    case "anyPointer": {
+      let retType = "Ptr";
+      let generic = "";
+      if (t.which === "struct") {
+        retType = ptrTypeForStruct(t.typeId, ctx);
+      } else if (t.which === "interface") {
+        retType = ptrTypeForInterface(t.typeId, ctx);
+      } else if (t.which === "anyPointer") {
+        const anyTy = anyPointerTsType(t, owner, ctx.byId);
+        retType = anyTy.typeName;
+        if (anyTy.genericParam) generic = `<${anyTy.genericParam}>`;
+      }
       lines.push(
-        `export function ${fn}(ptr: Ptr): Ptr {`,
-        `  return ptr.getP(${off});`,
+        `export function ${fn}${generic}(ptr: Ptr): ${retType} {`,
+        `  return ptr.getP(${off}) as ${retType};`,
         `}`,
         ``,
       );
       if (t.which === "list") {
         // Element access helpers for List(Struct|Text|Data).
         const elem = t.elementType;
-        if (elem.which === "struct" || elem.which === "list") {
+        if (
+          elem.which === "struct" ||
+          elem.which === "list" ||
+          elem.which === "interface"
+        ) {
+          const elemType =
+            elem.which === "struct"
+              ? ptrTypeForStruct(elem.typeId, ctx)
+              : elem.which === "interface"
+                ? ptrTypeForInterface(elem.typeId, ctx)
+                : "Ptr";
           lines.push(
             `export function ${fn}Len(ptr: Ptr): number {`,
             `  return ptr.getP(${off}).listLen();`,
             `}`,
             ``,
-            `export function ${fn}At(ptr: Ptr, index: number): Ptr {`,
-            `  return ptr.getP(${off}).listGetP(index);`,
+            `export function ${fn}At(ptr: Ptr, index: number): ${elemType} {`,
+            `  return ptr.getP(${off}).listGetP(index) as ${elemType};`,
             `}`,
             ``,
           );
@@ -489,16 +652,18 @@ function emitFieldGetter(
         }
       }
       return;
+    }
     default:
       return;
   }
 }
 
 function emitFieldSetter(
+  owner: NodeAst,
   typeName: string,
   field: FieldAst,
   discriminantByte: number | undefined,
-  byId: Map<bigint, NodeAst>,
+  ctx: ModuleEmitContext,
   lines: string[],
 ): void {
   if (!field.slot) return;
@@ -584,8 +749,11 @@ function emitFieldSetter(
       );
       return;
     case "struct": {
-      emit(`ptr: StructBuilder, value: Ptr`, `ptr.setP(${off}, value);`);
-      const target = byId.get(t.typeId)?.struct;
+      emit(
+        `ptr: StructBuilder, value: ${ptrTypeForStruct(t.typeId, ctx)}`,
+        `ptr.setP(${off}, value);`,
+      );
+      const target = ctx.byId.get(t.typeId)?.struct;
       if (target) {
         lines.push(
           `export function ${initFn}(ptr: StructBuilder): StructBuilder {`,
@@ -600,7 +768,8 @@ function emitFieldSetter(
     case "list": {
       emit(`ptr: StructBuilder, value: Ptr`, `ptr.setP(${off}, value);`);
       const elem = t.elementType;
-      const target = elem.which === "struct" ? byId.get(elem.typeId)?.struct : undefined;
+      const target =
+        elem.which === "struct" ? ctx.byId.get(elem.typeId)?.struct : undefined;
       if (target) {
         lines.push(
           `export function ${initFn}(ptr: StructBuilder, count: number): StructBuilder {`,
@@ -613,9 +782,23 @@ function emitFieldSetter(
       return;
     }
     case "interface":
-    case "anyPointer":
-      emit(`ptr: StructBuilder, value: Ptr`, `ptr.setP(${off}, value);`);
+      emit(
+        `ptr: StructBuilder, value: ${ptrTypeForInterface(t.typeId, ctx)}`,
+        `ptr.setP(${off}, value);`,
+      );
       return;
+    case "anyPointer": {
+      const anyTy = anyPointerTsType(t, owner, ctx.byId);
+      const generic = anyTy.genericParam ? `<${anyTy.genericParam}>` : "";
+      lines.push(
+        `export function ${fn}${generic}(ptr: StructBuilder, value: ${anyTy.typeName}): void {`,
+        ...select,
+        `  ptr.setP(${off}, value);`,
+        `}`,
+        ``,
+      );
+      return;
+    }
     default:
       return;
   }
@@ -633,7 +816,7 @@ function emitFieldSetter(
  */
 function emitInterface(
   node: NodeAst,
-  byId: Map<bigint, NodeAst>,
+  ctx: ModuleEmitContext,
   lines: string[],
 ): void {
   const methods = node.methods;
@@ -644,12 +827,17 @@ function emitInterface(
   lines.push(
     `/** Interface ${node.displayName}. */`,
     `export const ${upper}_INTERFACE_ID = 0x${node.id.toString(16)}n;`,
+    `export type ${typeName}_Capability = Ptr;`,
     ``,
   );
+  if (node.parameters && node.parameters.length > 0) {
+    const params = node.parameters.map((p) => JSON.stringify(p)).join(", ");
+    lines.push(`export const ${typeName}_typeParameters = [${params}] as const;`, ``);
+  }
 
   // Method table: ordinal, and the shape of each struct the call moves.
   const dims = (id: bigint): { dw: number; pw: number } => {
-    const n = byId.get(id);
+    const n = ctx.byId.get(id);
     return {
       dw: n?.struct?.dataWordCount ?? 0,
       pw: n?.struct?.pointerCount ?? 0,
@@ -749,7 +937,7 @@ function emitInterface(
 
 function emitStruct(
   node: NodeAst,
-  byId: Map<bigint, NodeAst>,
+  ctx: ModuleEmitContext,
   lines: string[],
 ): void {
   const s = node.struct;
@@ -766,6 +954,11 @@ function emitStruct(
   lines.push(`export const ${upper}_PWORDS = ${s.pointerCount};`);
   lines.push(`export const ${typeName}_dataWordCount = ${s.dataWordCount};`);
   lines.push(`export const ${typeName}_pointerCount = ${s.pointerCount};`);
+  lines.push(`export type ${typeName}_Ptr = Ptr;`);
+  if (node.parameters && node.parameters.length > 0) {
+    const params = node.parameters.map((p) => JSON.stringify(p)).join(", ");
+    lines.push(`export const ${typeName}_typeParameters = [${params}] as const;`);
+  }
 
   let discriminantByte: number | undefined;
   if (s.discriminantCount > 0) {
@@ -814,8 +1007,8 @@ function emitStruct(
       );
       continue;
     }
-    emitFieldGetter(typeName, f, lines);
-    emitFieldSetter(typeName, f, discriminantByte, byId, lines);
+    emitFieldGetter(node, typeName, f, ctx, lines);
+    emitFieldSetter(node, typeName, f, discriminantByte, ctx, lines);
   }
 }
 
@@ -837,8 +1030,45 @@ export function emitModuleSource(
     resolvedId === 0n
       ? ast.nodes.filter((n) => n.which !== "file")
       : nodesForFile(ast, resolvedId);
+  // Every node, not just emitted ones: field and method types can refer to
+  // imported nodes whose dimensions or aliases are still needed.
+  const byId = new Map(ast.nodes.map((n) => [n.id, n]));
+  const ownerFileByNodeId = buildOwnerFileMap(ast, byId);
+  const requestedById = new Map(ast.requestedFiles.map((rf) => [rf.id, rf.filename]));
+
+  const referencedTypeIds = new Set<bigint>();
+  for (const n of nodes) collectNodeTypeRefs(n, referencedTypeIds);
+
+  const externalImports: Array<{ schemaPath: string; alias: string }> = [];
+  const importAliases = new Map<bigint, string>();
+  for (const typeId of referencedTypeIds) {
+    const owner = ownerFileByNodeId.get(typeId);
+    if (!owner || owner === 0n || owner === resolvedId) continue;
+    if (importAliases.has(owner)) continue;
+    const importSchema = requestedById.get(owner);
+    if (!importSchema) continue;
+    const alias = `__capnp_${owner.toString(16)}`;
+    importAliases.set(owner, alias);
+    externalImports.push({ schemaPath: importSchema, alias });
+  }
+  externalImports.sort((a, b) => a.schemaPath.localeCompare(b.schemaPath));
+
+  const ctx: ModuleEmitContext = {
+    byId,
+    ownerFileByNodeId,
+    currentFileId: resolvedId,
+    importAliases,
+  };
+
   const needsMessageImport = nodes.some(
     (n) => n.which === "const" && !!n.const && isPointerValue(n.const.value),
+  );
+  const needsAnyPointerWrappers = nodes.some(
+    (n) =>
+      n.which === "struct" &&
+      (n.struct?.fields ?? []).some(
+        (f) => f.slot?.type.which === "anyPointer",
+      ),
   );
 
   const lines: string[] = [];
@@ -870,6 +1100,11 @@ export function emitModuleSource(
   if (needsMessageImport) {
     lines.push(`import { Message } from "@haozeke/capnp";`);
   }
+  for (const imp of externalImports) {
+    lines.push(
+      `import type * as ${imp.alias} from ${JSON.stringify(`./${outputNameForSchema(imp.schemaPath)}`)};`,
+    );
+  }
   lines.push(``);
   lines.push(
     `export const __capnpcTsMeta = {`,
@@ -881,11 +1116,15 @@ export function emitModuleSource(
     `} as const;`,
     ``,
   );
-
-  // Every node, not just the emitted ones: field and method types can be
-  // implicit or imported nodes whose dimensions are needed by generated
-  // builder helpers and interface stubs.
-  const byId = new Map(ast.nodes.map((n) => [n.id, n]));
+  if (needsAnyPointerWrappers) {
+    lines.push(
+      `export type CapnpAnyPointer = Ptr;`,
+      `export type CapnpAnyStruct = Ptr;`,
+      `export type CapnpAnyList = Ptr;`,
+      `export type CapnpCapability = Ptr;`,
+      ``,
+    );
+  }
 
   // Enums first (referenced by struct field comments / types).
   for (const n of nodes) {
@@ -898,14 +1137,13 @@ export function emitModuleSource(
     if (n.which === "annotation") emitAnnotation(n, lines);
   }
   for (const n of nodes) {
-    if (n.which === "struct") emitStruct(n, byId, lines);
+    if (n.which === "struct") emitStruct(n, ctx, lines);
   }
 
   for (const n of nodes) {
-    if (n.which === "interface") emitInterface(n, byId, lines);
+    if (n.which === "interface") emitInterface(n, ctx, lines);
   }
 
-  // Consts and annotations are not emitted.
   return lines.join("\n");
 }
 
