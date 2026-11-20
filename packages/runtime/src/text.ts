@@ -77,11 +77,10 @@ export function formatKjFloat32(v: number): string {
   // fewer digits would round-trip in JavaScript.
   if (Math.abs(f) < 1.1754943508222875e-38) return formatCPrintfG(f, 8);
 
-  for (const prec of [6, 7, 8, 9]) {
-    const s = formatCPrintfG(f, prec);
-    if (Math.fround(Number(s)) === f) return s;
-  }
-  return formatCPrintfG(f, 9);
+  // kj::FloatToBuffer tries FLT_DIG (6) digits, then FLT_DIG + 2 (8) only.
+  const s = formatCPrintfG(f, 6);
+  if (Math.fround(Number(s)) === f) return s;
+  return formatCPrintfG(f, 8);
 }
 
 /** Format a Float64 matching `kj::str(double)`. */

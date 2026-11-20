@@ -248,6 +248,50 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
     }
     expect(mismatches).toEqual([]);
   });
+
+  test("formatKjFloat32 tries 6 then 8 significant digits like kj::FloatToBuffer", () => {
+    expect(formatKjFloat32(Math.fround(1.0000040531158447))).toBe("1.0000041");
+    expect(formatKjFloat32(Math.fround(-9851.2763671875))).toBe("-9851.2764");
+    expect(formatKjFloat32(Math.fround(9048322736128))).toBe("9.0483227e12");
+    expect(formatKjFloat32(Math.fround(9080.787109375))).toBe("9080.7871");
+    expect(formatKjFloat32(Math.fround(0.00007064244709908962))).toBe("7.0642447e-05");
+    expect(formatKjFloat32(Math.fround(0.1))).toBe("0.1");
+    expect(formatKjFloat32(16777216)).toBe("16777216");
+  });
+
+  test.skipIf(!hasCapnp)("Float32 text output matches capnp decode", () => {
+    const ksLoader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const ks = ksLoader.resolveStruct("KitchenSink");
+    const ksFile = join(repoRoot, "schema/dynamic-kitchen.capnp");
+    const values = [
+      1.0000040531158447,
+      -9851.2763671875,
+      9048322736128,
+      9080.787109375,
+      0.00007064244709908962,
+      -3.375497066137641e-29,
+      5.963763791567561e-26,
+      -2.7288819052287613e36,
+      61558331801600,
+      0.1,
+      16777216,
+      1e-45,
+    ];
+    for (const v of values) {
+      const cliEnc = spawnSync("capnp", ["encode", ksFile, "KitchenSink"], {
+        input: Buffer.from(`(f32 = ${v})`, "utf-8"),
+      });
+      expect(cliEnc.status).toBe(0);
+      const cliDec = spawnSync("capnp", ["decode", "--short", ksFile, "KitchenSink"], {
+        input: cliEnc.stdout,
+        encoding: "utf8",
+      });
+      const m = /f32 = ([^,)]*)/.exec(cliDec.stdout);
+      const reader = DynamicStruct.fromMessage(Message.fromFlat(new Uint8Array(cliEnc.stdout)), ks);
+      expect(formatKjFloat32(reader.get("f32").asFloat32())).toBe(m![1]!);
+    }
+  });
+
   test.skipIf(!hasCapnp)(
     "Text escapes that are not UTF-8 keep their raw bytes like capnp encode",
     () => {
