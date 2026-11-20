@@ -244,6 +244,43 @@ describe("canonical form with empty trailing segments", () => {
     expect(isCanonical(Message.fromSegments([one, empty, one]))).toBe(true);
     expect(isCanonical(Message.fromSegments([one, one]))).toBe(false);
   });
+
+  test("zero-width composite lists require a zero content word count", () => {
+    const valid = Message.fromSegments([
+      words(wpMakeList(0, ElemSize.Composite, 0), wpMakeStruct(3, 0, 0)),
+    ]);
+    expect(isCanonical(valid)).toBe(true);
+    const bad = Message.fromSegments([
+      words(wpMakeList(0, ElemSize.Composite, 1), wpMakeStruct(3, 0, 0)),
+    ]);
+    expect(isCanonical(bad)).toBe(false);
+    // In-bounds: list claims 1 content word, tag has 0-word elements, next field uses word 4.
+    const inBoundsBad = Message.fromSegments([
+      words(
+        wpMakeStruct(0, 0, 2),
+        wpMakeList(1, ElemSize.Composite, 1),
+        wpMakeStruct(1, 1, 0),
+        wpMakeStruct(3, 0, 0),
+        1n,
+      ),
+    ]);
+    expect(isCanonical(inBoundsBad)).toBe(false);
+  });
+
+  test("isCanonical enforces the message depthLimit like capnp 1.4.0", () => {
+    expect(isCanonical(Message.fromSegments([words(0n)], { depthLimit: 0 }))).toBe(true);
+    expect(() =>
+      isCanonical(Message.fromSegments([words(wpMakeStruct(-1, 0, 0))], { depthLimit: 0 })),
+    ).toThrow(CapnpError);
+    const nested = words(wpMakeStruct(0, 0, 1), wpMakeStruct(0, 1, 0), 1n);
+    expect(() => isCanonical(Message.fromSegments([nested], { depthLimit: 1 }))).toThrow(
+      CapnpError,
+    );
+    expect(isCanonical(Message.fromSegments([nested], { depthLimit: 2 }))).toBe(true);
+    const comp = words(wpMakeList(0, ElemSize.Composite, 1), wpMakeStruct(1, 1, 0), 1n);
+    expect(() => isCanonical(Message.fromSegments([comp], { depthLimit: 1 }))).toThrow(CapnpError);
+    expect(isCanonical(Message.fromSegments([comp], { depthLimit: 2 }))).toBe(true);
+  });
 });
 
 describe("text format against capnp 1.4.0", () => {
