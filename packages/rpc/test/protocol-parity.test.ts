@@ -54,6 +54,8 @@ import {
   MessageTarget,
   PAYLOAD_DWORDS,
   PAYLOAD_PWORDS,
+  PROVIDE_DWORDS,
+  PROVIDE_PWORDS,
   RESOLVE_DWORDS,
   RESOLVE_PWORDS,
   Resolve,
@@ -88,6 +90,101 @@ function frame(fill: (root: StructBuilder) => void): Uint8Array {
   return b.toFlat();
 }
 
+const nextTurn = (): Promise<void> => new Promise((res) => setImmediate(res));
+
+function bootstrapFrame(questionId: number): Uint8Array {
+  return frame((root) => {
+    root.setU16(0, Message.bootstrap);
+    root.initStruct(0, BOOTSTRAP_DWORDS, BOOTSTRAP_PWORDS).setU32(0, questionId);
+  });
+}
+
+interface TargetSpec {
+  answer: number;
+  /** `PromisedAnswer.Op` union tags, one transform entry each. */
+  ops?: number[];
+}
+
+function writePromisedAnswer(target: StructBuilder, spec: TargetSpec): void {
+  target.setU16(4, MessageTarget.promisedAnswer);
+  const answer = target.initStruct(0, 1, 1);
+  answer.setU32(0, spec.answer);
+  const ops = spec.ops ?? [];
+  if (ops.length > 0) {
+    const list = answer.initCompositeList(0, ops.length, 1, 0);
+    ops.forEach((tag, i) => list.setU16(i * 8, tag));
+  }
+}
+
+function callFrame(questionId: number, target: TargetSpec): Uint8Array {
+  return frame((root) => {
+    root.setU16(0, Message.call);
+    const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
+    call.setU32(0, questionId);
+    call.setU64(8, IFACE);
+    writePromisedAnswer(call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS), target);
+    call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+  });
+}
+
+function finishFrame(questionId: number, workaround: boolean): Uint8Array {
+  return frame((root) => {
+    root.setU16(0, Message.finish);
+    const fin = root.initStruct(0, FINISH_DWORDS, FINISH_PWORDS);
+    fin.setU32(0, questionId);
+    fin.setBool(32, true, true);
+    fin.setBool(33, workaround, true);
+  });
+}
+
+function provideFrame(questionId: number, target: TargetSpec): Uint8Array {
+  return frame((root) => {
+    root.setU16(0, Message.provide);
+    const provide = root.initStruct(0, PROVIDE_DWORDS, PROVIDE_PWORDS);
+    provide.setU32(0, questionId);
+    writePromisedAnswer(provide.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS), target);
+    provide.initStruct(1, 1, 1).setU64(0, 7n);
+  });
+}
+
+function callWithReceiverAnswer(questionId: number, spec: TargetSpec): Uint8Array {
+  return frame((root) => {
+    root.setU16(0, Message.call);
+    const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
+    call.setU32(0, questionId);
+    call.setU64(8, IFACE);
+    writePromisedAnswer(call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS), {
+      answer: 0,
+    });
+    const payload = call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+    const table = payload.initCompositeList(1, 1, CAP_DESCRIPTOR_DWORDS, CAP_DESCRIPTOR_PWORDS);
+    table.setU16(0, CapDescriptor.receiverAnswer);
+    const answer = table.initStruct(0, 1, 1);
+    answer.setU32(0, spec.answer);
+    const ops = spec.ops ?? [];
+    const list = answer.initCompositeList(0, ops.length, 1, 0);
+    ops.forEach((tag, i) => list.setU16(i * 8, tag));
+  });
+}
+
+function drainReturns(t: Transport): string[] {
+  const out: string[] = [];
+  let f: Uint8Array | null;
+  while ((f = t.receive()) !== null) {
+    const root = CapnpMessage.fromFlat(f).root();
+    if (Message_which(root) === Message.abort) {
+      out.push("abort");
+      continue;
+    }
+    const ret = Message_getReturn(root);
+    const which = Return_which(ret);
+    const kind =
+      which === Return.results ? "results" : which === Return.exception ? "exception" : "other";
+    out.push(`${Return_getAnswerId(ret)}:${kind}`);
+  }
+  return out;
+}
+
 function sendReturn(t: Transport, answerId: number, which: number, takeFrom?: number): void {
   t.send(
     frame((root) => {
@@ -108,6 +205,71 @@ function expectAbort(t: Transport, vat: RpcConnection, message: string): void {
   expect(Message_which(reply)).toBe(Message.abort);
   expect(Exception_getType(Message_getAbort(reply))).toBe(Exception_Type.failed);
 }
+
+async function runEarlyCancel(
+  workaround: boolean,
+  wait: () => Promise<void>,
+): Promise<{ calls: number; pipelineWhich: number }> {
+    let calls = 0;
+    const srv: RpcServer = {
+      dispatch() {
+        calls++;
+      },
+    };
+    const eventual = new Settle<ClientHook>();
+    queueMicrotask(() => eventual.resolve(Client.local(srv).hook));
+    const boot = new Client(new QueuedClient(eventual));
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.a, boot);
+    pair.b.send(
+      frame((root) => {
+        root.setU16(0, Message.bootstrap);
+        root.initStruct(0, BOOTSTRAP_DWORDS, BOOTSTRAP_PWORDS).setU32(0, 0);
+      }),
+    );
+    pair.b.send(
+      frame((root) => {
+        root.setU16(0, Message.call);
+        const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
+        call.setU32(0, 1);
+        const target = call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS);
+        target.setU16(4, MessageTarget.promisedAnswer);
+        target.initStruct(0, 1, 1).setU32(0, 0);
+        call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+      }),
+    );
+    pair.b.send(
+      frame((root) => {
+        root.setU16(0, Message.finish);
+        const fin = root.initStruct(0, FINISH_DWORDS, FINISH_PWORDS);
+        fin.setU32(0, 1);
+        fin.setBool(32, true, true);
+        fin.setBool(33, workaround, true);
+      }),
+    );
+    pair.b.send(
+      frame((root) => {
+        root.setU16(0, Message.call);
+        const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
+        call.setU32(0, 2);
+        const target = call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS);
+        target.setU16(4, MessageTarget.promisedAnswer);
+        target.initStruct(0, 1, 1).setU32(0, 1);
+        call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+      }),
+    );
+    vat.pump();
+    let pipelineWhich = -1;
+    let f: Uint8Array | null;
+    while ((f = pair.b.receive()) !== null) {
+      const ret = Message_getReturn(CapnpMessage.fromFlat(f).root());
+      if (Return_getAnswerId(ret) === 2) pipelineWhich = Return_which(ret);
+    }
+    await wait();
+    await wait();
+    boot.release();
+    return { calls, pipelineWhich };
+  }
 
 describe("return protocol errors", () => {
   test("Return.canceled for a question the caller still holds aborts", async () => {
@@ -516,8 +678,8 @@ describe("other incoming protocol errors", () => {
     a.pump();
 
     finishServer();
-    await Promise.resolve();
-    await Promise.resolve();
+    await nextTurn();
+    await nextTurn();
     expect(peer.receive()).toBeNull();
     expect(a.isAnswered(mine)).toBe(true);
     expect(a.isFailed(mine)).toBe(false);
@@ -585,70 +747,127 @@ describe("other incoming protocol errors", () => {
   });
 
   test("Finish.requireEarlyCancellationWorkaround defers pending cancellation while dropping pipelining", async () => {
-    const run = async (workaround: boolean): Promise<{ calls: number; pipelineWhich: number }> => {
-      let calls = 0;
-      const srv: RpcServer = {
-        dispatch() {
-          calls++;
-        },
-      };
-      const eventual = new Settle<ClientHook>();
-      queueMicrotask(() => eventual.resolve(Client.local(srv).hook));
-      const boot = new Client(new QueuedClient(eventual));
-      const pair = new MemoryTransportPair();
-      const vat = new RpcConnection(pair.a, boot);
-      pair.b.send(
-        frame((root) => {
-          root.setU16(0, Message.bootstrap);
-          root.initStruct(0, BOOTSTRAP_DWORDS, BOOTSTRAP_PWORDS).setU32(0, 0);
-        }),
-      );
-      pair.b.send(
-        frame((root) => {
-          root.setU16(0, Message.call);
-          const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
-          call.setU32(0, 1);
-          const target = call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS);
-          target.setU16(4, MessageTarget.promisedAnswer);
-          target.initStruct(0, 1, 1).setU32(0, 0);
-          call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
-        }),
-      );
-      pair.b.send(
-        frame((root) => {
-          root.setU16(0, Message.finish);
-          const fin = root.initStruct(0, FINISH_DWORDS, FINISH_PWORDS);
-          fin.setU32(0, 1);
-          fin.setBool(32, true, true);
-          fin.setBool(33, workaround, true);
-        }),
-      );
-      pair.b.send(
-        frame((root) => {
-          root.setU16(0, Message.call);
-          const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
-          call.setU32(0, 2);
-          const target = call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS);
-          target.setU16(4, MessageTarget.promisedAnswer);
-          target.initStruct(0, 1, 1).setU32(0, 1);
-          call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
-        }),
-      );
-      vat.pump();
-      let pipelineWhich = -1;
-      let f: Uint8Array | null;
-      while ((f = pair.b.receive()) !== null) {
-        const ret = Message_getReturn(CapnpMessage.fromFlat(f).root());
-        if (Return_getAnswerId(ret) === 2) pipelineWhich = Return_which(ret);
-      }
-      await new Promise((res) => setImmediate(res));
-      await new Promise((res) => setImmediate(res));
-      boot.release();
-      return { calls, pipelineWhich };
-    };
+    expect(await runEarlyCancel(false, nextTurn)).toEqual({
+      calls: 0,
+      pipelineWhich: Return.exception,
+    });
+    expect(await runEarlyCancel(true, nextTurn)).toEqual({
+      calls: 1,
+      pipelineWhich: Return.exception,
+    });
+  });
 
-    expect(await run(false)).toEqual({ calls: 0, pipelineWhich: Return.exception });
-    expect(await run(true)).toEqual({ calls: 1, pipelineWhich: Return.exception });
+  test("Finish.requireEarlyCancellationWorkaround falls back to a timer without setImmediate", async () => {
+    const globals = globalThis as { setImmediate?: unknown };
+    const saved = globals.setImmediate;
+    globals.setImmediate = undefined;
+    try {
+      const timer = () => new Promise<void>((res) => setTimeout(res, 5));
+      expect(await runEarlyCancel(true, timer)).toEqual({
+        calls: 1,
+        pipelineWhich: Return.exception,
+      });
+      expect(await runEarlyCancel(false, timer)).toEqual({
+        calls: 0,
+        pipelineWhich: Return.exception,
+      });
+    } finally {
+      globals.setImmediate = saved;
+    }
+  });
+
+  test("a deferred cancellation that throws aborts the connection instead of escaping", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    const child: RpcServer = {
+      dispatch() {},
+      dispose() {
+        throw new Error("dispose failed");
+      },
+    };
+    const srv: RpcServer = {
+      dispatch(_i, _m, _p, _r, ctx) {
+        const r = ctx.initResults(0, 1);
+        return gate.then(() => ctx.setResultCap(r, 0, Client.local(child).hook));
+      },
+    };
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.b, srv);
+    pair.a.send(bootstrapFrame(0));
+    pair.a.send(callFrame(1, { answer: 0 }));
+    vat.pump();
+    pair.a.send(finishFrame(1, true));
+    vat.pump();
+    release();
+    await Promise.resolve();
+    await Promise.resolve();
+    await nextTurn();
+    await nextTurn();
+    expect(vat.disconnected?.message).toContain("dispose failed");
+    const sent: number[] = [];
+    let f: Uint8Array | null;
+    while ((f = pair.a.receive()) !== null) sent.push(Message_which(CapnpMessage.fromFlat(f).root()));
+    expect(sent).toContain(Message.abort);
+  });
+
+  test("a receiverAnswer with an unsupported op naming an unknown answer is a broken cap", () => {
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.b, new Counter());
+    pair.a.send(bootstrapFrame(0));
+    pair.a.send(callWithReceiverAnswer(1, { answer: 777, ops: [5] }));
+    vat.pump();
+    expect(vat.disconnected).toBeUndefined();
+    expect(drainReturns(pair.a)).toEqual(["0:results", "1:results"]);
+  });
+
+  test("a receiverAnswer with an unsupported op naming a live answer aborts", () => {
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.b, new Counter());
+    pair.a.send(bootstrapFrame(0));
+    pair.a.send(callWithReceiverAnswer(1, { answer: 0, ops: [5] }));
+    vat.pump();
+    expect(vat.disconnected?.message).toContain("Unsupported pipeline op");
+  });
+
+  test("a Call targeting an unknown answer with an unsupported op aborts", () => {
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.b, new Counter());
+    pair.a.send(callFrame(1, { answer: 99, ops: [5] }));
+    vat.pump();
+    expect(vat.disconnected?.message).toContain("Unsupported pipeline op");
+  });
+
+  test("level 3 Provide keeps its lookup: an unsupported op on an unknown answer is an exception", () => {
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.b, new Counter());
+    pair.a.send(provideFrame(5, { answer: 99, ops: [5] }));
+    vat.pump();
+    expect(vat.disconnected).toBeUndefined();
+    expect(drainReturns(pair.a)).toEqual(["5:exception"]);
+  });
+
+  test("level 3 Provide keeps its lookup: a finished answer still resolves its pipeline", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    const srv: RpcServer = {
+      dispatch(_i, _m, _p, _r, ctx) {
+        const r = ctx.initResults(0, 1);
+        return gate.then(() => ctx.setResultCap(r, 0, Client.local(new Counter()).hook));
+      },
+    };
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.b, srv);
+    pair.a.send(bootstrapFrame(0));
+    pair.a.send(callFrame(1, { answer: 0 }));
+    vat.pump();
+    pair.a.send(finishFrame(1, false));
+    pair.a.send(provideFrame(5, { answer: 1, ops: [0] }));
+    vat.pump();
+    expect(vat.disconnected).toBeUndefined();
+    expect(vat.pendingProvisions()).toEqual([7n]);
+    release();
+    await nextTurn();
+    expect(drainReturns(pair.a)).toEqual(["0:results", "5:results", "1:other"]);
   });
 
   test("an unknown Disembargo context aborts", () => {
