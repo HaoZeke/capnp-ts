@@ -313,7 +313,7 @@ export function isCanonical(message: Message): boolean {
   // tryGetSegment(1) is null for an empty segment, and later ones are not looked at.
   if (message.segmentCount > 1 && message.segWords(1) > 0) return false;
   const head = { at: 1 };
-  if (!pointerCanonical(message, 0, 0, head)) return false;
+  if (!pointerCanonical(message, 0, 0, head, 0)) return false;
   return head.at === words;
 }
 
@@ -326,22 +326,24 @@ function pointerCanonical(
   seg: number,
   word: number,
   head: { at: number },
+  depth: number,
 ): boolean {
   if (!inRange(m, word)) return false;
   const w = m.readWord(seg, word);
   if (w === 0n) return true;
   const kind = wpKind(w);
   if (kind === WireKind.Far || kind === WireKind.Cap) return false;
+  if (depth >= m.depthLimit) throw new CapnpError("DEPTH");
   const off = wpOffset(w);
   const target = word + 1 + off;
   if (kind === WireKind.Struct) {
     const dw = wpStructDwords(w);
     const pw = wpStructPwords(w);
     if (dw === 0 && pw === 0) return target === word;
-    const body = structCanonical(m, seg, target, dw, pw, head, head);
+    const body = structCanonical(m, seg, target, dw, pw, head, head, depth);
     return body.ok && body.dataTrunc && body.ptrTrunc;
   }
-  if (kind === WireKind.List) return listCanonical(m, seg, word, w, target, head);
+  if (kind === WireKind.List) return listCanonical(m, seg, word, w, target, head, depth);
   return false;
 }
 
@@ -353,6 +355,7 @@ function structCanonical(
   pw: number,
   read: { at: number },
   ptrHead: { at: number },
+  depth: number,
 ): { ok: boolean; dataTrunc: boolean; ptrTrunc: boolean } {
   if (loc !== read.at || !inRange(m, loc) || !inRange(m, loc + dw + pw - (dw + pw > 0 ? 1 : 0))) {
     return { ok: false, dataTrunc: false, ptrTrunc: false };
@@ -361,7 +364,7 @@ function structCanonical(
   const ptrTrunc = pw === 0 || m.readWord(seg, loc + dw + pw - 1) !== 0n;
   read.at = loc + dw + pw;
   for (let i = 0; i < pw; i++) {
-    if (!pointerCanonical(m, seg, loc + dw + i, ptrHead)) {
+    if (!pointerCanonical(m, seg, loc + dw + i, ptrHead, depth + 1)) {
       return { ok: false, dataTrunc, ptrTrunc };
     }
   }
@@ -375,6 +378,7 @@ function listCanonical(
   w: bigint,
   target: number,
   head: { at: number },
+  depth: number,
 ): boolean {
   const esize = wpListEsize(w);
   if (esize === ElemSize.Composite) {
@@ -386,18 +390,20 @@ function listCanonical(
     const nelem = wpCompositeElementCount(tag);
     const step = dw + pw;
     const content = wpListCount(w);
+    if (nelem * step !== content) return false;
     if (step === 0) {
       head.at = target + 1;
       return true;
     }
-    if (nelem * step !== content) return false;
     const read = { at: target + 1 };
     const pointerHead = { at: target + 1 + content };
     let dataAny = false;
     let ptrAny = false;
     for (let i = 0; i < nelem; i++) {
+      const elemDepth = depth + 1;
+      if (elemDepth >= m.depthLimit) throw new CapnpError("DEPTH");
       const loc = read.at;
-      const body = structCanonical(m, seg, loc, dw, pw, read, pointerHead);
+      const body = structCanonical(m, seg, loc, dw, pw, read, pointerHead, elemDepth);
       if (!body.ok) return false;
       dataAny = dataAny || body.dataTrunc;
       ptrAny = ptrAny || body.ptrTrunc;
@@ -411,7 +417,7 @@ function listCanonical(
     if (target !== head.at) return false;
     head.at = target + count;
     for (let i = 0; i < count; i++) {
-      if (!pointerCanonical(m, seg, target + i, head)) return false;
+      if (!pointerCanonical(m, seg, target + i, head, depth + 1)) return false;
     }
     return true;
   }
