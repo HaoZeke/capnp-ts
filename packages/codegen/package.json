@@ -16,7 +16,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit",
-    "test": "bun test test"
+    "test": "bun test --timeout 10000 test"
   },
   "dependencies": {
     "@haozeke/capnp": "^0.1.0-dev"

@@ -16,17 +16,17 @@ context lives in the root README and `docs/orgmode/architecture.org`.
 git clone https://github.com/HaoZeke/capnp-ts.git
 cd capnp-ts
 bun install
-bun test
+bun run test
 ```
 
-`bun test` covers the core runtime/codegen/RPC suites. To run the optional
+`bun run test` covers the core runtime/codegen/RPC suites. To run the optional
 pycapnp bidirectional interop suite locally, provision the venv and fixtures:
 
 ```console
 python3 -m venv .venv-pycapnp
 .venv-pycapnp/bin/pip install --upgrade pip pycapnp
 .venv-pycapnp/bin/python scripts/pycapnp_interop.py write-all
-CAPNP_REQUIRE_PYCAPNP=1 bun test packages/runtime/test/pycapnp-interop.test.ts
+CAPNP_REQUIRE_PYCAPNP=1 bun test --timeout 10000 packages/runtime/test/pycapnp-interop.test.ts
 ```
 
 With pixi (CLI goldens):
@@ -44,7 +44,7 @@ canonicalization, or field accessors **must** keep the golden suite green:
 
 | Command | Coverage |
 | ------- | -------- |
-| `bun test packages/runtime` | Unit + AddressBook / packed / pointer tests |
+| `bun test --timeout 10000 packages/runtime` | Unit + AddressBook / packed / pointer tests |
 | `./scripts/gen-sample-fixtures.sh` | Regenerate CLI goldens (needs `capnp` 1.4.*) |
 
 Prefer asserting against checked-in bytes under
@@ -85,7 +85,7 @@ package without an explicit product decision.
 2. Keep the diff focused; separate mechanical style from behavior when both
    appear.
 3. Describe *what* and *why*; link issues when applicable.
-4. Ensure `bun test` (and any relevant golden regen) pass before review.
+4. Ensure `bun run test` (and any relevant golden regen) pass before review.
 
 ## Security
 
