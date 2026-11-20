@@ -60,7 +60,10 @@ describe("level 4: Join", () => {
     await settle();
     expect(joinResult(a, q0)).toEqual({ joinId: 7, succeeded: true });
     expect(joinResult(a, q1)).toEqual({ joinId: 7, succeeded: true });
-    expect(a.answerCapId(q0)).toBe(-1);
+    // JoinResult is a struct; the joined capability sits in its pointer 0.
+    const joined = a.answerCapId(q0, 0);
+    expect(joined).toBe(0);
+    expect(a.answerCapId(q1, 0)).toBe(-1);
   });
 
   test("parts naming different objects do not join", async () => {

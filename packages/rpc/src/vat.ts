@@ -1068,12 +1068,14 @@ export class RpcConnection implements RemoteHost {
    *
    * A returned capability arrives as a pointer into the answer's
    * capTable; calling it needs the id the descriptor beside it names,
-   * which is what this reads.
+   * which is what this reads. With `pointerIndex`, the capability is the
+   * one in that pointer field of the result struct, as in `JoinResult`.
    */
-  answerCapId(questionId: number): number {
+  answerCapId(questionId: number, pointerIndex?: number): number {
     const r = this.questions.get(questionId)?.call.result;
     if (r?.state !== "ok") return -1;
-    const content = r.value.content;
+    const content =
+      pointerIndex === undefined ? r.value.content : r.value.content.getP(pointerIndex);
     if (content.kind !== PtrKind.Cap) return -1;
     const hook = r.value.caps[content.count];
     if (hook === undefined) return -1;
