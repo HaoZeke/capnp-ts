@@ -134,13 +134,92 @@ function* iterateFramedMessages(input: Uint8Array): Generator<Message> {
   }
 }
 
+/** `capnp` checks this many leading bytes before reading text or JSON. */
+const SNIFF_BYTES = 8192;
+
+/**
+ * The `capnp` CLI's `isPlausiblyText`. Before the first `(` only whitespace
+ * and `#` comments may appear. Up to the first quote after it, no byte may
+ * be DEL or a control character other than TAB, LF, VT or CR.
+ */
+function isPlausiblyText(prefix: Uint8Array): boolean {
+  let state: "preamble" | "comment" | "body" = "preamble";
+  for (const c of prefix) {
+    if (state === "preamble") {
+      if (c === 0x28) {
+        state = "body";
+        continue;
+      }
+      if (c === 0x23) {
+        state = "comment";
+        continue;
+      }
+      if (c !== 0x20 && (c < 0x09 || c > 0x0d)) return false;
+    } else if (state === "comment") {
+      if (c === 0x0a) {
+        state = "preamble";
+        continue;
+      }
+    } else if (c === 0x22 || c === 0x27) {
+      return true;
+    }
+    if ((c < 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0b && c !== 0x0d) || c === 0x7f) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The `capnp` CLI's `isPlausiblyJson`. Before the first `{` only whitespace
+ * other than FF and comments running from `#` or `/` to the end of the line
+ * may appear. Up to the first `"` after it, no byte may be DEL or a control
+ * character other than NUL, TAB, LF, VT or CR.
+ */
+function isPlausiblyJson(prefix: Uint8Array): boolean {
+  let state: "preamble" | "comment" | "body" = "preamble";
+  for (const c of prefix) {
+    if (state === "preamble") {
+      if (c === 0x7b) {
+        state = "body";
+        continue;
+      }
+      if (c === 0x23 || c === 0x2f) {
+        state = "comment";
+        continue;
+      }
+      if (c !== 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0b && c !== 0x0d) return false;
+    } else if (state === "comment") {
+      if (c === 0x0a) {
+        state = "preamble";
+        continue;
+      }
+    } else if (c === 0x22) {
+      return true;
+    }
+    if ((c > 0 && c < 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0b && c !== 0x0d) || c === 0x7f) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export interface ReadFormatOptions {
+  /**
+   * Skip the check that text or JSON input looks like that format, like
+   * `capnp convert --quiet`.
+   */
+  quiet?: boolean;
+}
+
 /** Read zero or more messages from `input` in `from` format. */
 export function readMessagesInFormat(
   input: Uint8Array,
   from: WireFormat,
   rootSchema?: StructSchema,
+  opts?: ReadFormatOptions,
 ): Message[] {
-  return Array.from(iterateMessagesInFormat(input, from, rootSchema), (m) => m.message);
+  return Array.from(iterateMessagesInFormat(input, from, rootSchema, opts), (m) => m.message);
 }
 
 /**
@@ -161,7 +240,7 @@ function* iterateMessagesInFormat(
   input: Uint8Array,
   from: WireFormat,
   rootSchema?: StructSchema,
-  opts?: { recover?: boolean },
+  opts?: ReadFormatOptions & { recover?: boolean },
 ): Generator<StreamMessage> {
   if (input.byteLength === 0) return;
   const wrap = function* (messages: Iterable<Message>): Generator<StreamMessage> {
@@ -215,6 +294,11 @@ function* iterateMessagesInFormat(
         "ARG",
         "text format requires <schema> and <type>",
       );
+      assertCapnp(
+        opts?.quiet === true || isPlausiblyText(input.subarray(0, SNIFF_BYTES)),
+        "ARG",
+        'The input is not in "text" format.',
+      );
       const source = Array.from(input, (byte) => String.fromCharCode(byte)).join("");
       for (const slice of splitTextMessages(source)) {
         const builder = new MessageBuilder();
@@ -234,6 +318,11 @@ function* iterateMessagesInFormat(
         rootSchema !== undefined,
         "ARG",
         "json format requires <schema> and <type>",
+      );
+      assertCapnp(
+        opts?.quiet === true || isPlausiblyJson(input.subarray(0, SNIFF_BYTES)),
+        "ARG",
+        'The input is not in "json" format.',
       );
       const source = Array.from(input, (byte) => String.fromCharCode(byte)).join("");
       for (const slice of splitJsonMessages(source)) {
@@ -348,12 +437,13 @@ function writeConvertedStream(
   from: WireFormat,
   to: WireFormat,
   rootSchema: StructSchema | undefined,
-  opts: WriteFormatOptions,
+  opts: WriteFormatOptions & ReadFormatOptions,
   writeOut: (chunk: Uint8Array) => void,
   writeErr: (message: string) => void,
 ): number {
   let status = 0;
   for (const { message, error } of iterateMessagesInFormat(input, from, rootSchema, {
+    quiet: opts.quiet,
     recover: true,
   })) {
     writeOut(writeMessageInFormat(message, to, rootSchema, opts));
@@ -378,9 +468,9 @@ export function convertStream(
   from: WireFormat,
   to: WireFormat,
   rootSchema?: StructSchema,
-  opts?: WriteFormatOptions,
+  opts?: WriteFormatOptions & ReadFormatOptions,
 ): Uint8Array {
-  const messages = readMessagesInFormat(input, from, rootSchema);
+  const messages = readMessagesInFormat(input, from, rootSchema, { quiet: opts?.quiet });
   // capnp writes one flat or canonical message after another. A multi-message
   // stream is the concatenation of those single-segment bodies.
   const chunks = messages.map((m) =>
@@ -1056,7 +1146,7 @@ export async function runCli(
         from,
         to,
         rootSchema,
-        { short: flags.short, segmentSize: flags.segmentSize },
+        { short: flags.short, segmentSize: flags.segmentSize, quiet: flags.quiet },
         writeOut,
         writeErr,
       );

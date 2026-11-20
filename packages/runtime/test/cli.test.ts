@@ -283,6 +283,66 @@ describe("capnp-ts CLI (encode, decode, convert, eval)", () => {
   }, 60_000); // `capnp`, `bun`, and `node` exceed Bun's 5000 ms default on a slow CI runner.
 
   test.skipIf(!hasCapnp)(
+    "text and JSON input are checked for plausibility like capnp unless convert --quiet",
+    async () => {
+      const schema = join(repoRoot, "schema/dynamic-kitchen.capnp");
+      const latin1 = (text: string) => new Uint8Array(Buffer.from(text, "latin1"));
+      const textCases: Array<[string, boolean]> = [
+        ['\f(title = "a")', false],
+        ['  \f# c\n(title = "a")', false],
+        ['(\x01title = "a")', false],
+        ['(title\x7f = "a")', false],
+        ['(i32 = 1, \ftitle = "a")', false],
+        ['(\ftitle = "a")', false],
+        ['\xef\xbb\xbf(title = "a")', false],
+        ["x", false],
+        ['# \x80\n(title = "a")', true],
+        ['\v\r\t\n(title = "a")', true],
+        ['(title = "a\x01b", i32 = 1, \f)', true],
+        [`(${" ".repeat(8191)}\x01title = "a")`, true],
+      ];
+      const jsonCases: Array<[string, boolean]> = [
+        ['\f{"title":"a"}', false],
+        ['\xef\xbb\xbf{"title":"a"}', false],
+        ['\x00{"title":"a"}', false],
+        ['{\x01"title":"a"}', false],
+        ['{\x7f"title":"a"}', false],
+        ['{\f"title":"a"}', false],
+        ["x", false],
+        ['{\x00"title":"a"}', true],
+        ['\v{"title":"a"}', true],
+        ['# c\n// d\n{"title":"a"}', true],
+        ['/ x\n{"title":"a"}', true],
+        ['{"title":"a\x01"}', true],
+        [' \t\r\n{"title":"a"}', true],
+        [`{${" ".repeat(8191)}\x01"title":"a"}`, true],
+      ];
+      const runs: Array<[string[], Array<[string, boolean]>, string, boolean]> = [
+        [["encode", schema, "KitchenSink"], textCases, "text", true],
+        [["convert", "text:binary", schema, "KitchenSink"], textCases, "text", true],
+        [["convert", "--quiet", "text:binary", schema, "KitchenSink"], textCases, "text", false],
+        [["convert", "json:binary", schema, "KitchenSink"], jsonCases, "json", true],
+        [["convert", "--quiet", "json:binary", schema, "KitchenSink"], jsonCases, "json", false],
+      ];
+      for (const [args, cases, format, checked] of runs) {
+        const sniff = `not in "${format}" format`;
+        for (const [text, plausible] of cases) {
+          const cpp = execCapnp(args, latin1(text));
+          const ts = await execCliInMemory(args, latin1(text));
+          const where = `${args.slice(0, -2).join(" ")} ${JSON.stringify(text)}`;
+          expect([where, cpp.stderr.includes(sniff)]).toEqual([where, checked && !plausible]);
+          expect([where, ts.stderr.includes(sniff)]).toEqual([where, checked && !plausible]);
+          expect([where, ts.code]).toEqual([where, cpp.code]);
+          expect([where, Buffer.from(ts.stdout).toString("hex")]).toEqual([
+            where,
+            Buffer.from(cpp.stdout).toString("hex"),
+          ]);
+        }
+      }
+    },
+  );
+
+  test.skipIf(!hasCapnp)(
     "text stdin preserves valid UTF-8 and raw invalid bytes",
     async () => {
       const schema = join(repoRoot, "schema/dynamic-kitchen.capnp");
