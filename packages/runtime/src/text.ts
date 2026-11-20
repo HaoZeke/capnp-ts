@@ -575,11 +575,13 @@ class TextParser {
   /** Spans of parsed expressions, and of field names keyed by their entry. */
   readonly spans = new WeakMap<object, TextSpan>();
   private pos = 0;
+  private readonly byteInput: boolean;
   private skipFrom = -1;
   private skipTo = -1;
 
-  constructor(src: string) {
+  constructor(src: string, byteInput = false) {
     this.src = src;
+    this.byteInput = byteInput;
   }
 
   private fail(msg: string): never {
@@ -613,6 +615,15 @@ class TextParser {
         c === 0xfeff
       ) {
         this.pos++;
+        continue;
+      }
+      if (
+        this.byteInput &&
+        c === 0xef &&
+        this.src.charCodeAt(this.pos + 1) === 0xbb &&
+        this.src.charCodeAt(this.pos + 2) === 0xbf
+      ) {
+        this.pos += 3;
         continue;
       }
       if (c === 0x23 /* '#' */) {
@@ -992,6 +1003,12 @@ class TextParser {
     const line = this.src.slice(start, this.pos);
     if (this.pos < this.src.length && this.src[this.pos] === "\r") this.pos++;
     if (this.pos < this.src.length && this.src[this.pos] === "\n") this.pos++;
+    if (this.byteInput) {
+      const bytes = new Uint8Array(line.length + 1);
+      for (let i = 0; i < line.length; i++) bytes[i] = line.charCodeAt(i);
+      bytes[line.length] = 0x0a;
+      return bytes;
+    }
     return UTF8_ENC.encode(`${line}\n`);
   }
 
@@ -1009,6 +1026,11 @@ class TextParser {
         this.fail("unescaped newline in string literal");
       }
       if (ch !== "\\") {
+        if (this.byteInput) {
+          out.push(this.src.charCodeAt(this.pos));
+          this.pos++;
+          continue;
+        }
         const cp = this.src.codePointAt(this.pos)!;
         const sub = String.fromCodePoint(cp);
         const encoded = UTF8_ENC.encode(sub);
@@ -1522,6 +1544,16 @@ export class TextCodec {
     fillStructFromText(parser, output, parser.parseSingleExpression(), report);
   }
 
+  /** Like decodeStruct, but `input` holds one byte per UTF-16 code unit. */
+  decodeStructBytes(
+    input: string,
+    output: DynamicStructBuilder,
+    report?: (error: TextInputError) => void,
+  ): void {
+    const parser = new TextParser(input, true);
+    fillStructFromText(parser, output, parser.parseSingleExpression(), report);
+  }
+
   decode(
     input: string,
     schema: StructSchema,
@@ -1591,6 +1623,16 @@ export function decodeText(input: string, schema: StructSchema): Message {
   const builder = new MessageBuilder();
   const root = initDynamicRoot(builder, schema);
   new TextCodec().decodeStruct(input, root);
+  return Message.fromFlat(builder.toFlat());
+}
+
+/** Decode text-format bytes without replacing invalid UTF-8 sequences. */
+export function decodeTextBytes(input: string | Uint8Array, schema: StructSchema): Message {
+  const bytes = typeof input === "string" ? UTF8_ENC.encode(input) : input;
+  const source = Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
+  const builder = new MessageBuilder();
+  const root = initDynamicRoot(builder, schema);
+  new TextCodec().decodeStructBytes(source, root);
   return Message.fromFlat(builder.toFlat());
 }
 

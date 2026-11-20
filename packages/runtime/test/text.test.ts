@@ -18,6 +18,7 @@ import {
   canonicalize,
   canonicalizeFlat,
   decodeText,
+  decodeTextBytes,
   encodeCEscapeTextBytes,
   encodeText,
   encodeTextBytes,
@@ -389,6 +390,55 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
         expect(`${new TextCodec({ prettyPrint: pretty }).encode(reader)}\n`).toBe(decoded);
         expect(`${pretty ? prettyPrint(reader) : stringify(reader)}\n`).toBe(decoded);
       }
+    }
+  });
+
+  test.skipIf(!hasCapnp)("decodeTextBytes keeps raw Text bytes like capnp encode", () => {
+    const schemaPath = join(repoRoot, "schema/addressbook.capnp");
+    const person = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin")).resolveStruct("Person");
+    const ascii = (text: string) => new TextEncoder().encode(text);
+    const inputs = [
+      Buffer.concat([ascii('(name = "'), Buffer.of(0xff, 0x80, 0x61), ascii('")')]),
+      Buffer.concat([ascii('(name = "'), Buffer.of(0xc3, 0xa9, 0xed, 0xa0, 0x80), ascii('")')]),
+      Buffer.concat([ascii("(name = `"), Buffer.of(0xfe, 0x0d), ascii("\n)")]),
+      Buffer.concat([ascii('(name = "a" "'), Buffer.of(0xc0, 0xaf), ascii('", email = "\\377")')]),
+    ];
+    for (const input of inputs) {
+      const cpp = spawnSync("capnp", ["encode", schemaPath, "Person"], { input });
+      expect(cpp.status).toBe(0);
+      expect(canonicalize(decodeTextBytes(input, person))).toEqual(
+        canonicalize(Message.fromFlat(new Uint8Array(cpp.stdout))),
+      );
+    }
+    // `capnp encode` rejects a leading BOM before parsing, so parse these
+    // with `convert --quiet`, which skips that check.
+    const quietEncode = (input: Uint8Array) =>
+      spawnSync("capnp", ["convert", "--quiet", "text:binary", schemaPath, "Person"], { input });
+    for (const input of [
+      Buffer.concat([Buffer.of(0xef, 0xbb, 0xbf), ascii('(name = "a")')]),
+      Buffer.concat([ascii(" "), Buffer.of(0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf), ascii('# c\n(name = "a")')]),
+      Buffer.concat([ascii("(name"), Buffer.of(0xef, 0xbb, 0xbf), ascii(' = "a")'), Buffer.of(0xef, 0xbb, 0xbf)]),
+    ]) {
+      const cpp = quietEncode(input);
+      expect(cpp.status).toBe(0);
+      expect(canonicalize(decodeTextBytes(input, person))).toEqual(
+        canonicalize(Message.fromFlat(new Uint8Array(cpp.stdout))),
+      );
+    }
+    const partialBom = Buffer.concat([Buffer.of(0xef, 0xbb), ascii('(name = "a")')]);
+    expect(quietEncode(partialBom).status).not.toBe(0);
+    expect(() => decodeTextBytes(partialBom, person)).toThrow(CapnpError);
+    const name = (input: string | Uint8Array) => [
+      ...DynamicStruct.fromMessage(decodeTextBytes(input, person), person).get("name").asTextBytes(),
+    ];
+    for (const text of ["é", "€", "😀"]) {
+      expect(name(`(name = "${text}")`)).toEqual([...new TextEncoder().encode(text)]);
+    }
+    expect(name(`(name = "${String.fromCharCode(0xdc97)}")`)).toEqual([0xef, 0xbf, 0xbd]);
+    for (const raw of ["\\377", "ab\\303\\251\\377x", "\\355\\240\\200", "a\\000b"]) {
+      const msg = decodeText(`(name = "${raw}")`, person);
+      const printed = encodeTextBytes(DynamicStruct.fromMessage(msg, person), { pretty: false });
+      expect(canonicalize(decodeTextBytes(printed, person))).toEqual(canonicalize(msg));
     }
   });
 
