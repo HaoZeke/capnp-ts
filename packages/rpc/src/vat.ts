@@ -397,6 +397,16 @@ class TribbleRaceBlocker extends RefHook implements ClientHook {
   }
 }
 
+/**
+ * Run `fn` once the work already queued has run, as `kj::evalLast` does.
+ * The package avoids runtime-specific globals, and `setImmediate` is
+ * missing from browsers and workers.
+ */
+function afterQueuedWork(fn: () => void): void {
+  if (typeof setImmediate === "function") setImmediate(fn);
+  else setTimeout(fn, 0);
+}
+
 /** A single capability as a payload whose content is the capability. */
 function capPayload(hook: ClientHook): Payload {
   const b = new CallBuilder(0, 1);
@@ -847,7 +857,7 @@ export class RpcConnection implements RemoteHost {
         return hook.brand === this ? new TribbleRaceBlocker(hook) : hook;
       }
       case CapDescriptor.receiverAnswer: {
-        const hook = this.pipelinedCap(CapDescriptor_getReceiverAnswer(desc));
+        const hook = this.pipelinedCap(CapDescriptor_getReceiverAnswer(desc), "descriptor");
         if (hook === undefined) {
           return new BrokenClient(new RpcError("descriptor names an unknown answer"));
         }
@@ -1704,7 +1714,14 @@ export class RpcConnection implements RemoteHost {
       Finish_getRequireEarlyCancellationWorkaround(finish) &&
       answer.call.result.state === "pending"
     ) {
-      setImmediate(releaseCall);
+      afterQueuedWork(() => {
+        // Nothing wraps this turn the way `pumpOnce` wraps a message.
+        try {
+          releaseCall();
+        } catch (e) {
+          this.abort(new RpcError(`protocol error: ${e instanceof Error ? e.message : String(e)}`));
+        }
+      });
     } else {
       releaseCall();
     }
@@ -1731,7 +1748,10 @@ export class RpcConnection implements RemoteHost {
         return undefined;
       }
       case MessageTarget.promisedAnswer: {
-        const hook = this.pipelinedCap(MessageTarget_getPromisedAnswer(target));
+        const hook = this.pipelinedCap(
+          MessageTarget_getPromisedAnswer(target),
+          abortOnInvalid ? "target" : "legacy",
+        );
         if (hook !== undefined) return hook;
         if (this.gone !== undefined || !abortOnInvalid) return undefined;
         return new BrokenClient(
@@ -1744,9 +1764,27 @@ export class RpcConnection implements RemoteHost {
     }
   }
 
-  private pipelinedCap(promised: Ptr): ClientHook | undefined {
+  /**
+   * The capability a `PromisedAnswer` names.
+   *
+   * The modes follow capnp-C++ where it has a rule and p33 where the
+   * level 3 extensions share the lookup:
+   * - `target` is `getMessageTarget`: the transform is checked first, and
+   *   an answer that is gone or finished has no pipeline left.
+   * - `descriptor` is `receiveCap` for `receiverAnswer`: the transform is
+   *   only read when the answer still has a pipeline.
+   * - `legacy` serves `Provide`, `Join` and `Disembargo`, which keep the
+   *   pre-parity behavior.
+   */
+  private pipelinedCap(
+    promised: Ptr,
+    mode: "target" | "descriptor" | "legacy" = "legacy",
+  ): ClientHook | undefined {
     if (promised.kind !== PtrKind.Struct) return undefined;
     const answer = this.answers.get(PromisedAnswer_getQuestionId(promised));
+    if (mode !== "target" && (answer === undefined || (mode === "descriptor" && answer.finished))) {
+      return undefined;
+    }
     const ops: number[] = [];
     const transform = PromisedAnswer_getTransform(promised);
     for (let i = 0; i < transform.listLen(); i++) {
@@ -1761,7 +1799,7 @@ export class RpcConnection implements RemoteHost {
       }
       ops.push(PromisedAnswer_Op_getGetPointerField(op));
     }
-    if (answer === undefined || answer.finished) return undefined;
+    if (answer === undefined || (mode === "target" && answer.finished)) return undefined;
     return answer.call.pipeline.getPipelinedCap(ops);
   }
 
