@@ -5,7 +5,16 @@
  * CGRs (schema.capnp self-schema, rpc).
  */
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -27,6 +36,10 @@ function listCgrFixtures(): string[] {
 
 function loadFixture(name: string): Uint8Array {
   return new Uint8Array(readFileSync(join(fixturesDir, name)));
+}
+
+function hasCapnp(): boolean {
+  return spawnSync("capnp", ["--version"], { encoding: "utf8" }).status === 0;
 }
 
 describe("CGR fixture smoke", () => {
@@ -103,6 +116,22 @@ describe("CGR fixture smoke", () => {
     expect(viaHand.nodeCount).toBe(viaMessage.nodeCount);
     expect(viaHand.requestedFileCount).toBe(viaMessage.requestedFileCount);
     expect(viaHand.requestedFilenames).toEqual(viaMessage.requestedFilenames);
+  });
+
+  test.skipIf(!hasCapnp())("both paths keep a BOM at the start of a filename like capnp", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "capnp-bom-"));
+    try {
+      const name = "\ufeffb.capnp";
+      writeFileSync(join(dir, name), "@0xd2f3c8a1b4e5f601;\nstruct T { t @0 :Text; }\n");
+      const r = spawnSync("capnp", ["compile", "-o-", name], { cwd: dir });
+      expect(r.status).toBe(0);
+      const bytes = new Uint8Array(r.stdout);
+      expect(parseFramedSegments(bytes).length).toBe(1);
+      expect((await summarizeCgr(bytes)).requestedFilenames).toEqual([name]);
+      expect(summarizeViaHandWalk(bytes).requestedFilenames).toEqual([name]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("multi-segment large CGR still opens via Message (hand walk may not)", async () => {

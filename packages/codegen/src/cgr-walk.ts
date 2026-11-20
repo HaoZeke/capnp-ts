@@ -978,7 +978,7 @@ function readTextHand(seg: Uint8Array, ptrByteOff: number, word: bigint): string
   if (body + n > seg.length) {
     throw new Error("CGR walk: Text overruns segment");
   }
-  return new TextDecoder().decode(seg.subarray(body, body + n));
+  return new TextDecoder("utf-8", { ignoreBOM: true }).decode(seg.subarray(body, body + n));
 }
 
 /** Single-segment near-pointer hand walk of CGR (counts + filenames only). */

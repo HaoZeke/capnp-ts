@@ -637,7 +637,7 @@ export class Ptr {
     const start = list.word * WORD_BYTES;
     let n = list.count;
     if (n > 0 && s.data[start + n - 1] === 0) n -= 1;
-    return new TextDecoder().decode(s.data.subarray(start, start + n));
+    return new TextDecoder("utf-8", { ignoreBOM: true }).decode(s.data.subarray(start, start + n));
   }
 
   getData(ptrIndex: number, dflt: Uint8Array = EMPTY_DATA): Uint8Array {
@@ -786,7 +786,7 @@ export class Ptr {
         const start = elem.word * WORD_BYTES;
         let n = elem.count;
         if (n > 0 && s.data[start + n - 1] === 0) n -= 1;
-        return new TextDecoder().decode(s.data.subarray(start, start + n));
+        return new TextDecoder("utf-8", { ignoreBOM: true }).decode(s.data.subarray(start, start + n));
       }
       throw new CapnpError("KIND");
     }
