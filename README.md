@@ -68,8 +68,11 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
 Current limits: generated primitive/pointer-list element builders and dynamic
 reflection.
 
-`@haozeke/capnp-rpc` is the vat: levels 1 through 4, tested against a live
-capnp-C++ `EzRpcServer` peer (`interop/run_rpc_interop.sh`).
+`@haozeke/capnp-rpc` is the vat: levels 1 and 3, the level 2 `Persistent`
+interface as capnp-C++ has it, and level 4 `Join`, with promises, pipelining,
+Resolve and embargo, cancellation, streaming flow control and membranes. It
+runs against a live capnp-C++ peer in both directions
+(`interop/run_rpc_interop.sh`); see [docs/orgmode/rpc.org](docs/orgmode/rpc.org).
 
 ## Parity
 
@@ -88,7 +91,14 @@ present. Do not treat this table as a green checklist for unbuilt work.
 | Builder / deep copy / orphans | limited | yes | yes | partial | **yes** (multi-seg arena + far/double-far; orphan disown/adopt; deepCopyPtr) |
 | Canonical form | no | yes | yes | yes | **yes** (AddressBook golden byte-identical to CLI) |
 | Code generator (`capnp compile -o`) | yes | yes | yes | yes | **yes** (structs/enums/unions; default-aware getters and setters; struct and `List(Struct)` init helpers) |
-| RPC levels 1-4 | no | L1-L2 (no L4) | L1-L2 (no L4) | L1-L4 | **L1-L4** (`@haozeke/capnp-rpc`; L3 both halves with `Accept.embargo`, over `rpc-threeparty.capnp`, tested as a three-vat handoff; L4 `Join`, which upstream C++ lacks) |
+| RPC level 1: calls, pipelining, Finish, Release, Resolve, Disembargo, abort | no | yes | yes | yes | **yes** (`@haozeke/capnp-rpc`; live capnp-C++ peer in both directions: pipelining, promise resolution, embargo, release, cancellation, exceptions, broken capabilities, abort) |
+| RPC cancellation (`Finish`, `allowCancellation`) | no | yes | not audited | not audited | **yes** (`CallContext.allowCancellation` and `signal`; canceled calls answer `Return.canceled` to free the question table; without opt-in they run to completion, as in C++; checked against C++ both ways) |
+| RPC streaming (`-> stream`) | no | yes | not audited | not audited | **yes** (fixed 64 KiB window, or `Transport.getSendBufferSize()` when reported, matching C++ two-party; `AdaptiveStreamWindow` is an explicit `streamWindow` opt-in; serialised server-side calls and break-on-failure, first error kept; checked against C++ both ways) |
+| RPC membranes (`capnp/membrane.h`) | no | yes | not audited | not audited | **yes** (`membrane`, `reverseMembrane`, `MembranePolicy`, revocation, redirect, unwrap on return; checked over a C++ peer and C++'s `membrane-test.c++` suite ported) |
+| RPC level 2: persistence | no | `Persistent` interface only (no restore) | not audited | not audited | **`Persistent` interface only, as C++** (`savePersistent`, `servePersistent`; no SturdyRef registry, `ObsoleteSave`/`ObsoleteDelete` answered Unimplemented) |
+| RPC level 3: three-party handoff | no | no (answers Unimplemented) | not audited | claims yes | **yes, beyond C++** (both halves with `Accept.embargo`, over `rpc-threeparty.capnp`; tested between instances of this vat, no C++ peer exists to test against) |
+| RPC level 4: `Join` | no | no (answers Unimplemented) | no | claims yes | **yes, beyond C++** (two-party network only; `sendJoin` and the answer side) |
+| RPC tail calls (`sendResultsTo.yourself`) | no | yes | not audited | not audited | **yes** (both directions: sends `sendResultsTo.yourself` + `takeFromOtherQuestion` via `CallContext.tailCall` and promise forwarding, receives and claims them; checked against C++) |
 | Interop with pycapnp (decode/encode same schema frames) | n/a | wraps C++ | n/a | n/a | **yes** (AddressBook + calculator; `packages/runtime/test/pycapnp-interop.test.ts`) |
 
 The serialization bar is Cap'n C++ 1.4.0 (`capnp encode` /

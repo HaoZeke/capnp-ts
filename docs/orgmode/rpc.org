@@ -1,0 +1,124 @@
+#+title: RPC
+#+options: toc:2 num:nil
+
+=@haozeke/capnp-rpc= is the vat. It follows the reference implementation,
+capnp-C++, closely enough that the same interaction gives the same result
+on either side; =interop/run_rpc_interop.sh= runs a C++ peer against this
+vat in both directions to keep that true.
+
+* The capability layer
+
+A capability is a =ClientHook=. Whatever it is (an object in this process,
+an import from the peer, a promise, a call's pipelined result, a membrane's
+wrapper, a broken stub) a caller sees the same operations: =call=,
+=getResolved=, =whenMoreResolved=, =addRef= and =release=. =Client= and
+=RpcPromise= are the handles applications hold.
+
+Reference counts are explicit because JavaScript cannot run code when a
+value goes unreachable. Whoever receives a hook owns one reference and
+calls =release()=; keeping one longer takes =addRef()=. A call keeps its
+target alive until it returns.
+
+* Calls, pipelining, cancellation
+
+=RpcConnection.bootstrap()= returns the peer's bootstrap capability at
+once; a call on it, or on a capability inside an unreturned answer
+(=RpcPromise.pipeline(...)=), goes out as a =promisedAnswer= before the
+answer is back.
+
+Dropping the last interest in a call (=RpcPromise.release()=) sends
+=Finish=. If the answer had not returned, =releaseResultCaps= is set and
+the callee may cancel; if it had, the results are held as imports of our
+own and are released with =Release= when they are dropped. This is
+capnp-C++'s rule.
+
+A server opts in to cancellation per call with =ctx.allowCancellation()=;
+a canceled call's =ctx.signal= then aborts and the vat answers with
+=Return.canceled= so the caller can drop the question table entry.
+Without it a canceled call runs to completion and its results are
+discarded, which is also what capnp-C++ does by default.
+
+* Promises, Resolve, embargo, shortening
+
+A capability the server cannot yet name is exported as =senderPromise=
+and later announced with =Resolve=. Calls made on it in between are
+queued and delivered in order. When a promise resolves to a capability
+hosted by the receiver, and calls were already in flight through the
+sender, the receiver sends =Disembargo= and holds new calls until it comes
+back, so none overtakes an earlier one.
+
+Chains shorten: a capability written into a message is looked through to
+its most resolved hook first, so a resolved promise goes out as its target
+and a promise that resolves to another promise exports the second. Tail
+calls work in both directions: calls forwarded back to the caller (via
+=CallContext.tailCall= or a promise resolving back to the caller) are sent
+with =sendResultsTo.yourself= and answered immediately with
+=takeFromOtherQuestion=, and incoming =yourself= calls are held and
+answered with =resultsSentElsewhere=.
+
+* Broken capabilities, abort, disconnect
+
+=newBrokenCap= makes a capability whose calls fail with one error, and an
+exception thrown by a pipelined or resolved target breaks what depends on
+it. =RpcConnection.abort(error)= sends =Abort= and disconnects; a received
+=Abort=, an over-release, or a closed transport does the same without
+sending (over-release and protocol errors send =Abort= first). On
+disconnect every outstanding question and pending embargo fails with a
+=disconnected= error, every import becomes broken, and everything exported
+is released.
+
+* Streaming
+
+A =-> stream= method returns nothing; what matters is that a sender
+cannot run ahead of the receiver. =Client.callStreaming= (and =RpcStream=)
+sends at once and resolves when the bytes in flight (each message's size,
+until its =Return= comes back) are within the window plus the largest
+message sent, as capnp-C++'s flow controller does. The first failure is
+kept and later sends reject with it. =Client.flush()= is =waitAllAcked=,
+which still resolves once those acks settle.
+
+On the serving side a method that declares itself streaming
+(=RpcServer.isStreaming=, or a =DispatchResult= with =streaming=) makes
+later calls wait for it, and its failure breaks the capability, so the
+error also reaches the next ordinary call. The default window matches
+capnp-C++ two-party: =Transport.getSendBufferSize()= when the transport
+reports one, otherwise a fixed 64 KiB. =AdaptiveStreamWindow= is not the
+default; pass it, a fixed number, or another =WindowGetter= via the
+=streamWindow= option to opt in. Once a stream call has failed, later
+sends reject with that error and =waitAllAcked= still resolves when the
+outstanding acks settle.
+
+* Membranes
+
+=membrane.ts= ports =capnp/membrane.h=. =membrane(client, policy)= wraps
+everything that crosses it, in either direction, in the same membrane;
+=reverseMembrane= is its inverse. A capability that crosses and comes
+back is unwrapped to the original. =MembranePolicy= decides each call
+(=inboundCall=, =outboundCall=: proceed, redirect, or throw) and supplies
+revocation (=onRevoked=, which rejects). =RevocablePolicy= is the common
+case. On revocation calls in flight are canceled with the error, every
+wrapper fails with it, and the capability inside is released.
+
+* Level 2: persistence
+
+capnp-C++ implements only the interface half of level 2:
+=capnp/persistent.capnp= defines =Persistent(SturdyRef, Owner)= with one
+method, =save=, and the application implements it. It has no SturdyRef
+registry and no restore: the draft =ObsoleteSave= and =ObsoleteDelete=
+messages are answered =Unimplemented=, and =Bootstrap= replaced restore.
+This package is the same. =savePersistent= calls =save= and
+=servePersistent= answers it; what a SturdyRef is, where it is kept and
+how it becomes a capability again belong to the application's realm.
+
+* Levels 3 and 4
+
+capnp-C++ implements neither; it answers =Provide=, =Accept= and =Join=
+with =Unimplemented=, and the interop suite checks that it does. This
+package goes further. Level 3 is both halves of the handoff, including
+=Accept.embargo=, over the =rpc-threeparty.capnp= network layer, tested
+as a three-vat handoff. Level 4 is =Join= on a two-party network, where the
+comparison is decidable locally, and =sendJoin= asks it. A vat that
+bridges two networks would forward the join instead, which needs a
+network layer this package does not have. Because no capnp-C++ peer can
+take part, these levels are tested between instances of this vat, with
+frames the reference =capnp= CLI encodes for the level 3 messages.

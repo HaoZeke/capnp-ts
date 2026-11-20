@@ -5,10 +5,45 @@
  */
 export { MemoryTransportPair, type Transport } from "./transport.ts";
 export { frameLength, StreamTransport } from "./socket.ts";
-export { RpcStream, StreamError } from "./stream.ts";
 export {
-  type Introduction,
-  RpcConnection,
+  copyIntoMembrane,
+  copyOutOfMembrane,
+  MembranePolicy,
+  membrane,
+  RevocablePolicy,
+  reverseMembrane,
+} from "./membrane.ts";
+export {
+  PERSISTENT_INTERFACE_ID,
+  PERSISTENT_SAVE_METHOD,
+  savePersistent,
+  servePersistent,
+} from "./persistent.ts";
+export {
+  type AdaptiveWindowOptions,
+  AdaptiveStreamWindow,
+  DEFAULT_STREAM_WINDOW,
+  MAX_ADAPTIVE_STREAM_WINDOW,
+  WindowFlowController,
+  type WindowGetter,
+} from "./flow.ts";
+export { RpcStream } from "./stream.ts";
+export {
+  BrokenClient,
+  CallBuilder,
+  type CallContext,
+  CallState,
+  Client,
+  type ClientHook,
+  type DispatchResult,
+  LocalClient,
+  newBrokenCap,
+  Payload,
+  type PipelineHook,
+  QueuedClient,
+  RpcError,
+  RpcPromise,
   type RpcServer,
-  Vat,
-} from "./vat.ts";
+  Settle,
+} from "./capability.ts";
+export { type Introduction, RpcConnection, Vat } from "./vat.ts";
