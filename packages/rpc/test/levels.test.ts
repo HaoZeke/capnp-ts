@@ -60,7 +60,7 @@ describe("level 4: Join", () => {
     await settle();
     expect(joinResult(a, q0)).toEqual({ joinId: 7, succeeded: true });
     expect(joinResult(a, q1)).toEqual({ joinId: 7, succeeded: true });
-    expect(a.answerCapId(q0)).toBeGreaterThanOrEqual(-1);
+    expect(a.answerCapId(q0)).toBe(-1);
   });
 
   test("parts naming different objects do not join", async () => {

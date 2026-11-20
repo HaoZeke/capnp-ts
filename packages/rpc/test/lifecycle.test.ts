@@ -319,7 +319,7 @@ describe("cancellation", () => {
     expect((await out).content.getU32(0)).toBe(2);
     // Once the answer came back and the capability resolved to its
     // import, nothing refers to the question and it is finished.
-    expect(ta.sent.filter((k) => k === "finish").length).toBeGreaterThan(0);
+    expect(ta.sent.filter((k) => k === "finish")).toHaveLength(2);
   });
 });
 
@@ -349,7 +349,7 @@ describe("promises over a connection", () => {
     expect(target.seen).toEqual([1, 2, 3]);
 
     await promise.whenResolved();
-    expect(b.liveExports().length).toBeGreaterThan(0);
+    expect(b.liveExports()).toEqual([0, 2]);
     const late = promise.call(IFACE, 0, arg(4));
     await settle();
     expect((await late).content.getU32(0)).toBe(5);

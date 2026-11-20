@@ -477,7 +477,8 @@ describe("refcount cases", () => {
     await new Promise((r) => setImmediate(r));
     a.pump();
     const after = ta.sent.filter((name) => name === "disembargo").length;
-    expect(after).toBeGreaterThan(before);
+    expect(before).toBe(0);
+    expect(after).toBe(1);
     expect(a.disconnected).toBeUndefined();
   });
 });

@@ -304,7 +304,7 @@ describe("membranes and promises", () => {
     resolve(Client.local(target));
     expect((await early).content.getU32(0)).toBe(2);
     await outside.whenResolved();
-    expect(policy.inbound.length).toBeGreaterThanOrEqual(1);
+    expect(policy.inbound).toEqual(["m0"]);
     expect((await outside.call(IFACE, 0, arg(2))).content.getU32(0)).toBe(3);
   });
 
