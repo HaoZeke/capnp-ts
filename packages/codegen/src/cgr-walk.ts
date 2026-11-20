@@ -18,7 +18,8 @@
  *
  * Method: 3 data words, 5 ptrs
  *   codeOrder u16 @0; paramStructType u64 @8; resultStructType u64 @16
- *   name Text ptr0; annotations ptr1
+ *   name Text ptr0; annotations ptr1; paramBrand ptr2; resultBrand ptr3
+ *   implicitParameters ptr4
  *
  * Field: 3 data words, 4 ptrs
  *   codeOrder u16 @0; discriminantValue u16 @2 (default 0xffff, wire XOR);
@@ -39,17 +40,18 @@ import {
   ElemSize,
   WireKind,
   WORD_BYTES,
-} from "../../runtime/src/kinds.ts";
-import { loadU32, loadU64 } from "../../runtime/src/endian.ts";
-import {
+  loadU32,
+  loadU64,
   wpKind,
   wpOffset,
   wpStructDwords,
   wpStructPwords,
   wpListEsize,
   wpListCount,
-} from "../../runtime/src/pointer.ts";
-import type { Ptr } from "../../runtime/src/message.ts";
+  MessageBuilder,
+  deepCopyPtrToSlot,
+} from "@haozeke/capnp";
+import type { Ptr } from "@haozeke/capnp";
 
 // ---------------------------------------------------------------------------
 // Rich AST types (schema.capnp Node / Field / Type / Enumerant)
@@ -105,6 +107,17 @@ export const TYPE_STRUCT = 16;
 export const TYPE_INTERFACE = 17;
 export const TYPE_ANY_POINTER = 18;
 
+/** Type.anyPointer union tags (schema.capnp). */
+export const ANY_POINTER_UNCONSTRAINED = 0;
+export const ANY_POINTER_PARAMETER = 1;
+export const ANY_POINTER_IMPLICIT_METHOD_PARAMETER = 2;
+
+/** Type.anyPointer.unconstrained.anyKind enum values. */
+export const ANY_KIND_ANY_POINTER = 0;
+export const ANY_KIND_STRUCT = 1;
+export const ANY_KIND_LIST = 2;
+export const ANY_KIND_CAPABILITY = 3;
+
 export type TypeWhichName =
   | "void"
   | "bool"
@@ -151,13 +164,50 @@ const TYPE_WHICH_NAMES: readonly TypeWhichName[] = [
 /** Field.noDiscriminant — not a union member (schema.capnp default 0xffff). */
 export const NO_DISCRIMINANT = 0xffff;
 
+export type AnyKindName =
+  | "anyPointer"
+  | "struct"
+  | "list"
+  | "capability";
+
+export type AnyPointerConstraintAst =
+  | {
+      which: "unconstrained";
+      anyKind: AnyKindName;
+    }
+  | {
+      which: "parameter";
+      scopeId: bigint;
+      parameterIndex: number;
+    }
+  | {
+      which: "implicitMethodParameter";
+      parameterIndex: number;
+    };
+
+export type BrandScopeAst = {
+  scopeId: bigint;
+  which: "bind" | "inherit";
+  bind?: Array<TypeAst | null>;
+};
+
+export type BrandAst = {
+  scopes: BrandScopeAst[];
+};
+
 /** Decoded Cap'n Proto Type (recursive for list). */
 export type TypeAst =
-  | { which: Exclude<TypeWhichName, "list" | "enum" | "struct" | "interface"> }
+  | {
+      which: Exclude<
+        TypeWhichName,
+        "list" | "enum" | "struct" | "interface" | "anyPointer"
+      >;
+    }
   | { which: "list"; elementType: TypeAst }
-  | { which: "enum"; typeId: bigint }
-  | { which: "struct"; typeId: bigint }
-  | { which: "interface"; typeId: bigint };
+  | { which: "enum"; typeId: bigint; brand?: BrandAst }
+  | { which: "struct"; typeId: bigint; brand?: BrandAst }
+  | { which: "interface"; typeId: bigint; brand?: BrandAst }
+  | { which: "anyPointer"; constraint: AnyPointerConstraintAst };
 
 /**
  * Decoded schema.capnp Value (scalar + text/data only for v1 walk).
@@ -187,6 +237,7 @@ export type ValueAst =
         | "struct"
         | "interface"
         | "anyPointer";
+      pointerBytes?: number[];
     };
 
 /** One struct field (slot or group). */
@@ -243,20 +294,39 @@ export type NodeAst = {
   which: NodeWhichName;
   whichTag: number;
   nestedNodes: NestedNodeAst[];
+  /** Generic parameter names from Node.parameters. */
+  parameters?: string[];
   /** Set when which === "struct". */
   struct?: StructNodeAst;
   /** Set when which === "enum". */
   enumerants?: EnumerantAst[];
   /** Set when which === "interface". */
   methods?: MethodAst[];
+  /** Set when which === "const". */
+  const?: {
+    type: TypeAst;
+    value: ValueAst;
+  };
+  /** Set when which === "annotation". */
+  annotation?: {
+    type: TypeAst;
+    /** Raw target bitmask from schema.capnp Node.annotation.targets*. */
+    targetsMask: number;
+  };
 };
 
 /** One method on an interface node. */
 export type MethodAst = {
   name: string;
+  /** Position in the method list. This is the RPC method id. */
   ordinal: number;
+  codeOrder?: number;
   paramStructType: bigint;
   resultStructType: bigint;
+  paramBrand?: BrandAst;
+  resultBrand?: BrandAst;
+  /** Method.implicitParameters names, in declaration order. */
+  implicitParameters?: string[];
 };
 
 export type RequestedFileAst = {
@@ -312,7 +382,7 @@ export function summaryFromAst(ast: CgrAst): CgrSummary {
  * enumerants. Uses Message.fromFlat (far pointers, multi-segment).
  */
 export async function walkCgr(bytes: Uint8Array): Promise<CgrAst> {
-  const { Message } = await import("../../runtime/src/message.ts");
+  const { Message } = await import("@haozeke/capnp");
   // Schema graphs are deep and wide, so both budgets are raised at open
   // rather than mutated afterwards: depthLimit is readonly on Message.
   const msg = Message.fromFlat(bytes, {
@@ -371,6 +441,65 @@ function typeWhichName(tag: number): TypeWhichName {
   return TYPE_WHICH_NAMES[tag] ?? "void";
 }
 
+function anyKindName(tag: number): AnyKindName {
+  switch (tag) {
+    case ANY_KIND_STRUCT:
+      return "struct";
+    case ANY_KIND_LIST:
+      return "list";
+    case ANY_KIND_CAPABILITY:
+      return "capability";
+    default:
+      return "anyPointer";
+  }
+}
+
+function decodeBrandBindings(list: Ptr): Array<TypeAst | null> {
+  if (list.kind !== PtrKind.List) return [];
+  const out: Array<TypeAst | null> = [];
+  for (let i = 0; i < list.listLen(); i++) {
+    const b = list.listGetp(i);
+    if (b.kind !== PtrKind.Struct) {
+      out.push(null);
+      continue;
+    }
+    // Brand.Binding union: unbound @0, type @1.
+    const which = b.getU16(0);
+    if (which === 1) {
+      out.push(decodeType(b.getp(0)));
+    } else {
+      out.push(null);
+    }
+  }
+  return out;
+}
+
+function decodeBrand(brand: Ptr): BrandAst | undefined {
+  if (brand.kind !== PtrKind.Struct) return undefined;
+  const scopes = brand.getp(0);
+  if (scopes.kind !== PtrKind.List) return undefined;
+  const out: BrandScopeAst[] = [];
+  for (let i = 0; i < scopes.listLen(); i++) {
+    const s = scopes.listGetp(i);
+    if (s.kind !== PtrKind.Struct) continue;
+    // Brand.Scope union: bind @0, inherit @1.
+    const which = s.getU16(8);
+    if (which === 1) {
+      out.push({
+        scopeId: s.getU64(0),
+        which: "inherit",
+      });
+      continue;
+    }
+    out.push({
+      scopeId: s.getU64(0),
+      which: "bind",
+      bind: decodeBrandBindings(s.getp(0)),
+    });
+  }
+  return out.length > 0 ? { scopes: out } : undefined;
+}
+
 function decodeType(t: Ptr): TypeAst {
   if (t.kind !== PtrKind.Struct) {
     return { which: "void" };
@@ -381,7 +510,36 @@ function decodeType(t: Ptr): TypeAst {
     return { which: "list", elementType: decodeType(t.getp(0)) };
   }
   if (which === "enum" || which === "struct" || which === "interface") {
-    return { which, typeId: t.getU64(8) };
+    return { which, typeId: t.getU64(8), brand: decodeBrand(t.getp(0)) };
+  }
+  if (which === "anyPointer") {
+    const anyTag = t.getU16(8);
+    if (anyTag === ANY_POINTER_PARAMETER) {
+      return {
+        which,
+        constraint: {
+          which: "parameter",
+          scopeId: t.getU64(16),
+          parameterIndex: t.getU16(10),
+        },
+      };
+    }
+    if (anyTag === ANY_POINTER_IMPLICIT_METHOD_PARAMETER) {
+      return {
+        which,
+        constraint: {
+          which: "implicitMethodParameter",
+          parameterIndex: t.getU16(10),
+        },
+      };
+    }
+    return {
+      which,
+      constraint: {
+        which: "unconstrained",
+        anyKind: anyKindName(t.getU16(10)),
+      },
+    };
   }
   return { which };
 }
@@ -408,7 +566,7 @@ function decodeValue(v: Ptr): ValueAst {
     case TYPE_INT32:
       return { which: "int32", value: v.getU32(4) | 0 };
     case TYPE_INT64:
-      return { which: "int64", value: v.getU64(8) };
+      return { which: "int64", value: BigInt.asIntN(64, v.getU64(8)) };
     case TYPE_UINT8:
       return { which: "uint8", value: v.getU8(2) };
     case TYPE_UINT16:
@@ -429,16 +587,29 @@ function decodeValue(v: Ptr): ValueAst {
     case TYPE_ENUM:
       return { which: "enum", value: v.getU16(2) };
     case TYPE_LIST:
-      return { which: "list" };
+      return { which: "list", pointerBytes: materializePointerValue(v.getp(0)) };
     case TYPE_STRUCT:
-      return { which: "struct" };
+      return { which: "struct", pointerBytes: materializePointerValue(v.getp(0)) };
     case TYPE_INTERFACE:
-      return { which: "interface" };
+      return {
+        which: "interface",
+        pointerBytes: materializePointerValue(v.getp(0)),
+      };
     case TYPE_ANY_POINTER:
-      return { which: "anyPointer" };
+      return {
+        which: "anyPointer",
+        pointerBytes: materializePointerValue(v.getp(0)),
+      };
     default:
       return { which: "void" };
   }
+}
+
+function materializePointerValue(ptr: Ptr): number[] | undefined {
+  if (ptr.kind === PtrKind.Null) return undefined;
+  const b = new MessageBuilder({ forceSingle: true });
+  deepCopyPtrToSlot(b, b.rootSlot(), ptr, 0);
+  return Array.from(b.toFlat());
 }
 
 function decodeField(f: Ptr): FieldAst {
@@ -482,6 +653,16 @@ function decodeNestedNodes(list: Ptr): NestedNodeAst[] {
   return out;
 }
 
+function decodeParameters(list: Ptr): string[] {
+  if (list.kind !== PtrKind.List) return [];
+  const out: string[] = [];
+  for (let i = 0; i < list.listLen(); i++) {
+    const p = list.listGetp(i);
+    out.push(p.kind === PtrKind.Struct ? p.getText(0) : "");
+  }
+  return out;
+}
+
 /**
  * An interface's methods, in ordinal order. The ordinal is the list
  * index: schema.capnp assigns method @N by position, and that number is
@@ -495,8 +676,12 @@ function decodeMethods(list: Ptr): MethodAst[] {
     out.push({
       name: m.getText(0),
       ordinal: i,
+      codeOrder: m.getU16(0),
       paramStructType: m.getU64(8),
       resultStructType: m.getU64(16),
+      paramBrand: decodeBrand(m.getp(2)),
+      resultBrand: decodeBrand(m.getp(3)),
+      implicitParameters: decodeParameters(m.getp(4)),
     });
   }
   return out;
@@ -524,6 +709,15 @@ function decodeStructFields(list: Ptr): FieldAst[] {
   return out;
 }
 
+/** Twelve Node.annotation target flags, targetsFile in the low bit. */
+function annotationTargetsMask(n: Ptr): number {
+  let mask = 0;
+  for (let bit = 0; bit < 12; bit++) {
+    if (n.getBool(112 + bit)) mask |= 1 << bit;
+  }
+  return mask >>> 0;
+}
+
 function decodeNode(n: Ptr): NodeAst {
   if (n.kind !== PtrKind.Struct) {
     return {
@@ -547,6 +741,7 @@ function decodeNode(n: Ptr): NodeAst {
     which,
     whichTag,
     nestedNodes: decodeNestedNodes(n.getp(1)),
+    parameters: decodeParameters(n.getp(5)),
   };
 
   if (which === "struct") {
@@ -562,6 +757,20 @@ function decodeNode(n: Ptr): NodeAst {
     base.enumerants = decodeEnumerants(n.getp(3));
   } else if (which === "interface") {
     base.methods = decodeMethods(n.getp(3));
+  } else if (which === "const") {
+    base.const = {
+      type: decodeType(n.getp(3)),
+      value: decodeValue(n.getp(4)),
+    };
+  } else if (which === "annotation") {
+    base.annotation = {
+      type: decodeType(n.getp(3)),
+      // schema.capnp Node.annotation targetsFile@19 .. targetsAnnotation@30
+      // are bools at data bits 112..123 (capnp 1.4.0 schema.capnp.h).
+      // Bit 0 of the mask is targetsFile. displayNamePrefixLength also lives
+      // at byte 8 and must not be reused here.
+      targetsMask: annotationTargetsMask(n),
+    };
   }
 
   return base;
@@ -571,17 +780,49 @@ function decodeNode(n: Ptr): NodeAst {
 // Pretty-print (human walk dump)
 // ---------------------------------------------------------------------------
 
+function formatBrand(brand: BrandAst | undefined): string {
+  if (!brand || brand.scopes.length === 0) return "";
+  const scopes = brand.scopes
+    .map((s) => {
+      if (s.which === "inherit") {
+        return `scope(0x${s.scopeId.toString(16)}):inherit`;
+      }
+      const binds = (s.bind ?? [])
+        .map((b) => (b ? formatType(b) : "_"))
+        .join(", ");
+      return `scope(0x${s.scopeId.toString(16)}):[${binds}]`;
+    })
+    .join("; ");
+  return ` brand{${scopes}}`;
+}
+
 /** Format a TypeAst as a short schema-like string. */
 export function formatType(t: TypeAst): string {
   switch (t.which) {
     case "list":
       return `List(${formatType(t.elementType)})`;
     case "enum":
-      return `Enum(0x${t.typeId.toString(16)})`;
+      return `Enum(0x${t.typeId.toString(16)})${formatBrand(t.brand)}`;
     case "struct":
-      return `Struct(0x${t.typeId.toString(16)})`;
+      return `Struct(0x${t.typeId.toString(16)})${formatBrand(t.brand)}`;
     case "interface":
-      return `Interface(0x${t.typeId.toString(16)})`;
+      return `Interface(0x${t.typeId.toString(16)})${formatBrand(t.brand)}`;
+    case "anyPointer":
+      switch (t.constraint.which) {
+        case "unconstrained":
+          return t.constraint.anyKind === "anyPointer"
+            ? "AnyPointer"
+            : `AnyPointer(${t.constraint.anyKind})`;
+        case "parameter":
+          return (
+            `AnyPointer(parameter scope=0x${t.constraint.scopeId.toString(16)}` +
+            ` index=${t.constraint.parameterIndex})`
+          );
+        case "implicitMethodParameter":
+          return `AnyPointer(implicitMethodParameter index=${t.constraint.parameterIndex})`;
+        default:
+          return "AnyPointer";
+      }
     default:
       return t.which;
   }
@@ -593,6 +834,9 @@ export function formatNode(node: NodeAst): string {
   lines.push(
     `${node.which} 0x${node.id.toString(16)} ${node.displayName}`,
   );
+  if (node.parameters && node.parameters.length > 0) {
+    lines.push(`  parameters=${node.parameters.join(",")}`);
+  }
   if (node.struct) {
     const s = node.struct;
     lines.push(
@@ -627,6 +871,16 @@ export function formatNode(node: NodeAst): string {
       const e = node.enumerants[i]!;
       lines.push(`  enumerant ${i} ${e.name} codeOrder=${e.codeOrder}`);
     }
+  }
+  if (node.const) {
+    lines.push(
+      `  const type=${formatType(node.const.type)} value=${node.const.value.which}`,
+    );
+  }
+  if (node.annotation) {
+    lines.push(
+      `  annotation type=${formatType(node.annotation.type)} targetsMask=${node.annotation.targetsMask}`,
+    );
   }
   return lines.join("\n");
 }

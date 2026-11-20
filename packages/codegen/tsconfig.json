@@ -1,4 +1,9 @@
 {
   "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "paths": {
+      "@haozeke/capnp": ["../runtime/src/index.ts"]
+    }
+  },
   "include": ["src/**/*"]
 }

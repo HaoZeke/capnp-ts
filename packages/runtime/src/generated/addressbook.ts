@@ -1,8 +1,9 @@
 /**
- * Interim hand-rolled AddressBook helpers (schema/addressbook.capnp).
+ * Legacy AddressBook layout constants for schema/addressbook.capnp.
  * Layout from `capnp compile -ocapnp` (Person: 1 data word, 4 ptrs).
  *
- * Replace with output of `@haozeke/capnpc-ts` once full emit lands.
+ * Kept as a compatibility shim for constant imports. New code should prefer
+ * generated modules from `@haozeke/capnpc-ts`.
  * Schema id: @0x9eb32e19f86ee174
  */
 
@@ -52,5 +53,3 @@ export const ADDRESS_BOOK_PEOPLE_PTR = 0;
 export type AddressBookHandle = { readonly __brand: "AddressBook" };
 export type PersonHandle = { readonly __brand: "Person" };
 export type PhoneNumberHandle = { readonly __brand: "PhoneNumber" };
-
-// TODO: personIdGet / personNameGet / addressBookPeopleGet, etc.

@@ -13,9 +13,15 @@ import {
   ElemSize,
   Message,
   PtrKind,
+  listGetBool,
+  listGetF64,
   listGetStruct,
   listGetText,
+  listGetU16,
+  listGetU64,
+  listGetU8,
   listGetU32,
+  storeU16,
   storeU32,
   storeU64,
   storeU8,
@@ -30,6 +36,16 @@ function msgFromWords(words: bigint[]): Message {
     storeU64(buf, i * 8, words[i]!);
   }
   return Message.fromSegments([buf]);
+}
+
+function expectSchema(fn: () => unknown): void {
+  try {
+    fn();
+    throw new Error("expected SCHEMA");
+  } catch (e) {
+    expect(e).toBeInstanceOf(CapnpError);
+    expect((e as CapnpError).code).toBe("SCHEMA");
+  }
 }
 
 function putText(seg: Uint8Array, word: number, s: string): void {
@@ -158,7 +174,115 @@ describe("list upgrade: Void allowed, Bool refused", () => {
     expect(el.getU32(0, 99)).toBe(99);
     expect(el.getU64(0, 7n)).toBe(7n);
     expect(list.listGetStruct(41).kind).toBe(PtrKind.Struct);
-    expect(list.listGetU32(0, 99)).toBe(99);
+    // Primitive getters do not treat Void as a zero-filled wider cell.
+    expectSchema(() => list.listGetU32(0, 99));
+    expectSchema(() => list.listGetBool(0));
+  });
+});
+
+describe("cross-width primitive list demotion matrix", () => {
+  function oneElemList(esize: number): Message {
+    const words = [wpMakeStruct(0, 0, 1), wpMakeList(0, esize, 1), 0n];
+    return msgFromWords(words);
+  }
+
+  test("numeric getters match field@0 struct-view semantics across 1/2/4/8-byte lists", () => {
+    const dfltU8 = 0x11;
+    const dfltU16 = 0x2222;
+    const dfltU32 = 0x33333333;
+    const dfltU64 = 0x4444444444444444n;
+    const dfltF64 = 9.25;
+
+    const m8 = oneElemList(ElemSize.Byte);
+    storeU8(m8.segments[0]!, 16, 0xab);
+    const l8 = m8.root().getP(0);
+    expect(listGetU8(l8, 0, dfltU8)).toBe(0xab);
+    expectSchema(() => listGetU16(l8, 0, dfltU16));
+    expectSchema(() => listGetU32(l8, 0, dfltU32));
+    expectSchema(() => listGetU64(l8, 0, dfltU64));
+    expectSchema(() => listGetF64(l8, 0, dfltF64));
+
+    const m16 = oneElemList(ElemSize.TwoBytes);
+    storeU16(m16.segments[0]!, 16, 0xcdef);
+    const l16 = m16.root().getP(0);
+    expect(listGetU8(l16, 0, dfltU8)).toBe(0xef);
+    expect(listGetU16(l16, 0, dfltU16)).toBe(0xcdef);
+    expectSchema(() => listGetU32(l16, 0, dfltU32));
+    expectSchema(() => listGetU64(l16, 0, dfltU64));
+    expectSchema(() => listGetF64(l16, 0, dfltF64));
+
+    const m32 = oneElemList(ElemSize.FourBytes);
+    storeU32(m32.segments[0]!, 16, 0x89abcdef);
+    const l32 = m32.root().getP(0);
+    expect(listGetU8(l32, 0, dfltU8)).toBe(0xef);
+    expect(listGetU16(l32, 0, dfltU16)).toBe(0xcdef);
+    expect(listGetU32(l32, 0, dfltU32)).toBe(0x89abcdef >>> 0);
+    expectSchema(() => listGetU64(l32, 0, dfltU64));
+    expectSchema(() => listGetF64(l32, 0, dfltF64));
+
+    const m64 = oneElemList(ElemSize.EightBytes);
+    const piBits = 0x400921fb54442d18n;
+    storeU64(m64.segments[0]!, 16, piBits);
+    const l64 = m64.root().getP(0);
+    expect(listGetU8(l64, 0, dfltU8)).toBe(0x18);
+    expect(listGetU16(l64, 0, dfltU16)).toBe(0x2d18);
+    expect(listGetU32(l64, 0, dfltU32)).toBe(0x54442d18);
+    expect(listGetU64(l64, 0, dfltU64)).toBe(piBits);
+    expect(listGetF64(l64, 0, dfltF64)).toBeCloseTo(Math.PI);
+  });
+
+  test("C++-compatible List(Bool) view accepts a non-bit data list", () => {
+    const msg = msgFromWords([
+      wpMakeStruct(0, 0, 1),
+      wpMakeList(0, ElemSize.Byte, 3),
+      0n,
+    ]);
+    // C++ ListReader<bool> ignores the source element step. It views the
+    // first `listLen()` bits of the data area as packed Bool elements.
+    storeU8(msg.segments[0]!, 16, 0b0000_0101);
+    const list = msg.root().getP(0);
+
+    expect(listGetBool(list, 0)).toBe(true);
+    expect(listGetBool(list, 1)).toBe(false);
+    expect(listGetBool(list, 2)).toBe(true);
+    // The other direction is a schema mismatch: Bool cells are not data.
+    const bits = msgFromWords([
+      wpMakeStruct(0, 0, 1),
+      wpMakeList(0, ElemSize.Bit, 4),
+      0n,
+    ]);
+    storeU8(bits.segments[0]!, 16, 0b0000_1101);
+    const bl = bits.root().getP(0);
+    expect(listGetBool(bl, 0)).toBe(true);
+    expect(listGetBool(bl, 1)).toBe(false);
+    expect(listGetBool(bl, 2)).toBe(true);
+    expectSchema(() => listGetU8(bl, 0));
+    expectSchema(() => listGetU16(bl, 0));
+    expectSchema(() => listGetU32(bl, 0));
+    expectSchema(() => listGetU64(bl, 0));
+    expectSchema(() => listGetF64(bl, 0));
+    expectSchema(() => listGetText(bl, 0));
+  });
+
+  test("pointer, void, and pointer-only struct lists reject data reads", () => {
+    const ptrs = msgFromWords([
+      wpMakeStruct(0, 0, 1),
+      wpMakeList(0, ElemSize.Pointer, 1),
+      0n,
+    ]);
+    const pl = ptrs.root().getP(0);
+    expectSchema(() => listGetU8(pl, 0));
+    expectSchema(() => listGetBool(pl, 0));
+
+    const words = new Array<bigint>(4).fill(0n);
+    words[0] = wpMakeStruct(0, 0, 1);
+    words[1] = wpMakeList(0, ElemSize.Composite, 1);
+    words[2] = wpMakeStruct(1, 0, 1);
+    const comp = msgFromWords(words);
+    const cl = comp.root().getP(0);
+    expectSchema(() => listGetU8(cl, 0));
+    expectSchema(() => listGetBool(cl, 0));
+    expectSchema(() => listGetF64(cl, 0));
   });
 });
 
@@ -193,6 +317,10 @@ describe("list downgrade views (composite -> prim/Text field @0)", () => {
 
     expect(listGetU32(list, 1)).toBe(1001);
     expect(listGetU32(list, 0)).toBe(1000);
+    // Composite data is whole words, so a wider primitive read zero-extends.
+    expect(listGetU64(list, 0)).toBe(1000n);
+    expect(listGetU8(list, 1)).toBe(1001 & 0xff);
+    expectSchema(() => listGetBool(list, 0));
 
     const el0 = listGetStruct(list, 0);
     expect(el0.kind).toBe(PtrKind.Struct);

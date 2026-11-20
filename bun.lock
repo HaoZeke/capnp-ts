@@ -23,14 +23,17 @@
         "capnpc-ts": "./bin/capnpc-ts",
       },
       "dependencies": {
-        "@haozeke/capnp": "workspace:*",
+        "@haozeke/capnp": "^0.1.0-dev",
       },
     },
     "packages/rpc": {
       "name": "@haozeke/capnp-rpc",
       "version": "0.1.0-dev",
       "dependencies": {
-        "@haozeke/capnp": "workspace:*",
+        "@haozeke/capnp": "^0.1.0-dev",
+      },
+      "devDependencies": {
+        "tsup": "^8.5.0",
       },
     },
     "packages/runtime": {

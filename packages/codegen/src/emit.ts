@@ -13,13 +13,15 @@
  */
 
 import type {
+  BrandAst,
   CgrAst,
   FieldAst,
+  MethodAst,
   NodeAst,
   TypeAst,
   ValueAst,
 } from "./cgr-walk.ts";
-import { NO_DISCRIMINANT } from "./cgr-walk.ts";
+import { NO_DISCRIMINANT, formatType } from "./cgr-walk.ts";
 import { basename, dirname, join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
 
@@ -50,6 +52,20 @@ export function shortTypeName(displayName: string): string {
     : nested;
   // Cap'n nested dots are not valid TS identifiers; use underscores.
   return bare.replace(/\./g, "_").replace(/[^A-Za-z0-9_]/g, "_");
+}
+
+/**
+ * File stem from `dir/other.capnp:Slot`. capnpc-c++ puts that file in its
+ * own namespace so the name cannot collide with a type in this file.
+ */
+function schemaFileStem(displayName: string): string {
+  const colon = displayName.lastIndexOf(":");
+  const path = colon >= 0 ? displayName.slice(0, colon) : displayName;
+  const base = path.includes("/") ? path.slice(path.lastIndexOf("/") + 1) : path;
+  const stem = base.endsWith(".capnp") ? base.slice(0, -".capnp".length) : base;
+  let safe = stem.replace(/[^A-Za-z0-9_]/g, "_");
+  if (!safe || /^[0-9]/.test(safe)) safe = `_${safe}`;
+  return safe || "external";
 }
 
 /** Safe identifier for a field / enumerant name (already schema identifiers). */
@@ -184,6 +200,21 @@ function scalarDefaultExpr(
 /** All node ids nested under a file id (scopeId chain). */
 export function nodesForFile(ast: CgrAst, fileId: bigint): NodeAst[] {
   const ids = new Set<bigint>([fileId]);
+  // Auto-generated Method$Params and Method$Results nodes have scopeId 0.
+  // They still belong to the file named in displayName.
+  const file = ast.nodes.find((n) => n.id === fileId);
+  const prefix = file?.displayName ? `${file.displayName}:` : "";
+  if (prefix) {
+    for (const n of ast.nodes) {
+      if (
+        n.scopeId === 0n &&
+        n.which !== "file" &&
+        n.displayName.startsWith(prefix)
+      ) {
+        ids.add(n.id);
+      }
+    }
+  }
   let grew = true;
   while (grew) {
     grew = false;
@@ -195,6 +226,348 @@ export function nodesForFile(ast: CgrAst, fileId: bigint): NodeAst[] {
     }
   }
   return ast.nodes.filter((n) => ids.has(n.id) && n.which !== "file");
+}
+
+type ModuleEmitContext = {
+  byId: Map<bigint, NodeAst>;
+  ownerFileByNodeId: Map<bigint, bigint>;
+  currentFileId: bigint;
+  importAliases: Map<bigint, string>;
+  /** Disambiguated stub name for a type whose file was not requested. */
+  externalAliasNames: Map<bigint, string>;
+};
+
+function buildOwnerFileMap(ast: CgrAst, byId: Map<bigint, NodeAst>): Map<bigint, bigint> {
+  const memo = new Map<bigint, bigint>();
+  const resolve = (id: bigint): bigint => {
+    const cached = memo.get(id);
+    if (cached !== undefined) return cached;
+    const n = byId.get(id);
+    if (!n) return 0n;
+    if (n.which === "file") {
+      memo.set(id, n.id);
+      return n.id;
+    }
+    const owner = resolve(n.scopeId);
+    memo.set(id, owner);
+    return owner;
+  };
+  for (const n of ast.nodes) resolve(n.id);
+  return memo;
+}
+
+function collectReferencedTypeIds(t: TypeAst, out: Set<bigint>): void {
+  if (t.which === "list") {
+    collectReferencedTypeIds(t.elementType, out);
+    return;
+  }
+  if (t.which === "struct" || t.which === "interface" || t.which === "enum") {
+    out.add(t.typeId);
+    if (t.brand) {
+      for (const scope of t.brand.scopes) {
+        for (const b of scope.bind ?? []) {
+          if (b) collectReferencedTypeIds(b, out);
+        }
+      }
+    }
+  }
+}
+
+function collectNodeTypeRefs(node: NodeAst, out: Set<bigint>): void {
+  if (node.struct) {
+    for (const f of node.struct.fields) {
+      if (f.slot) collectReferencedTypeIds(f.slot.type, out);
+    }
+  }
+  if (node.const) {
+    collectReferencedTypeIds(node.const.type, out);
+  }
+  for (const m of node.methods ?? []) {
+    out.add(m.paramStructType);
+    out.add(m.resultStructType);
+    for (const brand of [m.paramBrand, m.resultBrand]) {
+      for (const scope of brand?.scopes ?? []) {
+        for (const b of scope.bind ?? []) {
+          if (b) collectReferencedTypeIds(b, out);
+        }
+      }
+    }
+  }
+}
+
+function typeMentionsBrand(t: TypeAst): boolean {
+  if (t.which === "list") return typeMentionsBrand(t.elementType);
+  if (t.which === "struct" || t.which === "interface" || t.which === "enum") {
+    return !!t.brand && t.brand.scopes.length > 0;
+  }
+  return false;
+}
+
+function nodeMentionsBrand(node: NodeAst): boolean {
+  const types: TypeAst[] = [];
+  for (const f of node.struct?.fields ?? []) {
+    if (f.slot) types.push(f.slot.type);
+  }
+  if (node.const) types.push(node.const.type);
+  return types.some(typeMentionsBrand);
+}
+
+function paramNames(node: NodeAst | undefined): string[] {
+  return (node?.parameters ?? []).map((p, i) => ident(p) || `T${i}`);
+}
+
+/** `<T extends CapnpAnyPointer = CapnpAnyPointer, ...>` or empty. */
+function ownerGenericClause(owner: NodeAst, extra?: string): string {
+  const parts: string[] = [];
+  const seen = new Set<string>();
+  const add = (clause: string): void => {
+    const name = clause.split(/\s/)[0] ?? clause;
+    if (seen.has(name)) return;
+    seen.add(name);
+    parts.push(clause);
+  };
+  for (const name of paramNames(owner)) {
+    add(`${name} extends CapnpAnyPointer = CapnpAnyPointer`);
+  }
+  if (extra) add(extra);
+  return parts.length === 0 ? "" : `<${parts.join(", ")}>`;
+}
+
+function ownerPtrReceiver(owner: NodeAst, typeName: string): string {
+  const names = paramNames(owner);
+  if (names.length === 0) return "ptr: Ptr";
+  return `ptr: ${typeName}_Ptr<${names.join(", ")}>`;
+}
+
+/** TypeScript type of one brand binding. Pointer types stay in the Capnp* family. */
+function tsBrandArg(t: TypeAst, ctx: ModuleEmitContext, owner: NodeAst): string {
+  switch (t.which) {
+    case "text":
+      return "CapnpText";
+    case "data":
+      return "CapnpData";
+    case "list":
+      return `CapnpList<${tsBrandArg(t.elementType, ctx, owner)}>`;
+    case "struct":
+      return ptrTypeForStruct(t.typeId, ctx, t.brand, owner);
+    case "interface":
+      return ptrTypeForInterface(t.typeId, ctx, t.brand, owner);
+    case "anyPointer":
+      if (t.constraint.which === "parameter") {
+        const scopeNode = ctx.byId.get(t.constraint.scopeId);
+        const raw =
+          scopeNode?.parameters?.[t.constraint.parameterIndex] ??
+          `T${t.constraint.parameterIndex}`;
+        return ident(raw) || `T${t.constraint.parameterIndex}`;
+      }
+      if (t.constraint.which === "implicitMethodParameter") {
+        return `M${t.constraint.parameterIndex}`;
+      }
+      switch (t.constraint.anyKind) {
+        case "struct":
+          return "CapnpAnyStruct";
+        case "list":
+          return "CapnpAnyList";
+        case "capability":
+          return "CapnpCapability";
+        default:
+          return "CapnpAnyPointer";
+      }
+    default:
+      return "CapnpAnyPointer";
+  }
+}
+
+function brandArgList(
+  typeId: bigint,
+  brand: BrandAst | undefined,
+  ctx: ModuleEmitContext,
+  owner: NodeAst,
+): string {
+  const n = ctx.byId.get(typeId);
+  const params = n?.parameters;
+  if (!params || params.length === 0 || !brand) return "";
+  const scope = brand.scopes.find((s) => s.scopeId === typeId);
+  if (!scope) return "";
+  if (scope.which === "inherit") {
+    const names = paramNames(n);
+    const inScope = new Set(paramNames(owner));
+    if (names.length > 0 && names.every((name) => inScope.has(name))) {
+      return `<${names.join(", ")}>`;
+    }
+    return `<${names.map(() => "CapnpAnyPointer").join(", ")}>`;
+  }
+  const binds = scope.bind ?? [];
+  const args = params.map((_, i) => {
+    const b = binds[i];
+    return b ? tsBrandArg(b, ctx, owner) : "CapnpAnyPointer";
+  });
+  return `<${args.join(", ")}>`;
+}
+
+function ptrTypeForStruct(
+  typeId: bigint,
+  ctx: ModuleEmitContext,
+  brand?: BrandAst,
+  owner?: NodeAst,
+): string {
+  const n = ctx.byId.get(typeId);
+  if (!n) return "Ptr";
+  const args = owner ? brandArgList(typeId, brand, ctx, owner) : "";
+  const external = ctx.externalAliasNames.get(typeId);
+  if (external) return external + args;
+  const base = `${shortTypeName(n.displayName)}_Ptr`;
+  const fileId = ctx.ownerFileByNodeId.get(typeId) ?? ctx.currentFileId;
+  if (fileId === ctx.currentFileId) return base + args;
+  const alias = ctx.importAliases.get(fileId);
+  return (alias ? `${alias}.${base}` : base) + args;
+}
+
+function ptrTypeForInterface(
+  typeId: bigint,
+  ctx: ModuleEmitContext,
+  brand?: BrandAst,
+  owner?: NodeAst,
+): string {
+  const n = ctx.byId.get(typeId);
+  if (!n) return "Ptr";
+  const args = owner ? brandArgList(typeId, brand, ctx, owner) : "";
+  const external = ctx.externalAliasNames.get(typeId);
+  if (external) return external + args;
+  const base = `${shortTypeName(n.displayName)}_Capability`;
+  const fileId = ctx.ownerFileByNodeId.get(typeId) ?? ctx.currentFileId;
+  if (fileId === ctx.currentFileId) return base + args;
+  const alias = ctx.importAliases.get(fileId);
+  return (alias ? `${alias}.${base}` : base) + args;
+}
+
+/**
+ * Parameter names a generated struct should carry. The node itself wins.
+ * Otherwise inherit them from the method brand or implicit parameters that
+ * name this struct as its params or results type.
+ */
+function effectiveParamNames(node: NodeAst, ctx: ModuleEmitContext): string[] {
+  const own = paramNames(node);
+  if (own.length > 0) return own;
+  const extra: string[] = [];
+  const add = (name: string): void => {
+    if (name && !extra.includes(name)) extra.push(name);
+  };
+  for (const other of ctx.byId.values()) {
+    for (const m of other.methods ?? []) {
+      const isParam = m.paramStructType === node.id;
+      const isResult = m.resultStructType === node.id;
+      if (!isParam && !isResult) continue;
+      const brand = isParam ? m.paramBrand : m.resultBrand;
+      for (const scope of brand?.scopes ?? []) {
+        if (scope.which !== "inherit") continue;
+        for (const name of paramNames(ctx.byId.get(scope.scopeId))) add(name);
+      }
+      for (const raw of m.implicitParameters ?? []) add(ident(raw) || raw);
+    }
+  }
+  return extra;
+}
+
+function nodeWithParams(node: NodeAst, names: string[]): NodeAst {
+  const current = paramNames(node);
+  if (
+    current.length === names.length &&
+    current.every((name, i) => name === names[i])
+  ) {
+    return node;
+  }
+  return { ...node, parameters: names };
+}
+
+function methodTypeParamClause(
+  m: MethodAst,
+  iface: NodeAst,
+  ctx: ModuleEmitContext,
+): string {
+  const names: string[] = [];
+  const add = (name: string): void => {
+    if (name && !names.includes(name)) names.push(name);
+  };
+  for (const id of [m.paramStructType, m.resultStructType]) {
+    const n = ctx.byId.get(id);
+    if (n) for (const name of effectiveParamNames(n, ctx)) add(name);
+  }
+  for (const name of paramNames(iface)) add(name);
+  for (const raw of m.implicitParameters ?? []) add(ident(raw) || raw);
+  if (names.length === 0) return "";
+  return `<${names
+    .map((name) => `${name} extends CapnpAnyPointer = CapnpAnyPointer`)
+    .join(", ")}>`;
+}
+
+function structAliasType(
+  id: bigint,
+  brand: BrandAst | undefined,
+  ctx: ModuleEmitContext,
+  owner: NodeAst,
+): string {
+  const n = ctx.byId.get(id);
+  if (!n || n.which !== "struct") return "Ptr";
+  const rendered = ptrTypeForStruct(id, ctx, brand, owner);
+  if (rendered.includes("<")) return rendered;
+  const names = effectiveParamNames(n, ctx);
+  if (names.length === 0) return rendered;
+  return `${rendered}<${names.join(", ")}>`;
+}
+
+function brandLiteral(brand: BrandAst | undefined): string {
+  if (!brand || brand.scopes.length === 0) return "[]";
+  const scopes = brand.scopes
+    .map((scope) => {
+      if (scope.which === "inherit") {
+        return `{ scopeId: 0x${scope.scopeId.toString(16)}n, which: "inherit" }`;
+      }
+      const bind = (scope.bind ?? [])
+        .map((b) => (b ? JSON.stringify(formatType(b)) : "null"))
+        .join(", ");
+      return (
+        `{ scopeId: 0x${scope.scopeId.toString(16)}n, which: "bind", ` +
+        `bind: [${bind}] }`
+      );
+    })
+    .join(", ");
+  return `[${scopes}]`;
+}
+
+function anyPointerTsType(
+  t: TypeAst & { which: "anyPointer" },
+  owner: NodeAst,
+  byId: Map<bigint, NodeAst>,
+): { typeName: string; genericParam?: string } {
+  if (t.constraint.which === "parameter") {
+    const scopeNode = byId.get(t.constraint.scopeId);
+    const rawName =
+      scopeNode?.parameters?.[t.constraint.parameterIndex] ??
+      `T${t.constraint.parameterIndex}`;
+    const paramName = ident(rawName) || `T${t.constraint.parameterIndex}`;
+    return {
+      typeName: paramName,
+      genericParam: `${paramName} extends CapnpAnyPointer = CapnpAnyPointer`,
+    };
+  }
+  if (t.constraint.which === "implicitMethodParameter") {
+    const paramName = `M${t.constraint.parameterIndex}`;
+    return {
+      typeName: paramName,
+      genericParam: `${paramName} extends CapnpAnyPointer = CapnpAnyPointer`,
+    };
+  }
+  switch (t.constraint.anyKind) {
+    case "struct":
+      return { typeName: "CapnpAnyStruct" };
+    case "list":
+      return { typeName: "CapnpAnyList" };
+    case "capability":
+      return { typeName: "CapnpCapability" };
+    default:
+      return { typeName: "CapnpAnyPointer" };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -217,9 +590,112 @@ function emitEnum(node: NodeAst, lines: string[]): void {
   lines.push(``);
 }
 
+function isPointerValue(v: ValueAst): boolean {
+  return (
+    v.which === "list" ||
+    v.which === "struct" ||
+    v.which === "interface" ||
+    v.which === "anyPointer"
+  );
+}
+
+function fieldPointerDefaultBytes(field: FieldAst): number[] | undefined {
+  const slot = field.slot;
+  if (!slot || !slot.hadExplicitDefault) return undefined;
+  const dv = slot.defaultValue;
+  if (!dv) return undefined;
+  if (
+    dv.which === "list" ||
+    dv.which === "struct" ||
+    dv.which === "interface" ||
+    dv.which === "anyPointer"
+  ) {
+    return dv.pointerBytes && dv.pointerBytes.length > 0 ? dv.pointerBytes : undefined;
+  }
+  return undefined;
+}
+
+function emitConst(node: NodeAst, lines: string[]): void {
+  const c = node.const;
+  if (!c) return;
+  const name = ident(shortTypeName(node.displayName));
+  const v = c.value;
+  lines.push(
+    `/** Const ${node.displayName}: ${formatType(c.type)}. */`,
+  );
+  switch (v.which) {
+    case "void":
+      lines.push(`export const ${name} = undefined as const;`, ``);
+      return;
+    case "bool":
+      lines.push(`export const ${name} = ${v.value ? "true" : "false"} as const;`, ``);
+      return;
+    case "int8":
+    case "int16":
+    case "int32":
+    case "uint8":
+    case "uint16":
+    case "uint32":
+    case "enum":
+      lines.push(`export const ${name} = ${jsNumberLiteral(v.value)} as const;`, ``);
+      return;
+    case "int64":
+    case "uint64":
+      lines.push(`export const ${name} = ${v.value}n as const;`, ``);
+      return;
+    case "float32":
+    case "float64":
+      lines.push(`export const ${name} = ${jsNumberLiteral(v.value)} as const;`, ``);
+      return;
+    case "text":
+      lines.push(`export const ${name} = ${JSON.stringify(v.value)} as const;`, ``);
+      return;
+    case "data":
+      lines.push(
+        `export const ${name} = new Uint8Array([${Array.from(v.value).join(", ")}]);`,
+        ``,
+      );
+      return;
+    case "list":
+    case "struct":
+    case "interface":
+    case "anyPointer": {
+      if (!v.pointerBytes || v.pointerBytes.length === 0) {
+        lines.push(`export const ${name} = null as const;`, ``);
+        return;
+      }
+      const base = upperSnake(name);
+      lines.push(
+        `const ${base}_BYTES = new Uint8Array([${v.pointerBytes.join(", ")}]);`,
+        `const ${base}_PTR = CapnpMessage.fromFlat(${base}_BYTES).root();`,
+        `export const ${name}: Ptr = ${base}_PTR;`,
+        ``,
+      );
+      return;
+    }
+    default:
+      return;
+  }
+}
+
+function emitAnnotation(node: NodeAst, lines: string[]): void {
+  const a = node.annotation;
+  if (!a) return;
+  const base = upperSnake(ident(shortTypeName(node.displayName)));
+  lines.push(
+    `/** Annotation ${node.displayName}. */`,
+    `export const ${base}_ANNOTATION_ID = 0x${node.id.toString(16)}n;`,
+    `export const ${base}_ANNOTATION_TARGETS_MASK = ${a.targetsMask};`,
+    `export const ${base}_ANNOTATION_TYPE = ${JSON.stringify(formatType(a.type))} as const;`,
+    ``,
+  );
+}
+
 function emitFieldGetter(
+  owner: NodeAst,
   typeName: string,
   field: FieldAst,
+  ctx: ModuleEmitContext,
   lines: string[],
 ): void {
   if (!field.slot) return;
@@ -230,6 +706,21 @@ function emitFieldGetter(
   const dv = field.slot.defaultValue;
   const dfltExpr = scalarDefaultExpr(t.which, dv);
   const byteOff = dataByteOffset(t.which, off);
+  const ptrDefaultBytes = fieldPointerDefaultBytes(field);
+  const typeFmt = formatType(t);
+  if (
+    typeFmt.includes("brand{") ||
+    typeFmt.startsWith("AnyPointer(parameter") ||
+    typeFmt.startsWith("AnyPointer(implicitMethodParameter")
+  ) {
+    lines.push(
+      `export const ${upperSnake(typeName)}_${upperSnake(fname)}_TYPE = ${JSON.stringify(typeFmt)} as const;`,
+      ``,
+    );
+  }
+
+  let generic = ownerGenericClause(owner);
+  const recv = ownerPtrReceiver(owner, typeName);
 
   switch (t.which) {
     case "void":
@@ -237,7 +728,7 @@ function emitFieldGetter(
       return;
     case "bool":
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): boolean {`,
+        `export function ${fn}${generic}(${recv}, dflt = ${dfltExpr}): boolean {`,
         `  return ptr.getBool(${off}, dflt);`,
         `}`,
         ``,
@@ -246,7 +737,7 @@ function emitFieldGetter(
     case "int8":
       // Signed: XOR bits via getU8, then sign-extend to int8.
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): number {`,
+        `export function ${fn}${generic}(${recv}, dflt = ${dfltExpr}): number {`,
         `  return (ptr.getU8(${byteOff}, dflt & 0xff) << 24) >> 24;`,
         `}`,
         ``,
@@ -254,7 +745,7 @@ function emitFieldGetter(
       return;
     case "uint8":
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): number {`,
+        `export function ${fn}${generic}(${recv}, dflt = ${dfltExpr}): number {`,
         `  return ptr.getU8(${byteOff}, dflt);`,
         `}`,
         ``,
@@ -262,7 +753,7 @@ function emitFieldGetter(
       return;
     case "int16":
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): number {`,
+        `export function ${fn}${generic}(${recv}, dflt = ${dfltExpr}): number {`,
         `  return (ptr.getU16(${byteOff}, dflt & 0xffff) << 16) >> 16;`,
         `}`,
         ``,
@@ -271,7 +762,7 @@ function emitFieldGetter(
     case "uint16":
     case "enum":
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): number {`,
+        `export function ${fn}${generic}(${recv}, dflt = ${dfltExpr}): number {`,
         `  return ptr.getU16(${byteOff}, dflt);`,
         `}`,
         ``,
@@ -279,7 +770,7 @@ function emitFieldGetter(
       return;
     case "int32":
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): number {`,
+        `export function ${fn}${generic}(${recv}, dflt = ${dfltExpr}): number {`,
         `  return ptr.getU32(${byteOff}, dflt | 0) | 0;`,
         `}`,
         ``,
@@ -287,7 +778,7 @@ function emitFieldGetter(
       return;
     case "uint32":
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): number {`,
+        `export function ${fn}${generic}(${recv}, dflt = ${dfltExpr}): number {`,
         `  return ptr.getU32(${byteOff}, dflt);`,
         `}`,
         ``,
@@ -296,7 +787,7 @@ function emitFieldGetter(
     case "int64":
       // CRITICAL: full u64 path (bigint). Never getU32 for 64-bit fields.
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt: bigint = ${dfltExpr}): bigint {`,
+        `export function ${fn}${generic}(${recv}, dflt: bigint = ${dfltExpr}): bigint {`,
         `  return BigInt.asIntN(64, ptr.getU64(${byteOff}, dflt));`,
         `}`,
         ``,
@@ -304,7 +795,7 @@ function emitFieldGetter(
       return;
     case "uint64":
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt: bigint = ${dfltExpr}): bigint {`,
+        `export function ${fn}${generic}(${recv}, dflt: bigint = ${dfltExpr}): bigint {`,
         `  return ptr.getU64(${byteOff}, dflt);`,
         `}`,
         ``,
@@ -312,7 +803,7 @@ function emitFieldGetter(
       return;
     case "float32":
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): number {`,
+        `export function ${fn}${generic}(${recv}, dflt = ${dfltExpr}): number {`,
         `  return ptr.getF32(${byteOff}, dflt);`,
         `}`,
         ``,
@@ -320,7 +811,7 @@ function emitFieldGetter(
       return;
     case "float64":
       lines.push(
-        `export function ${fn}(ptr: Ptr, dflt = ${dfltExpr}): number {`,
+        `export function ${fn}${generic}(${recv}, dflt = ${dfltExpr}): number {`,
         `  return ptr.getF64(${byteOff}, dflt);`,
         `}`,
         ``,
@@ -331,14 +822,14 @@ function emitFieldGetter(
         const dflt = `${upperSnake(typeName)}_${upperSnake(fname)}_DEFAULT`;
         lines.push(
           `const ${dflt} = ${JSON.stringify(dv.value)};`,
-          `export function ${fn}(ptr: Ptr): string {`,
+          `export function ${fn}${generic}(${recv}): string {`,
           `  return ptr.getText(${off}, ${dflt});`,
           `}`,
           ``,
         );
       } else {
         lines.push(
-          `export function ${fn}(ptr: Ptr): string {`,
+          `export function ${fn}${generic}(${recv}): string {`,
           `  return ptr.getText(${off});`,
           `}`,
           ``,
@@ -350,14 +841,14 @@ function emitFieldGetter(
         const dflt = `${upperSnake(typeName)}_${upperSnake(fname)}_DEFAULT`;
         lines.push(
           `const ${dflt} = new Uint8Array([${Array.from(dv.value).join(", ")}]);`,
-          `export function ${fn}(ptr: Ptr): Uint8Array {`,
+          `export function ${fn}${generic}(${recv}): Uint8Array {`,
           `  return ptr.getData(${off}, ${dflt});`,
           `}`,
           ``,
         );
       } else {
         lines.push(
-          `export function ${fn}(ptr: Ptr): Uint8Array {`,
+          `export function ${fn}${generic}(${recv}): Uint8Array {`,
           `  return ptr.getData(${off});`,
           `}`,
           ``,
@@ -367,24 +858,64 @@ function emitFieldGetter(
     case "list":
     case "struct":
     case "interface":
-    case "anyPointer":
-      lines.push(
-        `export function ${fn}(ptr: Ptr): Ptr {`,
-        `  return ptr.getP(${off});`,
-        `}`,
-        ``,
-      );
+    case "anyPointer": {
+      let retType = "Ptr";
+      if (t.which === "struct") {
+        retType = ptrTypeForStruct(t.typeId, ctx, t.brand, owner);
+      } else if (t.which === "interface") {
+        retType = ptrTypeForInterface(t.typeId, ctx, t.brand, owner);
+      } else if (t.which === "anyPointer") {
+        const anyTy = anyPointerTsType(t, owner, ctx.byId);
+        retType = anyTy.typeName;
+        generic = ownerGenericClause(owner, anyTy.genericParam);
+      }
+      if (ptrDefaultBytes && ptrDefaultBytes.length > 0) {
+        const dflt = `${upperSnake(typeName)}_${upperSnake(fname)}_DEFAULT`;
+        lines.push(
+          `const ${dflt}_BYTES = new Uint8Array([${ptrDefaultBytes.join(", ")}]);`,
+          `const ${dflt}_PTR = CapnpMessage.fromFlat(${dflt}_BYTES).root();`,
+          `export function ${fn}${generic}(${recv}): ${retType} {`,
+          `  const p = ptr.getP(${off});`,
+          `  return (p.kind === PtrKind.Null ? ${dflt}_PTR : p) as ${retType};`,
+          `}`,
+          ``,
+        );
+      } else {
+        lines.push(
+          `export function ${fn}${generic}(${recv}): ${retType} {`,
+          `  return ptr.getP(${off}) as ${retType};`,
+          `}`,
+          ``,
+        );
+      }
       if (t.which === "list") {
         // Element access helpers for List(Struct|Text|Data).
         const elem = t.elementType;
-        if (elem.which === "struct" || elem.which === "list") {
+        if (
+          elem.which === "struct" ||
+          elem.which === "list" ||
+          elem.which === "interface"
+        ) {
+          const elemType =
+            elem.which === "struct"
+              ? ptrTypeForStruct(elem.typeId, ctx, elem.brand, owner)
+              : elem.which === "interface"
+                ? ptrTypeForInterface(elem.typeId, ctx, elem.brand, owner)
+                : "Ptr";
+          // Struct elements upgrade from primitive, text, and void lists.
+          // List and interface elements are pointer 0 of that struct, which
+          // is also how a composite list downgrades to a pointer list.
+          const read =
+            elem.which === "struct"
+              ? `listGetStruct(index) as ${elemType}`
+              : `listGetStruct(index).getP(0) as ${elemType}`;
           lines.push(
-            `export function ${fn}Len(ptr: Ptr): number {`,
-            `  return ptr.getP(${off}).listLen();`,
+            `export function ${fn}Len${generic}(${recv}): number {`,
+            `  return ${fn}(ptr).listLen();`,
             `}`,
             ``,
-            `export function ${fn}At(ptr: Ptr, index: number): Ptr {`,
-            `  return ptr.getP(${off}).listGetP(index);`,
+            `export function ${fn}At${generic}(${recv}, index: number): ${elemType} {`,
+            `  return ${fn}(ptr).${read};`,
             `}`,
             ``,
           );
@@ -392,28 +923,30 @@ function emitFieldGetter(
           // listGetText handles List(Text) pointer elements and composite
           // downgrade (list evolution); never listGetP(i).getText(0).
           lines.push(
-            `export function ${fn}Len(ptr: Ptr): number {`,
-            `  return ptr.getP(${off}).listLen();`,
+            `export function ${fn}Len${generic}(${recv}): number {`,
+            `  return ${fn}(ptr).listLen();`,
             `}`,
             ``,
-            `export function ${fn}At(ptr: Ptr, index: number): string {`,
-            `  return ptr.getP(${off}).listGetText(index);`,
+            `export function ${fn}At${generic}(${recv}, index: number): string {`,
+            `  return ${fn}(ptr).listGetText(index);`,
             `}`,
             ``,
           );
         }
       }
       return;
+    }
     default:
       return;
   }
 }
 
 function emitFieldSetter(
+  owner: NodeAst,
   typeName: string,
   field: FieldAst,
   discriminantByte: number | undefined,
-  byId: Map<bigint, NodeAst>,
+  ctx: ModuleEmitContext,
   lines: string[],
 ): void {
   if (!field.slot) return;
@@ -499,8 +1032,16 @@ function emitFieldSetter(
       );
       return;
     case "struct": {
-      emit(`ptr: StructBuilder, value: Ptr`, `ptr.setP(${off}, value);`);
-      const target = byId.get(t.typeId)?.struct;
+      const valueType = ptrTypeForStruct(t.typeId, ctx, t.brand, owner);
+      const g = ownerGenericClause(owner);
+      lines.push(
+        `export function ${fn}${g}(ptr: StructBuilder, value: ${valueType}): void {`,
+        ...select,
+        `  ptr.setP(${off}, value);`,
+        `}`,
+        ``,
+      );
+      const target = ctx.byId.get(t.typeId)?.struct;
       if (target) {
         lines.push(
           `export function ${initFn}(ptr: StructBuilder): StructBuilder {`,
@@ -515,7 +1056,8 @@ function emitFieldSetter(
     case "list": {
       emit(`ptr: StructBuilder, value: Ptr`, `ptr.setP(${off}, value);`);
       const elem = t.elementType;
-      const target = elem.which === "struct" ? byId.get(elem.typeId)?.struct : undefined;
+      const target =
+        elem.which === "struct" ? ctx.byId.get(elem.typeId)?.struct : undefined;
       if (target) {
         lines.push(
           `export function ${initFn}(ptr: StructBuilder, count: number): StructBuilder {`,
@@ -527,10 +1069,30 @@ function emitFieldSetter(
       }
       return;
     }
-    case "interface":
-    case "anyPointer":
-      emit(`ptr: StructBuilder, value: Ptr`, `ptr.setP(${off}, value);`);
+    case "interface": {
+      const valueType = ptrTypeForInterface(t.typeId, ctx, t.brand, owner);
+      const g = ownerGenericClause(owner);
+      lines.push(
+        `export function ${fn}${g}(ptr: StructBuilder, value: ${valueType}): void {`,
+        ...select,
+        `  ptr.setP(${off}, value);`,
+        `}`,
+        ``,
+      );
       return;
+    }
+    case "anyPointer": {
+      const anyTy = anyPointerTsType(t, owner, ctx.byId);
+      const generic = ownerGenericClause(owner, anyTy.genericParam);
+      lines.push(
+        `export function ${fn}${generic}(ptr: StructBuilder, value: ${anyTy.typeName}): void {`,
+        ...select,
+        `  ptr.setP(${off}, value);`,
+        `}`,
+        ``,
+      );
+      return;
+    }
     default:
       return;
   }
@@ -548,7 +1110,7 @@ function emitFieldSetter(
  */
 function emitInterface(
   node: NodeAst,
-  byId: Map<bigint, NodeAst>,
+  ctx: ModuleEmitContext,
   lines: string[],
 ): void {
   const methods = node.methods;
@@ -559,12 +1121,21 @@ function emitInterface(
   lines.push(
     `/** Interface ${node.displayName}. */`,
     `export const ${upper}_INTERFACE_ID = 0x${node.id.toString(16)}n;`,
+    paramNames(node).length > 0
+      ? `export type ${typeName}_Capability<${paramNames(node)
+          .map((name) => `${name} extends CapnpAnyPointer = CapnpAnyPointer`)
+          .join(", ")}> = Ptr & CapnpBranded<[${paramNames(node).join(", ")}]>;`
+      : `export type ${typeName}_Capability = Ptr;`,
     ``,
   );
+  if (node.parameters && node.parameters.length > 0) {
+    const params = node.parameters.map((p) => JSON.stringify(p)).join(", ");
+    lines.push(`export const ${typeName}_typeParameters = [${params}] as const;`, ``);
+  }
 
   // Method table: ordinal, and the shape of each struct the call moves.
   const dims = (id: bigint): { dw: number; pw: number } => {
-    const n = byId.get(id);
+    const n = ctx.byId.get(id);
     return {
       dw: n?.struct?.dataWordCount ?? 0,
       pw: n?.struct?.pointerCount ?? 0,
@@ -578,7 +1149,12 @@ function emitInterface(
     lines.push(
       `  ${m.name}: { ordinal: ${m.ordinal},` +
         ` paramsDwords: ${p.dw}, paramsPwords: ${p.pw},` +
-        ` resultsDwords: ${r.dw}, resultsPwords: ${r.pw} },`,
+        ` resultsDwords: ${r.dw}, resultsPwords: ${r.pw},` +
+        ` paramBrand: ${brandLiteral(m.paramBrand)},` +
+        ` resultBrand: ${brandLiteral(m.resultBrand)},` +
+        ` implicitParameters: [${(m.implicitParameters ?? [])
+          .map((name) => JSON.stringify(name))
+          .join(", ")}] },`,
     );
   }
   lines.push(`} as const;`, ``);
@@ -627,8 +1203,15 @@ function emitInterface(
     `export abstract class ${typeName}Server {`,
   );
   for (const m of methods) {
+    const clause = methodTypeParamClause(m, node, ctx);
+    const paramsType = structAliasType(
+      m.paramStructType,
+      m.paramBrand,
+      ctx,
+      node,
+    );
     lines.push(
-      `  abstract ${m.name}(params: Ptr, results: StructBuilder): void;`,
+      `  abstract ${m.name}${clause}(params: ${paramsType}, results: StructBuilder): void;`,
     );
   }
   lines.push(
@@ -664,7 +1247,7 @@ function emitInterface(
 
 function emitStruct(
   node: NodeAst,
-  byId: Map<bigint, NodeAst>,
+  ctx: ModuleEmitContext,
   lines: string[],
 ): void {
   const s = node.struct;
@@ -681,6 +1264,22 @@ function emitStruct(
   lines.push(`export const ${upper}_PWORDS = ${s.pointerCount};`);
   lines.push(`export const ${typeName}_dataWordCount = ${s.dataWordCount};`);
   lines.push(`export const ${typeName}_pointerCount = ${s.pointerCount};`);
+  const names = effectiveParamNames(node, ctx);
+  const owner = nodeWithParams(node, names);
+  if (names.length > 0) {
+    const clause = names
+      .map((name) => `${name} extends CapnpAnyPointer = CapnpAnyPointer`)
+      .join(", ");
+    lines.push(
+      `export type ${typeName}_Ptr<${clause}> = Ptr & CapnpBranded<[${names.join(", ")}]>;`,
+    );
+  } else {
+    lines.push(`export type ${typeName}_Ptr = Ptr;`);
+  }
+  if (names.length > 0) {
+    const params = names.map((p) => JSON.stringify(p)).join(", ");
+    lines.push(`export const ${typeName}_typeParameters = [${params}] as const;`);
+  }
 
   let discriminantByte: number | undefined;
   if (s.discriminantCount > 0) {
@@ -690,7 +1289,9 @@ function emitStruct(
     lines.push(
       `/** Union discriminant byte offset (u16). */`,
       `export const ${typeName}_discriminantOffset = ${discByte};`,
-      `export function ${typeName}_which(ptr: Ptr): number {`,
+      `export function ${typeName}_which${ownerGenericClause(owner)}(ptr: ${
+        names.length > 0 ? `${typeName}_Ptr<${names.join(", ")}>` : "Ptr"
+      }): number {`,
       `  return ptr.getU16(${discByte});`,
       `}`,
     );
@@ -720,17 +1321,29 @@ function emitStruct(
     if (f.group) {
       // Group field: same Ptr as parent; which/getters live on the group node.
       const gName = ident(f.name);
+      const initFn = `${typeName}_init${gName[0]!.toUpperCase()}${gName.slice(1)}`;
+      const selectGroup =
+        discriminantByte !== undefined && f.discriminant !== NO_DISCRIMINANT
+          ? [`  ptr.setU16(${discriminantByte}, ${f.discriminant});`]
+          : [];
+      const recvType =
+        names.length > 0 ? `${typeName}_Ptr<${names.join(", ")}>` : "Ptr";
       lines.push(
         `/** Group field \`${f.name}\` — same wire Ptr as parent; see group node helpers. */`,
-        `export function ${typeName}_get${gName[0]!.toUpperCase()}${gName.slice(1)}(ptr: Ptr): Ptr {`,
+        `export function ${typeName}_get${gName[0]!.toUpperCase()}${gName.slice(1)}${ownerGenericClause(owner)}(ptr: ${recvType}): ${recvType} {`,
+        `  return ptr;`,
+        `}`,
+        ``,
+        `export function ${initFn}(ptr: StructBuilder): StructBuilder {`,
+        ...selectGroup,
         `  return ptr;`,
         `}`,
         ``,
       );
       continue;
     }
-    emitFieldGetter(typeName, f, lines);
-    emitFieldSetter(typeName, f, discriminantByte, byId, lines);
+    emitFieldGetter(owner, typeName, f, ctx, lines);
+    emitFieldSetter(owner, typeName, f, discriminantByte, ctx, lines);
   }
 }
 
@@ -752,6 +1365,104 @@ export function emitModuleSource(
     resolvedId === 0n
       ? ast.nodes.filter((n) => n.which !== "file")
       : nodesForFile(ast, resolvedId);
+  // Every node, not just emitted ones: field and method types can refer to
+  // imported nodes whose dimensions or aliases are still needed.
+  const byId = new Map(ast.nodes.map((n) => [n.id, n]));
+  const ownerFileByNodeId = buildOwnerFileMap(ast, byId);
+  const requestedById = new Map(ast.requestedFiles.map((rf) => [rf.id, rf.filename]));
+
+  const referencedTypeIds = new Set<bigint>();
+  for (const n of nodes) collectNodeTypeRefs(n, referencedTypeIds);
+
+  const externalImports: Array<{ schemaPath: string; alias: string }> = [];
+  const importAliases = new Map<bigint, string>();
+  for (const typeId of referencedTypeIds) {
+    const owner = ownerFileByNodeId.get(typeId);
+    if (!owner || owner === 0n || owner === resolvedId) continue;
+    if (importAliases.has(owner)) continue;
+    const importSchema = requestedById.get(owner);
+    if (!importSchema) continue;
+    const alias = `__capnp_${owner.toString(16)}`;
+    importAliases.set(owner, alias);
+    externalImports.push({ schemaPath: importSchema, alias });
+  }
+
+  // A type from a file that was not requested has no module to import.
+  // Declare the pointer alias here so the reference type-checks. The short
+  // name is the one capnpc-c++ would use inside that file's namespace. If
+  // this file already has that name, qualify with the other file's stem,
+  // then append "_" until the identifier is free (the keyword rename).
+  const localExternalAliases: string[] = [];
+  const externalAliasNames = new Map<bigint, string>();
+  const usedAliasNames = new Set<string>();
+  for (const n of nodes) {
+    const short = shortTypeName(n.displayName);
+    if (!short) continue;
+    usedAliasNames.add(short);
+    usedAliasNames.add(`${short}_Ptr`);
+    usedAliasNames.add(`${short}_Capability`);
+    usedAliasNames.add(`${short}Client`);
+    usedAliasNames.add(`${short}Server`);
+  }
+  const emittedIds = new Set(nodes.map((n) => n.id));
+  let needsLocalGenericAlias = false;
+  for (const typeId of referencedTypeIds) {
+    const n = byId.get(typeId);
+    if (!n || (n.which !== "struct" && n.which !== "interface")) continue;
+    if (emittedIds.has(typeId)) continue;
+    const owner = ownerFileByNodeId.get(typeId) ?? 0n;
+    if (owner === resolvedId) continue;
+    if (owner !== 0n && importAliases.has(owner)) continue;
+    const suffix = n.which === "interface" ? "_Capability" : "_Ptr";
+    const short = shortTypeName(n.displayName);
+    let key = `${short}${suffix}`;
+    if (usedAliasNames.has(key)) {
+      key = `${schemaFileStem(n.displayName)}_${key}`;
+      while (usedAliasNames.has(key)) key = `${key}_`;
+    }
+    usedAliasNames.add(key);
+    externalAliasNames.set(typeId, key);
+    const names = paramNames(n);
+    if (names.length > 0) {
+      needsLocalGenericAlias = true;
+      const clause = names
+        .map((name) => `${name} extends CapnpAnyPointer = CapnpAnyPointer`)
+        .join(", ");
+      localExternalAliases.push(
+        `export type ${key}<${clause}> = Ptr & CapnpBranded<[${names.join(", ")}]>;`,
+      );
+    } else {
+      localExternalAliases.push(`export type ${key} = Ptr;`);
+    }
+  }
+  externalImports.sort((a, b) => a.schemaPath.localeCompare(b.schemaPath));
+
+  const ctx: ModuleEmitContext = {
+    byId,
+    ownerFileByNodeId,
+    currentFileId: resolvedId,
+    importAliases,
+    externalAliasNames,
+  };
+
+  const hasPointerFieldDefaults = nodes.some(
+    (n) =>
+      n.which === "struct" &&
+      (n.struct?.fields ?? []).some((f) => !!fieldPointerDefaultBytes(f)),
+  );
+  const needsMessageImport =
+    hasPointerFieldDefaults ||
+    nodes.some(
+      (n) => n.which === "const" && !!n.const && isPointerValue(n.const.value),
+    );
+  const needsPtrKindImport = hasPointerFieldDefaults;
+  const needsAnyPointerWrappers = nodes.some(
+    (n) =>
+      n.which === "struct" &&
+      (n.struct?.fields ?? []).some(
+        (f) => f.slot?.type.which === "anyPointer",
+      ),
+  );
 
   const lines: string[] = [];
   lines.push(`/**`);
@@ -779,6 +1490,19 @@ export function emitModuleSource(
       ? `import type { Ptr, StructBuilder } from "@haozeke/capnp";`
       : `import type { Ptr } from "@haozeke/capnp";`,
   );
+  const runtimeValueImports: string[] = [];
+  if (needsMessageImport) runtimeValueImports.push("Message as CapnpMessage");
+  if (needsPtrKindImport) runtimeValueImports.push("PtrKind");
+  if (runtimeValueImports.length > 0) {
+    lines.push(
+      `import { ${runtimeValueImports.join(", ")} } from "@haozeke/capnp";`,
+    );
+  }
+  for (const imp of externalImports) {
+    lines.push(
+      `import type * as ${imp.alias} from ${JSON.stringify(`./${outputNameForSchema(imp.schemaPath)}`)};`,
+    );
+  }
   lines.push(``);
   lines.push(
     `export const __capnpcTsMeta = {`,
@@ -790,25 +1514,48 @@ export function emitModuleSource(
     `} as const;`,
     ``,
   );
-
-  // Every node, not just the emitted ones: field and method types can be
-  // implicit or imported nodes whose dimensions are needed by generated
-  // builder helpers and interface stubs.
-  const byId = new Map(ast.nodes.map((n) => [n.id, n]));
+  const needsBrandHelpers =
+    needsLocalGenericAlias ||
+    nodes.some((n) => (n.parameters?.length ?? 0) > 0 || nodeMentionsBrand(n));
+  if (needsAnyPointerWrappers || needsBrandHelpers) {
+    lines.push(
+      `export type CapnpAnyPointer = Ptr;`,
+      `export type CapnpAnyStruct = Ptr;`,
+      `export type CapnpAnyList = Ptr;`,
+      `export type CapnpCapability = Ptr;`,
+    );
+    if (needsBrandHelpers) {
+      lines.push(
+        `export type CapnpBranded<T> = { readonly __capnpBrand?: T };`,
+        `export type CapnpText = Ptr;`,
+        `export type CapnpData = Ptr;`,
+        `export type CapnpList<T = CapnpAnyPointer> = Ptr & CapnpBranded<[T]>;`,
+      );
+    }
+    lines.push(``);
+  }
+  if (localExternalAliases.length > 0) {
+    lines.push(...localExternalAliases, ``);
+  }
 
   // Enums first (referenced by struct field comments / types).
   for (const n of nodes) {
     if (n.which === "enum") emitEnum(n, lines);
   }
   for (const n of nodes) {
-    if (n.which === "struct") emitStruct(n, byId, lines);
+    if (n.which === "const") emitConst(n, lines);
+  }
+  for (const n of nodes) {
+    if (n.which === "annotation") emitAnnotation(n, lines);
+  }
+  for (const n of nodes) {
+    if (n.which === "struct") emitStruct(n, ctx, lines);
   }
 
   for (const n of nodes) {
-    if (n.which === "interface") emitInterface(n, byId, lines);
+    if (n.which === "interface") emitInterface(n, ctx, lines);
   }
 
-  // Consts and annotations are not emitted.
   return lines.join("\n");
 }
 

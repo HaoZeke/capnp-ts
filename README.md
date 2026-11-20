@@ -42,7 +42,8 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
 - Text, Data, pointer lists, primitive lists, bit-lists; composite list elements
 - Schema-evolution list upgrade/downgrade for supported shapes (see runtime
   `list-evolution.ts`): encoding.html Void upgrades, Bool/bit refuses; prim and
-  pointer list → struct field `@0` views; composite downgrade to prim/Text
+  pointer list → struct field `@0` views; composite downgrade to prim/Text;
+  cross-width primitive demotion matrix (u64/u32/u16/u8 field-`@0` reads)
 - Stream segment-table serialize (`serializeToFlat` / `frameSegments`)
 - Multi-segment `MessageBuilder` arena with far / double-far pointer paths
 - Same-message orphan `disown` / `adopt`; cross-message `deepCopyPtr` / `structSetP`
@@ -64,8 +65,8 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
   `which`, Text/Data setters, shape-aware struct and `List(Struct)` initializers,
   List(Text) via `listGetText`, u64probe-safe `getU64`/`bigint`)
 
-Current limits: generated primitive/pointer-list element builders, dynamic
-reflection, and the cross-width list-demotion matrix beyond the covered suite.
+Current limits: generated primitive/pointer-list element builders and dynamic
+reflection.
 
 `@haozeke/capnp-rpc` is the vat: levels 1 through 4, tested against a live
 capnp-C++ `EzRpcServer` peer (`interop/run_rpc_interop.sh`).
@@ -83,7 +84,7 @@ present. Do not treat this table as a green checklist for unbuilt work.
 | Packed codec | yes | yes | yes | yes | **yes** (C++ 1.4.0 `0xff` fewer-than-two-zeros heuristic; AddressBook golden) |
 | Zero-copy reads from caller buffer | yes | yes | yes | yes | **yes** (`Message.viewFlat`) |
 | Traversal and depth limits | no | yes | yes | yes | **yes** (8 Mi words + depth 64; far/`getP`/`listGetP` accumulate; see SECURITY.md) |
-| Schema-evolution reads (defaults past end, list up/downgrade) | partial | yes | yes | yes | **partial** (Void upgrade + Bool refuse per encoding.html; prim/pointer upgrade + composite downgrade; not every demotion edge) |
+| Schema-evolution reads (defaults past end, list up/downgrade) | partial | yes | yes | yes | **yes** (Void upgrade + Bool refuse per encoding.html; prim/pointer upgrade; composite downgrade; cross-width primitive demotion matrix) |
 | Builder / deep copy / orphans | limited | yes | yes | partial | **yes** (multi-seg arena + far/double-far; orphan disown/adopt; deepCopyPtr) |
 | Canonical form | no | yes | yes | yes | **yes** (AddressBook golden byte-identical to CLI) |
 | Code generator (`capnp compile -o`) | yes | yes | yes | yes | **yes** (structs/enums/unions; default-aware getters and setters; struct and `List(Struct)` init helpers) |
@@ -107,7 +108,18 @@ Runtime is pure TypeScript ESM (Node ≥ 18 or Bun). Workspace root:
 
 ```console
 $ bun install
-$ bun test
+$ bun run test
+```
+
+`bun run test` runs the core suites by default. The pycapnp bidirectional interop
+suite requires an explicit local Python environment (the CI job sets this up
+and enforces it with `CAPNP_REQUIRE_PYCAPNP=1`):
+
+```console
+$ python3 -m venv .venv-pycapnp
+$ .venv-pycapnp/bin/pip install --upgrade pip pycapnp
+$ .venv-pycapnp/bin/python scripts/pycapnp_interop.py write-all
+$ CAPNP_REQUIRE_PYCAPNP=1 bun test --timeout 10000 packages/runtime/test/pycapnp-interop.test.ts
 ```
 
 Toolchain for fixture regen (Cap'n CLI 1.4.*) via [pixi](https://pixi.sh):
@@ -118,11 +130,14 @@ $ pixi run fixtures   # or: bun run fixtures
 $ pixi run test
 ```
 
-Consume the runtime from the workspace path (or a published tarball when
-tagged):
+Consume the runtime from a workspace path or local tarball today. Registry
+publication for `@haozeke/*` is staged but not live yet.
 
 ```console
-$ bun add @haozeke/capnp
+$ bun add /path/to/capnp-ts/packages/runtime
+# or
+$ cd packages/runtime && npm pack
+$ bun add ./haozeke-capnp-0.1.0-dev.tgz
 ```
 
 Package exports (dual):
@@ -207,6 +222,11 @@ const packed = pack(bytes);
 const unpacked = unpack(packed); // same bytes as framed input
 const canonical = canonicalizeFlat(bytes); // single-segment preorder form
 ```
+
+`pack()` encodes the buffer it is given, so `unpack(pack(x))` is the same
+bytes as `x`. Pass `{ compactFramed: true }` to compact a stream-framed
+message into one segment first, which is what `capnp convert binary:packed`
+does. That option changes the unpacked bytes of a multi-segment frame.
 
 Regenerate goldens (needs system `capnp` 1.4.*):
 

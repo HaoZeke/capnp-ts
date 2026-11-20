@@ -11,6 +11,7 @@
  * | List(pointer) e.g. List(Text)| List(Struct) pointer @0        | listGetStruct + getText/getP |
  * | List(Struct) data word 0     | List(UInt*) field @0            | listGetU8/U16/U32/U64/F64 |
  * | List(Struct) pointer 0       | List(Text) / pointer list       | listGetText |
+ * | List(UInt64/32/16/8)         | List(UInt32/16/8) field @0      | listGetU* low-byte demotion |
  *
  * Upgrade views limit `dataBits` to the element width so oversize field reads
  * return the caller default and never spill into the next element.
@@ -21,8 +22,12 @@
  * - List(Void) (C=0) **does** upgrade: zero-size struct view (no data, no ptrs).
  * - List(Bool) (C=1 bit) **does not** upgrade: listGetStruct throws KIND.
  *
- * Explicit non-goal: cross-width primitive demotion without a composite
- * (not claimed; refused or undefined — do not treat as silent partial success).
+ * Primitive list getters follow C++ ListReader::getList (capnp 1.4.0):
+ * a wider element type than the wire (a promotion) and a Bool list read as
+ * data both throw SCHEMA. Demotions read the low-order bytes. A non-bit data
+ * list may be read as Bool; that accessor uses the first `count` packed bits
+ * and ignores the element step. Struct-field reads on an upgraded element
+ * still return the caller default when the field is wider than `dataBits`.
  *
  * Implementation lives on {@link Ptr} in message.ts; this module re-exports
  * free-function aliases matching the janet `capnp_list_get_*` surface.

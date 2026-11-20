@@ -1,20 +1,50 @@
 /**
  * Cap'n Proto packed encoding (encoding.html).
- * Encoder matches Cap'n C++ PackedOutputStream: after tag 0xff, following
- * words with fewer than two zero bytes stay in the verbatim run.
+ * Encoder matches PackedOutputStream: after tag 0xff, following words with
+ * fewer than two zero bytes stay in the verbatim run.
+ *
+ * A framed message is packed as separate chunks — the segment table, then
+ * each segment — because the packed writer issues one write per chunk and a
+ * zero or verbatim run does not cross those boundaries.
  */
 
+import { loadU32 } from "./endian.ts";
 import {
   CapnpError,
   DEFAULT_TRAVERSAL_WORDS,
+  MAX_SEGMENTS,
   WORD_BYTES,
 } from "./kinds.ts";
+import { Message } from "./message.ts";
+import { MessageBuilder } from "./builder.ts";
+import { deepCopyPtrToSlot } from "./copy.ts";
 
 /**
  * Max words `unpack` may expand into (default matches reader traversal budget).
  * Blocks packed amplification bombs (e.g. repeated 0x00 0xff zero runs).
  */
 export const MAX_UNPACKED_WORDS = DEFAULT_TRAVERSAL_WORDS;
+
+export interface PackOptions {
+  /**
+   * When true, treat stream-framed message input like `capnp convert`:
+   * parse, compact reachable objects into one segment, then pack.
+   * Default is false, so `unpack(pack(x))` keeps the input bytes.
+   */
+  compactFramed?: boolean;
+}
+
+function compactFramedMessage(input: Uint8Array): Uint8Array {
+  try {
+    const msg = Message.fromFlat(input);
+    const b = new MessageBuilder({ forceSingle: true });
+    deepCopyPtrToSlot(b, b.rootSlot(), msg.root(), 0);
+    return b.toFlat();
+  } catch {
+    // Not a valid framed message (or not compactable under defaults): pack raw bytes.
+    return input;
+  }
+}
 
 function wordAllZero(w: Uint8Array, off: number): boolean {
   for (let i = 0; i < 8; i++) if (w[off + i] !== 0) return false;
@@ -33,31 +63,63 @@ function wordFewerThanTwoZeros(w: Uint8Array, off: number): boolean {
   return true;
 }
 
-export function pack(input: Uint8Array): Uint8Array {
-  if (input.length % WORD_BYTES !== 0) {
-    throw new CapnpError("ARG", "pack input length must be multiple of 8");
+/**
+ * Byte ends of the segment table and each segment, when `input` is exactly
+ * one stream-framed message. Null when the buffer is not that frame, so raw
+ * word buffers keep a single packing run.
+ */
+function framedPieceEnds(input: Uint8Array): number[] | null {
+  if (input.length < WORD_BYTES) return null;
+  const nsegs = loadU32(input, 0) + 1;
+  if (nsegs <= 0 || nsegs > MAX_SEGMENTS) return null;
+  let tableBytes = 4 + 4 * nsegs;
+  if (tableBytes % WORD_BYTES !== 0) tableBytes += 4;
+  if (tableBytes > input.length) return null;
+  let total = BigInt(tableBytes);
+  const sizes: number[] = [];
+  for (let i = 0; i < nsegs; i++) {
+    const sz = loadU32(input, 4 + 4 * i);
+    sizes.push(sz);
+    total += BigInt(sz) * BigInt(WORD_BYTES);
+    if (total > BigInt(input.length)) return null;
   }
-  const nwords = input.length / WORD_BYTES;
+  if (total !== BigInt(input.length)) return null;
+  const ends: number[] = [tableBytes];
+  let off = tableBytes;
+  for (const sz of sizes) {
+    off += sz * WORD_BYTES;
+    ends.push(off);
+  }
+  return ends;
+}
+
+/** Pack words in [byteStart, byteEnd). The range is a multiple of 8. */
+function packRange(source: Uint8Array, byteStart: number, byteEnd: number): number[] {
   const out: number[] = [];
+  const nwords = (byteEnd - byteStart) / WORD_BYTES;
   let w = 0;
   while (w < nwords) {
-    const base = w * WORD_BYTES;
+    const base = byteStart + w * WORD_BYTES;
     let tag = 0;
     let nz = 0;
     for (let k = 0; k < 8; k++) {
-      if (input[base + k] !== 0) {
+      if (source[base + k] !== 0) {
         tag |= 1 << k;
         nz++;
       }
     }
     out.push(tag);
     for (let k = 0; k < 8; k++) {
-      if (tag & (1 << k)) out.push(input[base + k]!);
+      if (tag & (1 << k)) out.push(source[base + k]!);
     }
     w++;
     if (tag === 0) {
       let run = 0;
-      while (w + run < nwords && run < 255 && wordAllZero(input, (w + run) * WORD_BYTES)) {
+      while (
+        w + run < nwords &&
+        run < 255 &&
+        wordAllZero(source, byteStart + (w + run) * WORD_BYTES)
+      ) {
         run++;
       }
       out.push(run);
@@ -67,16 +129,38 @@ export function pack(input: Uint8Array): Uint8Array {
       while (
         w + run < nwords &&
         run < 255 &&
-        wordFewerThanTwoZeros(input, (w + run) * WORD_BYTES)
+        wordFewerThanTwoZeros(source, byteStart + (w + run) * WORD_BYTES)
       ) {
         run++;
       }
       out.push(run);
       for (let r = 0; r < run; r++) {
-        const o = (w + r) * WORD_BYTES;
-        for (let k = 0; k < 8; k++) out.push(input[o + k]!);
+        const o = byteStart + (w + r) * WORD_BYTES;
+        for (let k = 0; k < 8; k++) out.push(source[o + k]!);
       }
       w += run;
+    }
+  }
+  return out;
+}
+
+export function pack(input: Uint8Array, opts?: PackOptions): Uint8Array {
+  if (input.length % WORD_BYTES !== 0) {
+    throw new CapnpError("ARG", "pack input length must be multiple of 8");
+  }
+  const source = opts?.compactFramed ? compactFramedMessage(input) : input;
+  if (source.length % WORD_BYTES !== 0) {
+    throw new CapnpError("ARG", "pack source length must be multiple of 8");
+  }
+  const ends = framedPieceEnds(source);
+  const out: number[] = [];
+  if (!ends) {
+    out.push(...packRange(source, 0, source.length));
+  } else {
+    let start = 0;
+    for (const end of ends) {
+      out.push(...packRange(source, start, end));
+      start = end;
     }
   }
   return Uint8Array.from(out);

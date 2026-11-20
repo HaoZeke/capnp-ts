@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   writeFileSync,
   existsSync,
 } from "node:fs";
@@ -306,8 +307,37 @@ describe("Field.defaultValue walk", () => {
     );
     expect(src).toContain("ptr.getText(0, SINK_LABEL_DEFAULT)");
     expect(src).toContain("ptr.getData(1, SINK_PAYLOAD_DEFAULT)");
+    expect(src).toContain("const SINK_ORIGIN_DEFAULT_BYTES = new Uint8Array([");
+    expect(src).toContain("const SINK_SCORES_DEFAULT_BYTES = new Uint8Array([");
+    expect(src).toContain("p.kind === PtrKind.Null ? SINK_ORIGIN_DEFAULT_PTR : p");
+    expect(src).toContain("p.kind === PtrKind.Null ? SINK_SCORES_DEFAULT_PTR : p");
     expect(src).toContain("ptr.getF64(");
     expect(src).toContain("ptr.getBool(");
+
+    const scratchDir = join(repoRoot, ".tmp-codegen-tests");
+    mkdirSync(scratchDir, { recursive: true });
+    const outDir = mkdtempSync(join(scratchDir, "kitchen-defaults-"));
+    const outFile = join(outDir, "kitchen.ts");
+    try {
+      writeFileSync(outFile, src, "utf8");
+      const gen = await import(outFile);
+      const builder = new MessageBuilder();
+      builder.initRoot(gen.SINK_DWORDS, gen.SINK_PWORDS);
+      const sink = Message.fromFlat(builder.toFlat()).root();
+      const origin = gen.Sink_getOrigin(sink);
+      expect(origin.kind).toBe(PtrKind.Struct);
+      expect(origin.getF64(0)).toBeCloseTo(1.5);
+      expect(origin.getF64(8)).toBeCloseTo(2.5);
+      expect(origin.getF64(16)).toBeCloseTo(-3.5);
+      const scores = gen.Sink_getScores(sink);
+      expect(scores.kind).toBe(PtrKind.List);
+      expect(scores.listLen()).toBe(3);
+      expect(scores.listGetU16(0)).toBe(3);
+      expect(scores.listGetU16(1)).toBe(1);
+      expect(scores.listGetU16(2)).toBe(4);
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
   });
 
   test("synthetic float32 default emits getF32 with schema dflt", async () => {
@@ -362,6 +392,97 @@ describe("Field.defaultValue walk", () => {
     expect(src).toMatch(/Probe_getX\(ptr: Ptr, dflt = 1\.5\)/);
     expect(src).toMatch(/Probe_getN\(ptr: Ptr, dflt = -7\)/);
     expect(src).not.toMatch(/Probe_getX[\s\S]{0,80}getU32/);
+  });
+});
+
+describe("const and annotation emit", () => {
+  test("kitchen consts emit scalar and pointer-backed exports", async () => {
+    const kitchenPath = join(fixturesDir, "kitchen.cgr.bin");
+    const ast = await walkCgr(new Uint8Array(readFileSync(kitchenPath)));
+    const src = emitSourceString(ast);
+    expect(src).toContain("export const answer = 42 as const;");
+    expect(src).toContain("export const tau = 6.283185307179586 as const;");
+    expect(src).toContain('export const greeting = "hey there" as const;');
+    expect(src).toContain(
+      "export const magic = new Uint8Array([202, 254, 240, 13]);",
+    );
+    expect(src).toContain("const PRIMES_BYTES = new Uint8Array([");
+    expect(src).toContain("export const primes: Ptr = PRIMES_PTR;");
+    expect(src).toContain("const HOME_BYTES = new Uint8Array([");
+    expect(src).toContain("export const home: Ptr = HOME_PTR;");
+
+    const scratchDir = join(repoRoot, ".tmp-codegen-tests");
+    mkdirSync(scratchDir, { recursive: true });
+    const outDir = mkdtempSync(join(scratchDir, "kitchen-consts-"));
+    const outFile = join(outDir, "kitchen.ts");
+    try {
+      writeFileSync(outFile, src, "utf8");
+      const gen = await import(outFile);
+      expect(gen.answer).toBe(42);
+      expect(gen.tau).toBeCloseTo(Math.PI * 2);
+      expect(gen.greeting).toBe("hey there");
+      expect(Buffer.from(gen.magic).toString("hex")).toBe("cafef00d");
+      expect(gen.primes.kind).toBe(PtrKind.List);
+      expect(gen.primes.listLen()).toBe(4);
+      expect(gen.primes.listGetU32(0)).toBe(2);
+      expect(gen.primes.listGetU32(3)).toBe(7);
+      expect(gen.home.kind).toBe(PtrKind.Struct);
+      expect(gen.home.getF64(0)).toBeCloseTo(-1);
+      expect(gen.home.getF64(8)).toBeCloseTo(0.5);
+      expect(gen.home.getF64(16)).toBeCloseTo(9.25);
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
+  });
+
+  test("Int64 constants preserve their signed value", async () => {
+    const { emitModuleSource } = await import("../src/emit.ts");
+    const synthetic = {
+      nodes: [
+        {
+          id: 0x1n,
+          displayName: "synth.capnp:negative",
+          displayNamePrefixLength: 0,
+          scopeId: 0n,
+          which: "const" as const,
+          whichTag: 4,
+          nestedNodes: [],
+          const: {
+            type: { which: "int64" as const },
+            value: { which: "int64" as const, value: -1n },
+          },
+        },
+      ],
+      requestedFiles: [{ id: 0n, filename: "synth.capnp" }],
+    };
+    const src = emitModuleSource(synthetic as never, "synth.capnp", 0n);
+    expect(src).toContain("export const negative = -1n as const;");
+  });
+
+  test("annotation nodes emit id, type, and targets mask metadata", async () => {
+    const { emitModuleSource } = await import("../src/emit.ts");
+    const synthetic = {
+      nodes: [
+        {
+          id: 0x1n,
+          displayName: "synth.capnp:foo",
+          displayNamePrefixLength: 0,
+          scopeId: 0n,
+          which: "annotation" as const,
+          whichTag: 5,
+          nestedNodes: [],
+          annotation: {
+            type: { which: "text" as const },
+            targetsMask: 0x10,
+          },
+        },
+      ],
+      requestedFiles: [{ id: 0n, filename: "synth.capnp" }],
+    };
+    const src = emitModuleSource(synthetic as never, "synth.capnp", 0n);
+    expect(src).toContain("FOO_ANNOTATION_ID = 0x1n");
+    expect(src).toContain("FOO_ANNOTATION_TARGETS_MASK = 16");
+    expect(src).toContain('FOO_ANNOTATION_TYPE = "text" as const;');
   });
 });
 
