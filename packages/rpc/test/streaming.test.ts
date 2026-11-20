@@ -16,6 +16,7 @@ import {
   WindowFlowController,
 } from "../src/index.ts";
 import { ImportClient } from "../src/remote.ts";
+import { frameLength } from "../src/socket.ts";
 import { IFACE, link } from "./support.ts";
 
 const WRITE = 0;
@@ -227,6 +228,18 @@ describe("flow controller", () => {
     expect(opted.streamWindow).toBeGreaterThan(100);
     e.resolve();
     f.resolve();
+  });
+});
+
+describe("stream framing", () => {
+  test("accepts 511 segments and rejects 512", () => {
+    const accepted = new Uint8Array(2048);
+    new DataView(accepted.buffer).setUint32(0, 510, true);
+    expect(frameLength(accepted)).toBe(accepted.length);
+
+    const rejected = new Uint8Array(2056);
+    new DataView(rejected.buffer).setUint32(0, 511, true);
+    expect(() => frameLength(rejected)).toThrow("bad segment count 512");
   });
 });
 
