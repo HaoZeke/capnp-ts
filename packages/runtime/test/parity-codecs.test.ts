@@ -10,6 +10,7 @@ import {
   PtrKind,
   storeU32,
   storeU64,
+  unpack,
   wpMakeFar,
   wpMakeList,
   wpMakeStruct,
@@ -168,5 +169,17 @@ describe("pointer walks against capnp 1.4.0", () => {
       words(777n),
     ]);
     expect(msg.root().getU64(0)).toBe(777n);
+  });
+});
+
+describe("packed streams against capnp 1.4.0", () => {
+  test("P-01 a zero run may cross segments and stops at the table", () => {
+    const crossSeg = unpack(new Uint8Array([0x11, 0x01, 0x02, 0x01, 0x02, 0x00, 0x03]));
+    const msg = Message.fromFlat(crossSeg);
+    expect(msg.segmentCount).toBe(2);
+    expect(msg.segWords(1)).toBe(2);
+    expect(() => unpack(new Uint8Array([0x11, 0x03, 0x01, 0x00, 0x02]))).toThrow(
+      /segment boundary/,
+    );
   });
 });
