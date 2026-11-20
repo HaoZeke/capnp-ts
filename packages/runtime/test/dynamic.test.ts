@@ -39,19 +39,61 @@ function readGolden(name: string): Uint8Array {
 describe("DynamicStruct / DynamicList / DynamicEnum / DynamicCapability", () => {
   test("rejects a list whose wire elements are narrower than its schema", () => {
     const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
-    const builder = new MessageBuilder();
-    // `defaultNums` is pointer slot 3 and has type `List(Int32)`.
-    builder.initRoot(0, 4).initPrimList(3, ElemSize.Byte, 1, 1);
-    const sink = DynamicStruct.fromMessage(
-      Message.fromFlat(builder.toFlat()),
-      loader.resolveStruct("KitchenSink"),
-    );
-    const values = sink.get("defaultNums").asList();
-    expect(() => values.get(0)).toThrow(CapnpError);
-    try {
-      values.get(0);
-    } catch (err) {
-      expect((err as CapnpError).code).toBe("SCHEMA");
+    const schema = loader.resolveStruct("KitchenSink");
+    // `defaultNums` is pointer slot 3 and has type `List(Int32)`. The element
+    // size is checked when the list is read, even with no elements, as in
+    // C++ `readListPointer`.
+    for (const [esize, count, bytes] of [
+      [ElemSize.Byte, 1, 1],
+      [ElemSize.Byte, 0, 1],
+      [ElemSize.TwoBytes, 0, 2],
+      [ElemSize.Bit, 0, 1],
+      [ElemSize.Void, 0, 0],
+    ] as const) {
+      const builder = new MessageBuilder();
+      builder.initRoot(0, 4).initPrimList(3, esize, count, bytes);
+      const sink = DynamicStruct.fromMessage(Message.fromFlat(builder.toFlat()), schema);
+      expect(() => sink.get("defaultNums")).toThrow(CapnpError);
+      try {
+        sink.get("defaultNums");
+      } catch (err) {
+        expect((err as CapnpError).code).toBe("SCHEMA");
+      }
+    }
+
+    const wide = new MessageBuilder();
+    wide.initRoot(0, 4).initPrimList(3, ElemSize.EightBytes, 0, 8);
+    const ok = DynamicStruct.fromMessage(Message.fromFlat(wide.toFlat()), schema);
+    expect(ok.get("defaultNums").asList().size()).toBe(0);
+  });
+
+  test.skipIf(!hasCapnp)("list element width errors match capnp decode", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const schema = loader.resolveStruct("KitchenSink");
+    const file = join(repoRoot, "schema/dynamic-kitchen.capnp");
+    for (const [esize, count, bytes] of [
+      [ElemSize.Byte, 0, 1],
+      [ElemSize.Byte, 2, 1],
+      [ElemSize.TwoBytes, 0, 2],
+      [ElemSize.FourBytes, 0, 4],
+      [ElemSize.EightBytes, 0, 8],
+      [ElemSize.Bit, 0, 1],
+      [ElemSize.Pointer, 0, 8],
+      [ElemSize.Void, 0, 0],
+    ] as const) {
+      const builder = new MessageBuilder();
+      builder.initRoot(9, 15).initPrimList(3, esize, count, bytes);
+      const flat = builder.toFlat();
+      const cli = spawnSync("capnp", ["decode", "--short", file, "KitchenSink"], {
+        input: Buffer.from(flat),
+      });
+      let threw = false;
+      try {
+        DynamicStruct.fromMessage(Message.fromFlat(flat), schema).get("defaultNums");
+      } catch {
+        threw = true;
+      }
+      expect(threw).toBe(cli.status !== 0);
     }
   });
 
@@ -347,8 +389,7 @@ describe("DynamicStruct / DynamicList / DynamicEnum / DynamicCapability", () => 
     expect(upgradedVoids.get(0).asStruct().get("key").asText()).toBe("default-key");
     expect(upgradedVoids.get(0).asStruct().get("code").asInt32()).toBe(-42);
 
-    const boolAsStructList = new DynamicList.Reader(listTagSchema, upParsed.getP(2));
-    expect(() => boolAsStructList.get(0)).toThrow(CapnpError);
+    expect(() => new DynamicList.Reader(listTagSchema, upParsed.getP(2))).toThrow(CapnpError);
 
     // Composite List(Tag) downgraded to List(Text) reads field @0 (key)
     const compMsg = new MessageBuilder();
@@ -389,10 +430,12 @@ describe("DynamicStruct / DynamicList / DynamicEnum / DynamicCapability", () => 
     const u32AsVoid = new DynamicList.Reader(ListSchema.of(Type.VOID), primParsed.getP(0));
     expect(u32AsVoid.get(0).asVoid()).toBeUndefined();
 
-    const u8AsU32 = new DynamicList.Reader(ListSchema.of(Type.UINT32), primParsed.getP(1));
-    expect(() => u8AsU32.get(0)).toThrow(CapnpError);
-    const boolAsVoid = new DynamicList.Reader(ListSchema.of(Type.VOID), primParsed.getP(2));
-    expect(() => boolAsVoid.get(0)).toThrow(CapnpError);
+    expect(() => new DynamicList.Reader(ListSchema.of(Type.UINT32), primParsed.getP(1))).toThrow(
+      CapnpError,
+    );
+    expect(() => new DynamicList.Reader(ListSchema.of(Type.VOID), primParsed.getP(2))).toThrow(
+      CapnpError,
+    );
 
     // 5. DynamicStructBuilder in-place upgrades of smaller composite & non-composite struct lists + root
     const upgBuilder = new MessageBuilder();

@@ -2074,6 +2074,40 @@ function copyDynamicStructFields(
   }
 }
 
+/**
+ * Data bits and pointers per element a list reader expects for an element
+ * type, the inputs of C++ `readListPointer`'s element size check.
+ */
+function expectedListShape(kind: number): [bits: number, pointers: number] {
+  switch (kind) {
+    case TypeKind.Bool:
+      return [1, 0];
+    case TypeKind.Int8:
+    case TypeKind.UInt8:
+      return [8, 0];
+    case TypeKind.Int16:
+    case TypeKind.UInt16:
+    case TypeKind.Enum:
+      return [16, 0];
+    case TypeKind.Int32:
+    case TypeKind.UInt32:
+    case TypeKind.Float32:
+      return [32, 0];
+    case TypeKind.Int64:
+    case TypeKind.UInt64:
+    case TypeKind.Float64:
+      return [64, 0];
+    case TypeKind.Text:
+    case TypeKind.Data:
+    case TypeKind.List:
+    case TypeKind.Interface:
+    case TypeKind.AnyPointer:
+      return [0, 1];
+    default:
+      return [0, 0];
+  }
+}
+
 /** Read-only view over a list governed by a ListSchema, supporting list evolution. */
 export class DynamicListReader implements Iterable<DynamicValueReader> {
   readonly schema: ListSchema;
@@ -2087,6 +2121,10 @@ export class DynamicListReader implements Iterable<DynamicValueReader> {
     );
     this.schema = schema;
     this.ptr = ptr;
+    if (ptr.kind === PtrKind.List) {
+      const [bits, pointers] = expectedListShape(schema.getElementType().whichCode);
+      ptr.assertListCompat(bits, pointers);
+    }
   }
 
   static empty(schema: ListSchema): DynamicListReader {

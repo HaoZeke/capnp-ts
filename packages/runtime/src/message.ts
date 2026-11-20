@@ -808,7 +808,7 @@ export class Ptr {
    * is 1 for a pointer list. Promotions and Bool-to-data reads throw SCHEMA.
    * A Bool reader may view a wider data list; the bool accessor then ignores step.
    */
-  private assertListCompat(expectedBits: number, expectedPointers: number): void {
+  assertListCompat(expectedBits: number, expectedPointers: number): void {
     if (this.esize === ElemSize.Composite) {
       if (expectedBits === 1 && expectedPointers === 0) {
         throw new CapnpError(
