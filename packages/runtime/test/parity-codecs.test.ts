@@ -17,6 +17,7 @@ import {
   canonicalize,
   decodeText,
   isCanonical,
+  pack,
   storeU32,
   storeU64,
   unpack,
@@ -361,5 +362,50 @@ describe("nesting limit against capnp 1.4.0 pointer reads", () => {
       words(wpMakeFar(false, 0, 9), wpMakeStruct(0, 0, 0)),
     ]);
     expect(() => absent.root()).toThrow(/unknown segment/);
+  });
+});
+
+function oneSegmentFrame(...body: bigint[]): Uint8Array {
+  const table = new Uint8Array(8);
+  storeU32(table, 4, body.length);
+  const out = new Uint8Array(8 + body.length * 8);
+  out.set(table);
+  out.set(words(...body), 8);
+  return out;
+}
+
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.length;
+  }
+  return out;
+}
+
+describe("packed round trips against capnp 1.4.0", () => {
+  test("unpack returns raw word buffers that pack produced", () => {
+    const zeros = new Uint8Array(48);
+    expect(unpack(pack(zeros))).toEqual(zeros);
+    const dense = new Uint8Array(40).fill(7);
+    expect(unpack(pack(dense))).toEqual(dense);
+    expect(unpack(new Uint8Array([0x00, 0x05]))).toEqual(zeros);
+  });
+
+  test("concatenated frames pack and unpack piece by piece", () => {
+    const a = oneSegmentFrame(wpMakeStruct(0, 1, 0), 0x0102n);
+    const b = oneSegmentFrame(wpMakeStruct(0, 1, 0), 0x0304n);
+    const both = concat(a, b);
+    expect(pack(both)).toEqual(concat(pack(a), pack(b)));
+    expect(unpack(pack(both))).toEqual(both);
+  });
+
+  test("unpack validates the first message and leaves later bytes alone", () => {
+    const a = oneSegmentFrame(wpMakeStruct(0, 1, 0), 0x0102n);
+    const trailing = concat(pack(a), new Uint8Array([0x00, 0x05]));
+    expect(unpack(trailing)).toEqual(concat(a, new Uint8Array(48)));
+    const straddle = concat(new Uint8Array([0x11, 0x03, 0x01, 0x00, 0x02]), pack(a));
+    expect(() => unpack(straddle)).toThrow(/segment boundary/);
   });
 });
