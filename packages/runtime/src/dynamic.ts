@@ -43,7 +43,7 @@ import {
   listStepBits,
   primitiveBodySize,
 } from "./kinds.ts";
-import { Message, Ptr } from "./message.ts";
+import { Message, Ptr, decodeWireText } from "./message.ts";
 import { wpCompositeElementCount, wpMakeCap, wpMakeStruct } from "./pointer.ts";
 import {
   AppliedAnnotation,
@@ -824,12 +824,7 @@ function readPtrAsText(p: Ptr, dflt: string): string {
     "KIND",
     "Text pointer is not a byte list",
   );
-  if (p.count === 0) return "";
-  const s = p.msg.segs[p.seg]!;
-  const start = p.word * WORD_BYTES;
-  let n = p.count;
-  if (n > 0 && s.data[start + n - 1] === 0) n -= 1;
-  return new TextDecoder().decode(s.data.subarray(start, start + n));
+  return decodeWireText(p);
 }
 
 function readPtrAsData(p: Ptr, dflt: Uint8Array): Uint8Array {

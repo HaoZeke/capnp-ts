@@ -431,6 +431,20 @@ function finishList(
   return Ptr.list(m, seg, start, esize, wireCount, 0, 0, 0, depth);
 }
 
+/** Byte list as Text. The list must be non-empty and end with NUL. */
+export function decodeWireText(list: Ptr): string {
+  assertCapnp(list.kind === PtrKind.List && list.esize === ElemSize.Byte, "KIND");
+  const s = list.msg.segs[list.seg]!;
+  const start = list.word * WORD_BYTES;
+  const count = list.count;
+  assertCapnp(
+    count > 0 && s.data[start + count - 1] === 0,
+    "TEXT",
+    "Message contains text that is not NUL-terminated.",
+  );
+  return new TextDecoder().decode(s.data.subarray(start, start + count - 1));
+}
+
 /** Resolved object handle (struct or list). Never a far landing pad. */
 export class Ptr {
   readonly msg: Message;
@@ -633,12 +647,7 @@ export class Ptr {
       list.kind === PtrKind.List && list.esize === ElemSize.Byte,
       "KIND",
     );
-    if (list.count === 0) return "";
-    const s = list.msg.segs[list.seg]!;
-    const start = list.word * WORD_BYTES;
-    let n = list.count;
-    if (n > 0 && s.data[start + n - 1] === 0) n -= 1;
-    return new TextDecoder().decode(s.data.subarray(start, start + n));
+    return decodeWireText(list);
   }
 
   getData(ptrIndex: number, dflt: Uint8Array = EMPTY_DATA): Uint8Array {
@@ -783,11 +792,7 @@ export class Ptr {
       const elem = this.listGetP(index);
       if (elem.kind === PtrKind.Null) return "";
       if (elem.kind === PtrKind.List && elem.esize === ElemSize.Byte) {
-        const s = elem.msg.segs[elem.seg]!;
-        const start = elem.word * WORD_BYTES;
-        let n = elem.count;
-        if (n > 0 && s.data[start + n - 1] === 0) n -= 1;
-        return new TextDecoder().decode(s.data.subarray(start, start + n));
+        return decodeWireText(elem);
       }
       throw new CapnpError("KIND");
     }
