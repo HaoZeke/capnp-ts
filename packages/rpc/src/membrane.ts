@@ -322,21 +322,39 @@ class MembraneHook extends RefHook implements ClientHook {
     const more = this.inner.whenMoreResolved();
     if (more === undefined) return undefined;
     if (this.revoked !== undefined) return Promise.reject(this.revoked);
-    const onRevoked = this.policy.onRevoked();
-    const raced =
-      onRevoked === undefined
-        ? more
-        : Promise.race([
-            more,
-            onRevoked.then(
-              () => Promise.reject(new RpcError("onRevoked() resolved; it should only reject")),
-              (e) => Promise.reject(toRpcError(e)),
-            ),
-          ]);
-    return raced.then((next) => {
-      if (this.revoked !== undefined) throw this.revoked;
-      this.resolvedWrap ??= wrapCap(next.addRef(), this.policy, this.reverse);
-      return this.resolvedWrap;
+    return new Promise<ClientHook>((resolve, reject) => {
+      let settled = false;
+      let unwatch: (() => void) | undefined;
+      const done = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        unwatch?.();
+        fn();
+      };
+      const revoked = this.policy.watchRevocation((err) => {
+        done(() => reject(err));
+      });
+      if (settled) revoked();
+      else unwatch = revoked;
+      more.then(
+        (next) => {
+          done(() => {
+            if (this.revoked !== undefined) {
+              reject(this.revoked);
+              return;
+            }
+            try {
+              this.resolvedWrap ??= wrapCap(next.addRef(), this.policy, this.reverse);
+              resolve(this.resolvedWrap);
+            } catch (e) {
+              reject(e);
+            }
+          });
+        },
+        (e) => {
+          done(() => reject(e));
+        },
+      );
     });
   }
 

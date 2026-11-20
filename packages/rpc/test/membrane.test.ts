@@ -575,6 +575,67 @@ describe("membrane C++ semantics", () => {
     other.release();
   });
 
+  test("whenMoreResolved reuses the policy's single revocation reaction", async () => {
+    let reactions = 0;
+    class CountingRevocable extends RevocablePolicy {
+      private counted = false;
+      override onRevoked(): Promise<never> {
+        const p = super.onRevoked();
+        if (!this.counted) {
+          this.counted = true;
+          const then = p.then.bind(p) as typeof p.then;
+          p.then = ((...args: Parameters<typeof p.then>) => {
+            reactions++;
+            return then(...args);
+          }) as typeof p.then;
+        }
+        return p;
+      }
+    }
+    const policy = new CountingRevocable();
+    let resolveInner!: (c: Client) => void;
+    const inner = Client.fromPromise(
+      new Promise<Client>((resolve) => {
+        resolveInner = resolve;
+      }),
+    );
+    const wrapped = membrane(inner, policy);
+    expect(reactions).toBe(1);
+    expect(policy.revocationWatcherCount()).toBe(1);
+
+    const w1 = wrapped.hook.whenMoreResolved()!;
+    const w2 = wrapped.hook.whenMoreResolved()!;
+    expect(reactions).toBe(1);
+    expect(policy.revocationWatcherCount()).toBe(3);
+
+    resolveInner(Client.local(new Counter()));
+    const [r1, r2] = await Promise.all([w1, w2]);
+    expect(r1).toBe(r2);
+    expect(reactions).toBe(1);
+    expect(policy.revocationWatcherCount()).toBe(2);
+    wrapped.release();
+    expect(policy.revocationWatcherCount()).toBe(0);
+
+    let rejectInner!: (e: Error) => void;
+    const failing = membrane(
+      Client.fromPromise(
+        new Promise<Client>((_, reject) => {
+          rejectInner = reject;
+        }),
+      ),
+      policy,
+    );
+    const w3 = failing.hook.whenMoreResolved()!;
+    expect(reactions).toBe(1);
+    expect(policy.revocationWatcherCount()).toBe(2);
+    rejectInner(new RpcError("boom"));
+    await expect(w3).rejects.toThrow("boom");
+    expect(reactions).toBe(1);
+    expect(policy.revocationWatcherCount()).toBe(1);
+    failing.release();
+    expect(policy.revocationWatcherCount()).toBe(0);
+  });
+
   test("canceling a membrane stream cancels the call inside", async () => {
     let aborted = false;
     const slow: RpcServer = {
