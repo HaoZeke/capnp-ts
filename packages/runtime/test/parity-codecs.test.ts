@@ -235,6 +235,17 @@ describe("canonical form against capnp 1.4.0", () => {
   });
 });
 
+describe("canonical form with empty trailing segments", () => {
+  test("only a non-empty second segment makes a message non-canonical", () => {
+    const root = words(wpMakeStruct(-1, 0, 0));
+    const empty = { data: new Uint8Array(0), words: 0 };
+    const one = { data: root, words: 1 };
+    expect(isCanonical(Message.fromSegments([one, empty]))).toBe(true);
+    expect(isCanonical(Message.fromSegments([one, empty, one]))).toBe(true);
+    expect(isCanonical(Message.fromSegments([one, one]))).toBe(false);
+  });
+});
+
 describe("text format against capnp 1.4.0", () => {
   test("T-01 a single unnamed parenthesized value unwraps", () => {
     expect(readText("(i32 = (5))").get("i32").asInt32()).toBe(5);
