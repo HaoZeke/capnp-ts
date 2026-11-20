@@ -309,9 +309,10 @@ export function messageFromRawSegment(raw: Uint8Array): Message {
  * layout, truncated struct sections, and zero padding in partial list bytes.
  */
 export function isCanonical(message: Message): boolean {
-  if (message.segmentCount !== 1) return false;
-  const words = message.segWords(0);
+  const words = message.segmentCount > 0 ? message.segWords(0) : 0;
   if (words < 1) return false;
+  // tryGetSegment(1) is null for an empty segment, and later ones are not looked at.
+  if (message.segmentCount > 1 && message.segWords(1) > 0) return false;
   const head = { at: 1 };
   if (!pointerCanonical(message, 0, 0, head)) return false;
   return head.at === words;
