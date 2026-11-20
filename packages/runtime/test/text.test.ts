@@ -275,6 +275,19 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
     expect([...read('(title = "a\rb")').get("title").asTextBytes()]).toEqual([0x61, 0x0d, 0x62]);
   });
 
+  test("octal text escapes keep the low byte like capnp 1.4.0", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const sinkSchema = loader.resolveStruct("KitchenSink");
+    const title = (input: string) => [
+      ...DynamicStruct.fromMessage(decodeText(input, sinkSchema), sinkSchema)
+        .get("title")
+        .asTextBytes(),
+    ];
+    expect(title('(title = "\\623")')).toEqual([0x93]);
+    expect(title('(title = "\\777x")')).toEqual([0xff, 0x78]);
+    expect(title('(title = "\\400")')).toEqual([0x00]);
+  });
+
   test("formatKjFloat32 tries 6 then 8 significant digits like kj::FloatToBuffer", () => {
     expect(formatKjFloat32(Math.fround(1.0000040531158447))).toBe("1.0000041");
     expect(formatKjFloat32(Math.fround(-9851.2763671875))).toBe("-9851.2764");

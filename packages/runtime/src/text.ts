@@ -1020,8 +1020,7 @@ class TextParser {
               oct = (oct << 3) | (d - 0x30);
               this.pos++;
             }
-            if (oct > 0xff) this.fail("octal escape out of byte range");
-            out.push(oct);
+            out.push(oct & 0xff);
           } else {
             this.fail(`unknown string escape '\\${esc}'`);
           }
