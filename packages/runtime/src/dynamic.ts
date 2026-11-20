@@ -827,7 +827,7 @@ function readPtrAsText(p: Ptr, dflt: string): string {
   const s = p.msg.segs[p.seg]!;
   const start = p.word * WORD_BYTES;
   assertCapnp(
-    s.data[start + p.count - 1] === 0,
+    p.count > 0 && s.data[start + p.count - 1] === 0,
     "TEXT",
     "Text pointer is not NUL-terminated",
   );

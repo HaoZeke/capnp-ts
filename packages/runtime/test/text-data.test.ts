@@ -4,9 +4,15 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   BuilderPointer,
   CapnpError,
+  DynamicStruct,
+  SchemaLoader,
   ElemSize,
   Message,
   MessageBuilder,
@@ -51,6 +57,10 @@ function initPointerListAt(
   );
   return view.initPointerList(0, count);
 }
+
+const here = dirname(fileURLToPath(import.meta.url));
+const repoRoot = join(here, "..", "..", "..");
+const hasCapnp = spawnSync("capnp", ["--version"]).status === 0;
 
 function msgFromWords(words: bigint[]): Message {
   const buf = new Uint8Array(words.length * 8);
@@ -138,6 +148,38 @@ describe("text and data edge cases", () => {
     storeU8(seg, 18, 0x63); // c
     storeU8(seg, 19, 0x64); // d
     expect(() => msg.root().getText(0)).toThrow(CapnpError);
+  });
+
+  test("a 0-byte text pointer is rejected even when the byte before it is 0", () => {
+    // C++ layout.c++:2480 requires size > 0 so the terminator exists. The
+    // pointer word's top byte (the byte before the body) is 0 here.
+    const words = [wpMakeStruct(0, 0, 1), wpMakeList(0, ElemSize.Byte, 0), 0n];
+    const msg = msgFromWords(words);
+    expect(() => msg.root().getText(0)).toThrow(CapnpError);
+
+    const loader = SchemaLoader.fromCgr(
+      new Uint8Array(readFileSync(join(here, "golden", "addressbook.cgr.bin"))),
+    );
+    const person = DynamicStruct.fromMessage(msg, loader.resolveStruct("Person"));
+    expect(() => person.get("name").asText()).toThrow(CapnpError);
+  });
+
+  test.skipIf(!hasCapnp)("capnp-ts decode rejects a 0-byte text pointer like capnp decode", () => {
+    const words = [wpMakeStruct(0, 0, 1), wpMakeList(0, ElemSize.Byte, 0), 0n];
+    const buf = new Uint8Array(8 + words.length * 8);
+    new DataView(buf.buffer).setUint32(4, words.length, true);
+    words.forEach((w, i) => storeU64(buf, 8 + i * 8, w));
+    const args = ["decode", join(repoRoot, "schema/addressbook.capnp"), "Person"];
+    const cli = spawnSync("capnp", args, { input: buf, encoding: "utf8" });
+    expect(cli.status).not.toBe(0);
+    expect(cli.stderr).toContain("not NUL-terminated");
+    const ts = spawnSync(
+      process.execPath,
+      [join(repoRoot, "packages/runtime/bin/capnp-ts"), ...args],
+      { input: buf, encoding: "utf8" },
+    );
+    expect(ts.stdout).toBe("");
+    expect(ts.status).not.toBe(0);
   });
 
   test("text length boundaries (word padding + max-ish)", () => {

@@ -636,7 +636,7 @@ export class Ptr {
     const s = list.msg.segs[list.seg]!;
     const start = list.word * WORD_BYTES;
     assertCapnp(
-      s.data[start + list.count - 1] === 0,
+      list.count > 0 && s.data[start + list.count - 1] === 0,
       "TEXT",
       "Text pointer is not NUL-terminated",
     );
