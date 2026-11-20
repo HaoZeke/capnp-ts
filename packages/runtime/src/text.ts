@@ -25,24 +25,10 @@ import {
   Type,
   TypeKind,
 } from "./schema.ts";
+import { rawStringByteLength, rawStringToBytes, validUtf8SeqLen } from "./utf8.ts";
 
 const UTF8_ENC = new TextEncoder();
 const UTF8_DEC = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
-
-function utf8ByteLength(s: string): number {
-  let size = 0;
-  for (let i = 0; i < s.length; i++) {
-    const code = s.charCodeAt(i);
-    if (code >= 0xdc00 && code <= 0xdcff) {
-      size++;
-      continue;
-    }
-    const cp = s.codePointAt(i)!;
-    size += UTF8_ENC.encode(String.fromCodePoint(cp)).byteLength;
-    if (cp > 0xffff) i++;
-  }
-  return size;
-}
 
 /**
  * `Number.prototype.toExponential` rounds exact ties up, but glibc `printf`
@@ -206,33 +192,6 @@ export function encodeCEscapeTextBytes(bytes: Uint8Array): string {
   return out;
 }
 
-function validUtf8SeqLen(bytes: Uint8Array, i: number): number {
-  const b0 = bytes[i]!;
-  if (b0 >= 0xc2 && b0 <= 0xdf) {
-    return i + 1 < bytes.length && (bytes[i + 1]! & 0xc0) === 0x80 ? 2 : 0;
-  }
-  if (b0 >= 0xe0 && b0 <= 0xef) {
-    if (i + 2 >= bytes.length) return 0;
-    const b1 = bytes[i + 1]!;
-    const b2 = bytes[i + 2]!;
-    if ((b2 & 0xc0) !== 0x80) return 0;
-    if (b0 === 0xe0) return b1 >= 0xa0 && b1 <= 0xbf ? 3 : 0;
-    if (b0 === 0xed) return b1 >= 0x80 && b1 <= 0x9f ? 3 : 0;
-    return (b1 & 0xc0) === 0x80 ? 3 : 0;
-  }
-  if (b0 >= 0xf0 && b0 <= 0xf4) {
-    if (i + 3 >= bytes.length) return 0;
-    const b1 = bytes[i + 1]!;
-    const b2 = bytes[i + 2]!;
-    const b3 = bytes[i + 3]!;
-    if ((b2 & 0xc0) !== 0x80 || (b3 & 0xc0) !== 0x80) return 0;
-    if (b0 === 0xf0) return b1 >= 0x90 && b1 <= 0xbf ? 4 : 0;
-    if (b0 === 0xf4) return b1 >= 0x80 && b1 <= 0x8f ? 4 : 0;
-    return (b1 & 0xc0) === 0x80 ? 4 : 0;
-  }
-  return 0;
-}
-
 /** Internal byte output uses low-surrogate sentinels until it is encoded. */
 function encodeCEscapeRawTextBytes(bytes: Uint8Array): string {
   let out = "";
@@ -256,28 +215,13 @@ function encodeCEscapeRawTextBytes(bytes: Uint8Array): string {
   return out;
 }
 
-function textOutputBytes(text: string): Uint8Array {
-  const chunks: Uint8Array[] = [];
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    if (code >= 0xdc00 && code <= 0xdcff) {
-      chunks.push(Uint8Array.of(code - 0xdc00));
-      continue;
-    }
-    const cp = text.codePointAt(i)!;
-    chunks.push(UTF8_ENC.encode(String.fromCodePoint(cp)));
-    if (cp > 0xffff) i++;
-  }
-  return concatChunks(chunks);
-}
-
 /**
  * The string the printed bytes decode to as UTF-8, with U+FFFD for each
  * invalid sequence. Line breaks were chosen from the byte lengths, so
  * they fall where capnp breaks its lines.
  */
 function printedString(printed: string): string {
-  return UTF8_DEC.decode(textOutputBytes(printed));
+  return UTF8_DEC.decode(rawStringToBytes(printed));
 }
 
 /** Escape UTF-8 Text matching `kj::encodeCEscape()` for a string. */
@@ -318,7 +262,7 @@ class Indent {
 
   private static canPrintInline(item: string): boolean {
     if (item.includes("\n")) return false;
-    return utf8ByteLength(item) <= MAX_INLINE_VALUE_SIZE;
+    return rawStringByteLength(item) <= MAX_INLINE_VALUE_SIZE;
   }
 
   private static canPrintAllInline(
@@ -329,7 +273,7 @@ class Indent {
     for (const item of items) {
       if (!Indent.canPrintInline(item)) return false;
       if (kind === "record") {
-        totalSize += utf8ByteLength(item);
+        totalSize += rawStringByteLength(item);
         if (totalSize > MAX_INLINE_RECORD_SIZE) return false;
       }
     }
@@ -1528,7 +1472,7 @@ export class TextCodec {
 
   /** Encode to the exact bytes capnp prints, invalid UTF-8 in Text included. */
   encodeBytes(value: PrintableDynamic, type?: Type): Uint8Array {
-    return textOutputBytes(this.render(value, type));
+    return rawStringToBytes(this.render(value, type));
   }
 
   /**
