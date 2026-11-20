@@ -7,7 +7,11 @@ import json
 import sys
 from pathlib import Path
 
-import capnp
+try:
+    import capnp
+except ImportError as e:
+    # One line naming the cause, so a venv without pycapnp is easy to spot.
+    sys.exit(f"{Path(__file__).name}: cannot import capnp: {e}")
 
 ROOT = Path(__file__).resolve().parents[1]
 AB_SCHEMA = ROOT / "schema" / "addressbook.capnp"
@@ -159,7 +163,13 @@ def main() -> int:
     rc.add_argument("path", type=Path)
     rr = sub.add_parser("read-resp")
     rr.add_argument("path", type=Path)
+    sub.add_parser("check")
     args = ap.parse_args()
+    if args.cmd == "check":
+        load_ab()
+        load_calc()
+        print(f"pycapnp {capnp.__version__}")
+        return 0
     if args.cmd == "write-all":
         out = args.out
         write_addressbook(out / "addressbook_pycapnp.bin")
