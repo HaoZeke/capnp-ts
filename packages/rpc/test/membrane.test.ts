@@ -525,6 +525,56 @@ describe("membrane C++ semantics", () => {
     expect(aborted).toBe(true);
   });
 
+  test("stream calls reuse the policy's single revocation reaction", async () => {
+    let reactions = 0;
+    class CountingRevocable extends RevocablePolicy {
+      private counted = false;
+      override onRevoked(): Promise<never> {
+        const p = super.onRevoked();
+        if (!this.counted) {
+          this.counted = true;
+          const then = p.then.bind(p) as typeof p.then;
+          p.then = ((...args: Parameters<typeof p.then>) => {
+            reactions++;
+            return then(...args);
+          }) as typeof p.then;
+        }
+        return p;
+      }
+    }
+    const sink: RpcServer = {
+      isStreaming() {
+        return true;
+      },
+      dispatch() {},
+    };
+    const policy = new CountingRevocable();
+    const wrapped = membrane(Client.local(sink), policy);
+    expect(reactions).toBe(1);
+    for (let i = 0; i < 3; i++) await wrapped.callStreaming(IFACE, 0);
+    expect(reactions).toBe(1);
+    expect(policy.revocationWatcherCount()).toBe(1);
+
+    const slow: RpcServer = {
+      isStreaming() {
+        return true;
+      },
+      dispatch(_i, _m, _p, _r, ctx) {
+        ctx.allowCancellation();
+        return new Promise<void>(() => {});
+      },
+    };
+    const other = membrane(Client.local(slow), policy);
+    const pending = other.callStreaming(IFACE, 0) as Promise<void> & { cancel(): void };
+    expect(policy.revocationWatcherCount()).toBe(3);
+    pending.cancel();
+    await expect(pending).rejects.toThrow("canceled");
+    expect(policy.revocationWatcherCount()).toBe(2);
+    expect(reactions).toBe(1);
+    wrapped.release();
+    other.release();
+  });
+
   test("canceling a membrane stream cancels the call inside", async () => {
     let aborted = false;
     const slow: RpcServer = {
