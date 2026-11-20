@@ -8,7 +8,7 @@
  */
 import type { Transport } from "./transport.ts";
 
-const MAX_SEGMENTS = 64;
+const MAX_SEGMENTS = 511;
 
 /** Bytes the frame starting at `buf[0]` occupies, or 0 if incomplete. */
 export function frameLength(buf: Uint8Array): number {
