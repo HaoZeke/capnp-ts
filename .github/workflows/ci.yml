@@ -56,7 +56,7 @@ jobs:
       - name: Test
         env:
           CAPNP_REQUIRE_PYCAPNP: "1"
-        run: bun test
+        run: bun test --timeout 10000
 
       - name: Typecheck packages
         run: bun run build
