@@ -8,6 +8,8 @@ import {
   ElemSize,
   Message,
   PtrKind,
+  canonicalize,
+  isCanonical,
   storeU32,
   storeU64,
   unpack,
@@ -181,5 +183,35 @@ describe("packed streams against capnp 1.4.0", () => {
     expect(() => unpack(new Uint8Array([0x11, 0x03, 0x01, 0x00, 0x02]))).toThrow(
       /segment boundary/,
     );
+  });
+});
+
+describe("canonical form against capnp 1.4.0", () => {
+  test("C-01 bool lists mask leftover high bits", () => {
+    const dirty = words(
+      wpMakeStruct(0, 0, 1),
+      wpMakeList(0, ElemSize.Bit, 3),
+      0xffn,
+    );
+    const src = Message.fromSegments([dirty]);
+    expect(isCanonical(src)).toBe(false);
+    const out = canonicalize(src);
+    expect(out[16]).toBe(0x07);
+    expect(isCanonical(Message.fromSegments([out]))).toBe(true);
+  });
+
+  test("C-02 isCanonical requires one preorder segment", () => {
+    expect(isCanonical(Message.fromSegments([words(0n)]))).toBe(true);
+    expect(isCanonical(Message.fromSegments([words(0n), words(0n)]))).toBe(false);
+    const far = Message.fromSegments([
+      words(wpMakeFar(false, 1, 0), wpMakeStruct(-1, 0, 0)),
+    ]);
+    expect(isCanonical(far)).toBe(false);
+    expect(isCanonical(Message.fromSegments([words(wpMakeStruct(-1, 0, 0))]))).toBe(true);
+  });
+
+  test("C-03 a null root canonicalizes to the empty-struct pointer", () => {
+    const out = canonicalize(Message.fromSegments([words(0n)]));
+    expect(out).toEqual(words(wpMakeStruct(-1, 0, 0)));
   });
 });

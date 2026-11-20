@@ -20,9 +20,20 @@ import {
   primitiveBodySize,
   PtrKind,
   WORD_BYTES,
+  WireKind,
 } from "./kinds.ts";
 import { Message, type Ptr } from "./message.ts";
-import { wpMakeList, wpMakeStruct } from "./pointer.ts";
+import {
+  wpCompositeElementCount,
+  wpKind,
+  wpListCount,
+  wpListEsize,
+  wpMakeList,
+  wpMakeStruct,
+  wpOffset,
+  wpStructDwords,
+  wpStructPwords,
+} from "./pointer.ts";
 
 // --- truncation --------------------------------------------------------------
 
@@ -230,6 +241,14 @@ function writeListToSlot(
       seg.data.subarray(srcOff, srcOff + nbytes),
       start * WORD_BYTES,
     );
+    if (esize === ElemSize.Bit) {
+      const leftover = n % 8;
+      if (leftover > 0) {
+        const mask = (1 << leftover) - 1;
+        const idx = start * WORD_BYTES + nbytes - 1;
+        b.data[idx] = b.data[idx]! & mask;
+      }
+    }
   }
   const off = start - slotWord - 1;
   b.storeWord(slotWord, wpMakeList(off, esize, n));
@@ -246,6 +265,11 @@ export function canonicalize(message: Message): Uint8Array {
   const root = fresh.root();
   const b = new CanonBuilder(Math.max(64, estimateWords(fresh)));
   const rootWord = b.alloc(1);
+  // StructReader::canonicalize of a null struct is the empty-struct pointer.
+  if (root.kind === PtrKind.Null) {
+    b.storeWord(rootWord, wpMakeStruct(-1, 0, 0));
+    return b.finish();
+  }
   copyPtrToWord(b, rootWord, root, 0);
   return b.finish();
 }
@@ -278,4 +302,140 @@ export function messageFromRawSegment(raw: Uint8Array): Message {
     throw new CapnpError("FRAMING", "empty raw segment");
   }
   return Message.fromSegments([raw]);
+}
+
+/**
+ * Cap'n Proto 1.4.0 `MessageReader::isCanonical`: one segment, preorder
+ * layout, truncated struct sections, and zero padding in partial list bytes.
+ */
+export function isCanonical(message: Message): boolean {
+  if (message.segmentCount !== 1) return false;
+  const words = message.segWords(0);
+  if (words < 1) return false;
+  const head = { at: 1 };
+  if (!pointerCanonical(message, 0, 0, head)) return false;
+  return head.at === words;
+}
+
+function inRange(m: Message, word: number): boolean {
+  return word >= 0 && word < m.segWords(0);
+}
+
+function pointerCanonical(
+  m: Message,
+  seg: number,
+  word: number,
+  head: { at: number },
+): boolean {
+  if (!inRange(m, word)) return false;
+  const w = m.readWord(seg, word);
+  if (w === 0n) return true;
+  const kind = wpKind(w);
+  if (kind === WireKind.Far || kind === WireKind.Cap) return false;
+  const off = wpOffset(w);
+  const target = word + 1 + off;
+  if (kind === WireKind.Struct) {
+    const dw = wpStructDwords(w);
+    const pw = wpStructPwords(w);
+    if (dw === 0 && pw === 0) return target === word;
+    const body = structCanonical(m, seg, target, dw, pw, head, head);
+    return body.ok && body.dataTrunc && body.ptrTrunc;
+  }
+  if (kind === WireKind.List) return listCanonical(m, seg, word, w, target, head);
+  return false;
+}
+
+function structCanonical(
+  m: Message,
+  seg: number,
+  loc: number,
+  dw: number,
+  pw: number,
+  read: { at: number },
+  ptrHead: { at: number },
+): { ok: boolean; dataTrunc: boolean; ptrTrunc: boolean } {
+  if (loc !== read.at || !inRange(m, loc) || !inRange(m, loc + dw + pw - (dw + pw > 0 ? 1 : 0))) {
+    return { ok: false, dataTrunc: false, ptrTrunc: false };
+  }
+  const dataTrunc = dw === 0 || m.readWord(seg, loc + dw - 1) !== 0n;
+  const ptrTrunc = pw === 0 || m.readWord(seg, loc + dw + pw - 1) !== 0n;
+  read.at = loc + dw + pw;
+  for (let i = 0; i < pw; i++) {
+    if (!pointerCanonical(m, seg, loc + dw + i, ptrHead)) {
+      return { ok: false, dataTrunc, ptrTrunc };
+    }
+  }
+  return { ok: true, dataTrunc, ptrTrunc };
+}
+
+function listCanonical(
+  m: Message,
+  seg: number,
+  _pointerWord: number,
+  w: bigint,
+  target: number,
+  head: { at: number },
+): boolean {
+  const esize = wpListEsize(w);
+  if (esize === ElemSize.Composite) {
+    if (target !== head.at || !inRange(m, target)) return false;
+    const tag = m.readWord(seg, target);
+    if (wpKind(tag) !== WireKind.Struct) return false;
+    const dw = wpStructDwords(tag);
+    const pw = wpStructPwords(tag);
+    const nelem = wpCompositeElementCount(tag);
+    const step = dw + pw;
+    const content = wpListCount(w);
+    if (step === 0) {
+      head.at = target + 1;
+      return true;
+    }
+    if (nelem * step !== content) return false;
+    const read = { at: target + 1 };
+    const pointerHead = { at: target + 1 + content };
+    let dataAny = false;
+    let ptrAny = false;
+    for (let i = 0; i < nelem; i++) {
+      const loc = read.at;
+      const body = structCanonical(m, seg, loc, dw, pw, read, pointerHead);
+      if (!body.ok) return false;
+      dataAny = dataAny || body.dataTrunc;
+      ptrAny = ptrAny || body.ptrTrunc;
+    }
+    if (read.at !== target + 1 + content) return false;
+    head.at = pointerHead.at;
+    return dataAny && ptrAny;
+  }
+  if (esize === ElemSize.Pointer) {
+    const count = wpListCount(w);
+    if (target !== head.at) return false;
+    head.at = target + count;
+    for (let i = 0; i < count; i++) {
+      if (!pointerCanonical(m, seg, target + i, head)) return false;
+    }
+    return true;
+  }
+  const stepBits = listStepBits(esize);
+  if (stepBits < 0) return false;
+  if (target !== head.at) return false;
+  const count = wpListCount(w);
+  const bitSize = BigInt(count) * BigInt(stepBits);
+  const wholeBytes = Number(bitSize / 8n);
+  const leftover = Number(bitSize % 8n);
+  const endWord = head.at + Number((bitSize + 63n) / 64n);
+  if (endWord > m.segWords(seg)) return false;
+  const data = m.segs[seg]!.data;
+  let byte = head.at * WORD_BYTES + wholeBytes;
+  if (leftover > 0) {
+    const mask = (~((1 << leftover) - 1)) & 0xff;
+    if ((data[byte]! & mask) !== 0) return false;
+    byte++;
+  }
+  const endByte = endWord * WORD_BYTES;
+  while (byte < endByte) {
+    if (data[byte] !== 0) return false;
+    byte++;
+  }
+  head.at = endWord;
+  return true;
 }
