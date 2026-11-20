@@ -182,6 +182,8 @@ export interface CallOptions {
   tailHandler?: TailHandler;
   /** Internal: mark an outgoing `Call` with `sendResultsTo.yourself`. */
   sendResultsToYourself?: boolean;
+  /** Server-side failure handler propagated across queued and membrane wrappers. */
+  onError?: (error: unknown) => void;
 }
 
 /**
@@ -533,15 +535,15 @@ export class LocalClient extends RefHook implements ClientHook {
       return failedCall(this.broken);
     }
     const state = new CallState();
+    state.onError = opts?.onError;
     let liveRefs = 1;
     let pipeline!: LocalPipeline;
     const ctx = new LocalCallContext(params, (target, iface, method, tailParams) => {
-      const tail = target.call(
-        iface,
-        method,
-        tailParams,
-        opts?.tailHandler !== undefined ? { tailHandler: opts.tailHandler } : undefined,
-      );
+      const tailOpts =
+        opts?.tailHandler !== undefined || opts?.onError !== undefined
+          ? { tailHandler: opts.tailHandler, onError: opts.onError }
+          : undefined;
+      const tail = target.call(iface, method, tailParams, tailOpts);
       pipeline.setDelegate(tail.pipeline);
       tail.result.onSettled((s) => {
         if (state.result.state !== "pending") return;
@@ -603,12 +605,28 @@ export class LocalClient extends RefHook implements ClientHook {
       return;
     }
     const streaming = this.server.isStreaming?.(interfaceId, methodId) ?? false;
+    const releaseResultCaps = (): void => {
+      const caps = ctx.results.caps.splice(0);
+      let first: unknown;
+      let failed = false;
+      for (const c of caps) {
+        try {
+          c.release();
+        } catch (e) {
+          if (!failed) {
+            failed = true;
+            first = e;
+          }
+        }
+      }
+      if (failed) throw first;
+    };
     const finish = (error?: unknown): void => {
       const params = ctx.params;
       params.release();
       if (ctx.tailCalled) {
         // Results (and any error) are already wired from `ctx.tailState`.
-        ctx.results.caps.forEach((c) => c.release());
+        releaseResultCaps();
         if (error !== undefined) {
           if (streaming) this.broken = toRpcError(error);
           if (state.result.state === "pending") state.result.reject(error);
@@ -618,12 +636,24 @@ export class LocalClient extends RefHook implements ClientHook {
       if (error !== undefined) {
         if (streaming) this.broken = toRpcError(error);
         state.result.reject(error);
-        ctx.results.caps.forEach((c) => c.release());
+        releaseResultCaps();
       } else if (state.result.state === "pending" && !ctx.cancelRequested) {
         state.result.resolve(ctx.results.toPayload());
       } else {
-        ctx.results.caps.forEach((c) => c.release());
+        releaseResultCaps();
         state.result.reject(new RpcError("canceled"));
+      }
+    };
+    const guard = (body: () => void): void => {
+      try {
+        body();
+      } catch (e) {
+        if (state.onError === undefined) throw e;
+        try {
+          state.onError(e);
+        } catch {
+          // Aborting the connection can itself drop capabilities.
+        }
       }
     };
 
@@ -637,7 +667,7 @@ export class LocalClient extends RefHook implements ClientHook {
         ctx,
       );
     } catch (e) {
-      finish(e);
+      guard(() => finish(e));
       return;
     }
 
@@ -651,18 +681,6 @@ export class LocalClient extends RefHook implements ClientHook {
       isStreaming ||= r.streaming === true;
       if (r.allowCancellation) ctx.allowCancellation();
     }
-    const guard = (body: () => void): void => {
-      try {
-        body();
-      } catch (e) {
-        if (state.onError === undefined) throw e;
-        try {
-          state.onError(e);
-        } catch {
-          // Aborting the connection can itself drop capabilities.
-        }
-      }
-    };
     if (promise === undefined) {
       guard(finish);
       return;

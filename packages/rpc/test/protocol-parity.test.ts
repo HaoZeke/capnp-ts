@@ -16,7 +16,9 @@ import {
   type CallContext,
   Client,
   type ClientHook,
+  membrane,
   QueuedClient,
+  RevocablePolicy,
   RpcError,
   type RpcServer,
   Settle,
@@ -882,6 +884,107 @@ describe("other incoming protocol errors", () => {
       await nextTurn();
       expect(vat.disconnected?.message).toContain("dispose failed");
       expect(drainReturns(pair.a)).toContain("abort");
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+  });
+
+  test("a throwing result cap dispose aborts through QueuedClient and Membrane", async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (e: unknown): void => {
+      rejections.push(e);
+    };
+    process.on("unhandledRejection", onRejection);
+    try {
+      const makeThrowingChild = (): RpcServer => ({
+        dispatch() {},
+        dispose() {
+          throw new Error("dispose failed");
+        },
+      });
+
+      // Queued call on a promise-backed bootstrap.
+      {
+        let resolveBoot!: (c: Client) => void;
+        let releaseCall!: () => void;
+        const gate = new Promise<void>((res) => (releaseCall = res));
+        const bootPromise = Client.fromPromise(new Promise<Client>((res) => (resolveBoot = res)));
+        const srv: RpcServer = {
+          dispatch(_i, _m, _p, _r, ctx) {
+            ctx.allowCancellation();
+            const r = ctx.initResults(0, 1);
+            ctx.setResultCap(r, 0, Client.local(makeThrowingChild()).hook);
+            return gate;
+          },
+        };
+        const pair = new MemoryTransportPair();
+        const vat = new RpcConnection(pair.b, bootPromise);
+        bootPromise.release();
+        pair.a.send(bootstrapFrame(0));
+        pair.a.send(callFrame(1, { answer: 0 }));
+        vat.pump();
+        resolveBoot(Client.local(srv));
+        await nextTurn();
+        pair.a.send(finishFrame(1, false));
+        vat.pump();
+        releaseCall();
+        await gate;
+        await nextTurn();
+        expect(vat.disconnected?.message).toContain("dispose failed");
+        expect(drainReturns(pair.a)).toContain("abort");
+      }
+
+      // Membrane-wrapped bootstrap.
+      {
+        let releaseCall!: () => void;
+        const gate = new Promise<void>((res) => (releaseCall = res));
+        const srv: RpcServer = {
+          dispatch(_i, _m, _p, _r, ctx) {
+            ctx.allowCancellation();
+            const r = ctx.initResults(0, 1);
+            ctx.setResultCap(r, 0, Client.local(makeThrowingChild()).hook);
+            return gate;
+          },
+        };
+        const wrapped = membrane(Client.local(srv), new RevocablePolicy());
+        const pair = new MemoryTransportPair();
+        const vat = new RpcConnection(pair.b, wrapped);
+        wrapped.release();
+        pair.a.send(bootstrapFrame(0));
+        pair.a.send(callFrame(1, { answer: 0 }));
+        pair.a.send(finishFrame(1, false));
+        vat.pump();
+        releaseCall();
+        await gate;
+        await nextTurn();
+        expect(vat.disconnected?.message).toContain("dispose failed");
+        expect(drainReturns(pair.a)).toContain("abort");
+      }
+
+      // Synchronous dispatch throw after attaching a throwing result cap on a queued call.
+      {
+        let resolveBoot!: (c: Client) => void;
+        const bootPromise = Client.fromPromise(new Promise<Client>((res) => (resolveBoot = res)));
+        const srv: RpcServer = {
+          dispatch(_i, _m, _p, _r, ctx) {
+            const r = ctx.initResults(0, 1);
+            ctx.setResultCap(r, 0, Client.local(makeThrowingChild()).hook);
+            throw new Error("sync boom");
+          },
+        };
+        const pair = new MemoryTransportPair();
+        const vat = new RpcConnection(pair.b, bootPromise);
+        bootPromise.release();
+        pair.a.send(bootstrapFrame(0));
+        pair.a.send(callFrame(1, { answer: 0 }));
+        vat.pump();
+        resolveBoot(Client.local(srv));
+        await nextTurn();
+        expect(vat.disconnected?.message).toContain("dispose failed");
+        expect(drainReturns(pair.a)).toContain("abort");
+      }
+
       expect(rejections).toEqual([]);
     } finally {
       process.off("unhandledRejection", onRejection);

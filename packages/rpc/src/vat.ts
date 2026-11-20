@@ -1554,18 +1554,19 @@ export class RpcConnection implements RemoteHost {
           tryTailCall: (cap, iface, method, callParams) =>
             this.trySendTailCall(questionId, answer, cap, iface, method, callParams),
         };
+    const onError = (e: unknown): void => {
+      const message = e instanceof Error ? e.message : String(e);
+      this.abort(new RpcError(message));
+    };
     const state = target.call(
       Call_getInterfaceId(call),
       Call_getMethodId(call),
       callPayload,
-      tailHandler !== undefined ? { tailHandler } : undefined,
+      tailHandler !== undefined ? { tailHandler, onError } : { onError },
     );
     target.release();
     answer.call = state;
-    state.onError = (e) => {
-      const message = e instanceof Error ? e.message : String(e);
-      this.abort(new RpcError(message));
-    };
+    state.onError = onError;
     state.result.onSettled((s) => this.completeAnswer(questionId, answer, s));
   }
 
