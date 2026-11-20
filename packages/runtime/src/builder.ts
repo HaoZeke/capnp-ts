@@ -683,16 +683,20 @@ export class StructBuilder {
   }
 
   setText(ptrIndex: number, text: string): void {
-    const enc = new TextEncoder().encode(text);
-    assertTextBlobSize(enc.length, "text blob too big");
-    const nbytes = enc.length + 1; // trailing NUL
+    this.setTextBytes(ptrIndex, new TextEncoder().encode(text));
+  }
+
+  /** Write text bytes and a trailing NUL. `bytes` is the content, without NUL. */
+  setTextBytes(ptrIndex: number, bytes: Uint8Array): void {
+    assertTextBlobSize(bytes.length, "text blob too big");
+    const nbytes = bytes.length + 1; // trailing NUL
     const nwords = bytesToWords(nbytes);
     const slot = this.slot(ptrIndex);
     const { seg: startSeg, word: startWord } = this.builder.allocWords(nwords);
     const data = this.builder.segBytes(startSeg);
     const base = startWord * WORD_BYTES;
     data.fill(0, base, base + nwords * WORD_BYTES);
-    data.set(enc, base);
+    data.set(bytes, base);
     this.builder.writeListPtr(
       slot.seg,
       slot.word,

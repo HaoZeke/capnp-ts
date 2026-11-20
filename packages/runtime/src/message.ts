@@ -159,9 +159,9 @@ export class Message {
 
   root(): Ptr {
     assertCapnp(this.segs.length > 0, "ARG");
-    // Nesting level 0 (capnp-fortran / encoding.html): depth_limit=0 still
-    // allows the root object; the first getP uses depth 1 and fails.
-    return resolvePtr(this, 0, 0, 0);
+    // C++ charges the root word in MessageReader::getRootInternal and again
+    // in PointerReader::getRoot. Nesting limit 0 rejects this read.
+    return resolvePtr(this, 0, 0, 0, 2);
   }
 
   /** Word count of segment `seg`. */
@@ -215,19 +215,30 @@ export class Message {
   ): Message {
     assertCapnp(data.length >= 8, "FRAMING", "message shorter than 8 bytes");
     const nsegs = loadU32(data, 0) + 1;
-    assertCapnp(nsegs > 0 && nsegs <= MAX_SEGMENTS, "FRAMING", `bad nsegs ${nsegs}`);
+    // InputStreamMessageReader rejects segmentCount-1 >= 511 (at most 511 segments).
+    assertCapnp(
+      nsegs > 0 && nsegs <= 511,
+      "FRAMING",
+      "Message has too many segments.",
+    );
     let tableBytes = 4 + 4 * nsegs;
     if (tableBytes % 8 !== 0) tableBytes += 4;
     assertCapnp(data.length >= tableBytes, "FRAMING", "truncated segment table");
 
     const sizes: number[] = [];
-    let totalWords = 0;
+    let totalWords = 0n;
     for (let i = 0; i < nsegs; i++) {
       const sz = loadU32(data, 4 + 4 * i);
       sizes.push(sz);
-      totalWords += sz;
+      totalWords += BigInt(sz);
     }
-    const body = tableBytes + totalWords * WORD_BYTES;
+    const traversalLimit = BigInt(opts?.traversalWords ?? DEFAULT_TRAVERSAL_WORDS);
+    assertCapnp(
+      totalWords <= traversalLimit,
+      "TRAVERSAL",
+      "Message is too large.",
+    );
+    const body = tableBytes + Number(totalWords) * WORD_BYTES;
     assertCapnp(body <= data.length, "FRAMING", "truncated segment body");
 
     const owned = copy ? data.slice(0, body) : undefined;
@@ -278,10 +289,18 @@ function primitiveListWords(count: number, stepBits: number): bigint {
   return (bits + 63n) / 64n;
 }
 
-function resolvePtr(m: Message, seg: number, word: number, depth: number): Ptr {
+function resolvePtr(
+  m: Message,
+  seg: number,
+  word: number,
+  depth: number,
+  pointerWords: number,
+): Ptr {
   boundsWord(m, seg, word);
-  m.charge(1);
-  return resolveWord(m, seg, word, readWord(m, seg, word), depth);
+  // Child pointer words are already inside a charged struct or list. The root
+  // word is charged twice, matching getRootInternal plus PointerReader::getRoot.
+  if (pointerWords > 0) m.charge(pointerWords);
+  return resolveWord(m, seg, word, readWord(m, seg, word), depth, false);
 }
 
 function resolveWord(
@@ -290,27 +309,44 @@ function resolveWord(
   word: number,
   w: bigint,
   depth: number,
+  fromFar: boolean,
 ): Ptr {
-  // Absolute nesting level (capnp-fortran): root = 0; each far hop / getP +1.
-  if (depth > m.depthLimit) throw new CapnpError("DEPTH");
-  if (w === 0n) return Ptr.nullPtr(m, seg, word, depth);
+  // A far landing pad of all zeros is an empty struct. Null is only a direct zero word.
+  if (w === 0n && !fromFar) return Ptr.nullPtr(m, seg, word, depth);
 
   const kind = wpKind(w);
+  // nestingLimit is decremented once per struct or list pointer, including the
+  // root. Null pointers are answered before the limit is consulted.
+  if (kind !== WireKind.Cap && depth >= m.depthLimit) {
+    throw new CapnpError("DEPTH");
+  }
   if (kind === WireKind.Far) {
+    // followFars is one hop. A second far word is a non-struct/non-list pointer.
+    if (fromFar) {
+      throw new CapnpError(
+        "KIND",
+        "Schema mismatch: Message contains non-struct pointer where struct pointer was expected.",
+      );
+    }
     const tseg = wpFarSeg(w);
     const toff = wpFarOff(w);
     if (wpFarTwo(w)) {
-      // Double-far counts as one nesting step for the landing object.
-      if (depth + 1 > m.depthLimit) throw new CapnpError("DEPTH");
+      // Far hops do not consume nesting depth. The landing object stays at `depth`.
       boundsWord(m, tseg, toff);
       boundsWord(m, tseg, toff + 1);
       m.charge(2);
       const pad = readWord(m, tseg, toff);
       const tag = readWord(m, tseg, toff + 1);
-      assertCapnp(wpKind(pad) === WireKind.Far && !wpFarTwo(pad), "KIND");
+      // C++ checks kind == FAR and does not reject a landing pad with the double-far bit set.
+      assertCapnp(wpKind(pad) === WireKind.Far, "KIND");
       const cseg = wpFarSeg(pad);
       const coff = wpFarOff(pad);
-      const landDepth = depth + 1;
+      // ReaderArena::tryGetSegment treats an empty segment as absent.
+      assertCapnp(
+        cseg >= 0 && cseg < m.segs.length && m.segs[cseg]!.words > 0,
+        "SEGMENT",
+        "Message contains double-far pointer to unknown segment.",
+      );
       if (wpKind(tag) === WireKind.Struct) {
         const dwords = wpStructDwords(tag);
         const pwords = wpStructPwords(tag);
@@ -318,20 +354,18 @@ function resolveWord(
           const end = coff + dwords + pwords;
           boundsWord(m, cseg, coff);
           if (end > 0) boundsWord(m, cseg, end - 1);
-        } else {
-          assertCapnp(cseg >= 0 && cseg < m.segs.length, "SEGMENT");
         }
         chargeWords(m, dwords + pwords);
-        return Ptr.struct(m, cseg, coff, dwords, pwords, landDepth);
+        return Ptr.struct(m, cseg, coff, dwords, pwords, depth);
       }
       if (wpKind(tag) === WireKind.List) {
-        return finishList(m, cseg, coff, tag, landDepth);
+        return finishList(m, cseg, coff, tag, depth);
       }
       throw new CapnpError("KIND");
     }
     boundsWord(m, tseg, toff);
     m.charge(1);
-    return resolveWord(m, tseg, toff, readWord(m, tseg, toff), depth + 1);
+    return resolveWord(m, tseg, toff, readWord(m, tseg, toff), depth, true);
   }
 
   if (kind === WireKind.Struct) {
@@ -429,6 +463,20 @@ function finishList(
     chargeWords(m, wireCount);
   }
   return Ptr.list(m, seg, start, esize, wireCount, 0, 0, 0, depth);
+}
+
+/** Byte list as Text. The list must be non-empty and end with NUL. */
+export function decodeWireText(list: Ptr): string {
+  assertCapnp(list.kind === PtrKind.List && list.esize === ElemSize.Byte, "KIND");
+  const s = list.msg.segs[list.seg]!;
+  const start = list.word * WORD_BYTES;
+  const count = list.count;
+  assertCapnp(
+    count > 0 && s.data[start + count - 1] === 0,
+    "TEXT",
+    "Message contains text that is not NUL-terminated.",
+  );
+  return new TextDecoder().decode(s.data.subarray(start, start + count - 1));
 }
 
 /** Resolved object handle (struct or list). Never a far landing pad. */
@@ -618,6 +666,7 @@ export class Ptr {
       this.seg,
       this.word + this.dwords + ptrIndex,
       this.depth + 1,
+      0,
     );
   }
 
@@ -633,12 +682,7 @@ export class Ptr {
       list.kind === PtrKind.List && list.esize === ElemSize.Byte,
       "KIND",
     );
-    if (list.count === 0) return "";
-    const s = list.msg.segs[list.seg]!;
-    const start = list.word * WORD_BYTES;
-    let n = list.count;
-    if (n > 0 && s.data[start + n - 1] === 0) n -= 1;
-    return new TextDecoder().decode(s.data.subarray(start, start + n));
+    return decodeWireText(list);
   }
 
   getData(ptrIndex: number, dflt: Uint8Array = EMPTY_DATA): Uint8Array {
@@ -667,6 +711,7 @@ export class Ptr {
         this.seg,
         this.word + index,
         this.depth + 1,
+        0,
       );
     }
     if (this.esize === ElemSize.Composite) {
@@ -676,10 +721,20 @@ export class Ptr {
         this.word + index * this.stepWords,
         this.dwords,
         this.pwords,
-        this.depth,
+        this.elementDepth(),
       );
     }
     throw new CapnpError("KIND");
+  }
+
+  /**
+   * Depth of a struct element. ListReader::getStructElement requires a
+   * remaining nesting budget and hands the element one level less.
+   */
+  private elementDepth(): number {
+    const depth = this.depth + 1;
+    if (depth >= this.msg.depthLimit) throw new CapnpError("DEPTH");
+    return depth;
   }
 
   listGetp(index: number): Ptr {
@@ -701,6 +756,7 @@ export class Ptr {
   listGetStruct(index: number): Ptr {
     assertCapnp(this.kind === PtrKind.List, "KIND");
     assertCapnp(index >= 0 && index < this.count, "BOUNDS");
+    const depth = this.elementDepth();
 
     if (this.esize === ElemSize.Composite) {
       return Ptr.struct(
@@ -709,7 +765,7 @@ export class Ptr {
         this.word + index * this.stepWords,
         this.dwords,
         this.pwords,
-        this.depth,
+        depth,
       );
     }
     if (this.esize === ElemSize.Pointer) {
@@ -721,7 +777,7 @@ export class Ptr {
         kind: PtrKind.Struct,
         dwords: 0,
         pwords: 1,
-        depth: this.depth,
+        depth,
       });
     }
     // encoding.html: "any element size (except C = 1, i.e. 1-bit) may be
@@ -738,7 +794,7 @@ export class Ptr {
         dwords: 0,
         pwords: 0,
         dataBits: 0,
-        depth: this.depth,
+        depth,
       });
     }
 
@@ -770,7 +826,7 @@ export class Ptr {
       pwords: 0,
       bodyByte: absByte % WORD_BYTES,
       dataBits: elemBytes * 8,
-      depth: this.depth,
+      depth,
     });
   }
 
@@ -783,11 +839,7 @@ export class Ptr {
       const elem = this.listGetP(index);
       if (elem.kind === PtrKind.Null) return "";
       if (elem.kind === PtrKind.List && elem.esize === ElemSize.Byte) {
-        const s = elem.msg.segs[elem.seg]!;
-        const start = elem.word * WORD_BYTES;
-        let n = elem.count;
-        if (n > 0 && s.data[start + n - 1] === 0) n -= 1;
-        return new TextDecoder().decode(s.data.subarray(start, start + n));
+        return decodeWireText(elem);
       }
       throw new CapnpError("KIND");
     }

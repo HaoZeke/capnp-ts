@@ -50,19 +50,16 @@ function packWords(words: bigint[]): Uint8Array {
 }
 
 describe("nesting depth limit", () => {
-  test("depth_limit=0 allows root, first getP throws DEPTH", () => {
+  test("depth_limit=0 rejects the root pointer", () => {
     const b = new MessageBuilder();
     const root = b.initRoot(0, 1);
     const kid = root.initStruct(0, 1, 0);
     kid.setU32(0, 7);
     const msg = Message.fromFlat(b.toFlat(), { depthLimit: 0 });
-    const r = msg.root();
-    expect(r.kind).toBe(PtrKind.Struct);
-    expect(r.depth).toBe(0);
-    expectCode(() => r.getP(0), "DEPTH");
+    expectCode(() => msg.root(), "DEPTH");
   });
 
-  test("depth_limit=1: first hop ok, second hop throws DEPTH", () => {
+  test("depth_limit=1 allows the root and rejects the first child", () => {
     const b = new MessageBuilder();
     const root = b.initRoot(0, 1);
     const a = root.initStruct(0, 0, 1);
@@ -70,7 +67,19 @@ describe("nesting depth limit", () => {
     leaf.setU32(0, 99);
     const msg = Message.fromFlat(b.toFlat(), { depthLimit: 1 });
     const r = msg.root();
-    const mid = r.getP(0);
+    expect(r.kind).toBe(PtrKind.Struct);
+    expect(r.depth).toBe(0);
+    expectCode(() => r.getP(0), "DEPTH");
+  });
+
+  test("depth_limit=2 allows one child and rejects the grandchild", () => {
+    const b = new MessageBuilder();
+    const root = b.initRoot(0, 1);
+    const a = root.initStruct(0, 0, 1);
+    const leaf = a.initStruct(0, 1, 0);
+    leaf.setU32(0, 99);
+    const msg = Message.fromFlat(b.toFlat(), { depthLimit: 2 });
+    const mid = msg.root().getP(0);
     expect(mid.kind).toBe(PtrKind.Struct);
     expect(mid.depth).toBe(1);
     expectCode(() => mid.getP(0), "DEPTH");
@@ -97,32 +106,51 @@ describe("nesting depth limit", () => {
         break;
       }
     }
-    // root depth 0; hops 1..64 succeed (depthLimit 64); hop 65 (i=64) fails.
-    expect(threwAt).toBe(64);
+    // root uses one level. Hops 0..62 succeed under the default limit of 64.
+    // Hop 63 is the 64th nested pointer and fails.
+    expect(threwAt).toBe(63);
   });
 
   test("listGetP pointer elements accumulate depth", () => {
-    const b = new MessageBuilder();
-    const root = b.initRoot(0, 1);
-    root.initPointerList(0, 1);
     // root (d=0) → list (d=1) → listGetP resolves element at d=2.
-    const msg = Message.fromFlat(b.toFlat(), { depthLimit: 1 });
+    const msg = Message.fromSegments(
+      [
+        {
+          data: packWords([
+            wpMakeStruct(0, 0, 1),
+            wpMakeList(0, ElemSize.Pointer, 1),
+            wpMakeStruct(-1, 0, 0),
+          ]),
+          words: 3,
+        },
+      ],
+      { depthLimit: 2 },
+    );
     const lst = msg.root().getP(0);
     expect(lst.depth).toBe(1);
-    // Null element still runs depth check before accepting null.
     expectCode(() => lst.listGetP(0), "DEPTH");
   });
 
-  test("double-far decrements nesting budget", () => {
-    // root double-far → struct 0d1p. depthLimit=1 → landing depth 1;
-    // getP on landing is depth 2 → DEPTH.
+  test("null pointer elements are answered before the depth limit", () => {
+    const b = new MessageBuilder();
+    const root = b.initRoot(0, 1);
+    root.initPointerList(0, 1);
+    const msg = Message.fromFlat(b.toFlat(), { depthLimit: 2 });
+    const lst = msg.root().getP(0);
+    expect(lst.depth).toBe(1);
+    expect(lst.listGetP(0).kind).toBe(PtrKind.Null);
+  });
+
+  test("double-far does not consume an extra nesting level", () => {
+    // root double-far → struct 0d1p. The far hop stays at depth 0.
+    // getP on that struct is depth 1 and fails when the limit is 1.
     const seg0 = new Uint8Array(8);
     const seg1 = new Uint8Array(16);
     const seg2 = new Uint8Array(16);
     storeU64(seg0, 0, wpMakeFar(true, 0, 1));
     storeU64(seg1, 0, wpMakeFar(false, 0, 2));
     storeU64(seg1, 8, wpMakeStruct(0, 0, 1));
-    storeU64(seg2, 0, 0n);
+    storeU64(seg2, 0, wpMakeStruct(-1, 0, 0));
 
     const msg = Message.fromSegments(
       [
@@ -134,7 +162,8 @@ describe("nesting depth limit", () => {
     );
     const r = msg.root();
     expect(r.kind).toBe(PtrKind.Struct);
-    expect(r.depth).toBe(1);
+    expect(r.depth).toBe(0);
+    expect(r.getU64(0)).toBe(0n);
     expectCode(() => r.getP(0), "DEPTH");
   });
 });
@@ -253,8 +282,8 @@ describe("composite finishList", () => {
     expect(lst.esize).toBe(ElemSize.Composite);
     expect(lst.listLen()).toBe(100);
     const spent = DEFAULT_TRAVERSAL_WORDS - ok.remainingTraversal();
-    // root pointer word + tag + contentWords + one word per zero-size element
-    expect(spent).toBe(1 + 1 + contentWords + 100);
+    // Root word is charged twice, then the tag, the content, and one word per element.
+    expect(spent).toBe(2 + 1 + contentWords + 100);
   });
 
   test("zero-size composite with an empty body still charges one word per element", () => {
@@ -269,7 +298,7 @@ describe("composite finishList", () => {
     expectCode(() => tight.root(), "TRAVERSAL");
     const ok = Message.fromSegments(
       [{ data: packWords(words), words: words.length }],
-      { traversalWords: 1 + 1 + nelem },
+      { traversalWords: 2 + 1 + nelem },
     );
     expect(ok.root().listLen()).toBe(nelem);
     expect(ok.remainingTraversal()).toBe(0);
@@ -285,7 +314,7 @@ describe("composite finishList", () => {
     expectCode(() => tight.root(), "TRAVERSAL");
     const ok = Message.fromSegments(
       [{ data: packWords([listPtr]), words: 1 }],
-      { traversalWords: 1 + count },
+      { traversalWords: 2 + count },
     );
     const lst = ok.root();
     expect(lst.esize).toBe(ElemSize.Void);

@@ -43,7 +43,7 @@ import {
   listStepBits,
   primitiveBodySize,
 } from "./kinds.ts";
-import { Message, Ptr } from "./message.ts";
+import { Message, Ptr, decodeWireText } from "./message.ts";
 import { wpCompositeElementCount, wpMakeCap, wpMakeStruct } from "./pointer.ts";
 import {
   AppliedAnnotation,
@@ -824,12 +824,7 @@ function readPtrAsText(p: Ptr, dflt: string): string {
     "KIND",
     "Text pointer is not a byte list",
   );
-  if (p.count === 0) return "";
-  const s = p.msg.segs[p.seg]!;
-  const start = p.word * WORD_BYTES;
-  let n = p.count;
-  if (n > 0 && s.data[start + n - 1] === 0) n -= 1;
-  return new TextDecoder().decode(s.data.subarray(start, start + n));
+  return decodeWireText(p);
 }
 
 function readPtrAsData(p: Ptr, dflt: Uint8Array): Uint8Array {
@@ -1593,6 +1588,14 @@ export class DynamicStructBuilder {
       "ARG",
       `init() with size requires list, Text, or Data field (got ${t.which})`,
     );
+  }
+
+  /** Write text bytes plus a trailing NUL, and select the field's union arm. */
+  setTextBytes(fieldOrName: StructField | string, bytes: Uint8Array): void {
+    const field = this.resolveField(fieldOrName);
+    assertCapnp(field.getType().isText(), "KIND", `expected text field '${field.name}'`);
+    this.setInUnion(field);
+    this.sb.setTextBytes(field.offset, bytes);
   }
 
   set(fieldOrName: StructField | string, rawInput: DynamicSetValue): void {
@@ -2748,6 +2751,13 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
     return this.word + index;
   }
 
+  setTextBytes(index: number, bytes: Uint8Array): void {
+    const elemType = this.schema.getElementType();
+    assertCapnp(elemType.isText(), "KIND", "expected a list of text");
+    const slot = new BuilderPointer(this.builder, this.seg, this.pointerWord(index));
+    writeTextBytesToSlot(this.builder, slot, bytes);
+  }
+
   set(index: number, rawInput: DynamicSetValue): void {
     this.checkIndex(index);
     const elemType = this.schema.getElementType();
@@ -3041,15 +3051,22 @@ function writeTextToSlot(
   slot: BuilderPointer,
   text: string,
 ): void {
-  const enc = new TextEncoder().encode(text);
-  assertTextBlobSize(enc.length, "text blob too big");
-  const nbytes = enc.length + 1;
+  writeTextBytesToSlot(builder, slot, new TextEncoder().encode(text));
+}
+
+function writeTextBytesToSlot(
+  builder: MessageBuilder,
+  slot: BuilderPointer,
+  bytes: Uint8Array,
+): void {
+  assertTextBlobSize(bytes.length, "text blob too big");
+  const nbytes = bytes.length + 1;
   const nwords = bytesToWords(nbytes);
   const { seg, word } = builder.allocWords(nwords);
   const data = builder.segBytes(seg);
   const base = word * WORD_BYTES;
   data.fill(0, base, base + nwords * WORD_BYTES);
-  data.set(enc, base);
+  data.set(bytes, base);
   builder.writeListPtr(slot.seg, slot.word, seg, word, ElemSize.Byte, nbytes);
 }
 

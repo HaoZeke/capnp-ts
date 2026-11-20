@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   BuilderPointer,
+  CapnpError,
   ElemSize,
   Message,
   MessageBuilder,
@@ -122,9 +123,8 @@ describe("text and data edge cases", () => {
     expect(tl.listLen()).toBe(20);
   });
 
-  test("text without trailing NUL on the wire is read in full", () => {
+  test("text without a trailing NUL is rejected", () => {
     // Hand-crafted: List(UInt8) of "abcd" with no trailing 0 byte.
-    // getText must not invent a strip when the last byte is non-zero.
     const words = [
       wpMakeStruct(0, 0, 1),
       wpMakeList(0, ElemSize.Byte, 4),
@@ -136,7 +136,7 @@ describe("text and data edge cases", () => {
     storeU8(seg, 17, 0x62); // b
     storeU8(seg, 18, 0x63); // c
     storeU8(seg, 19, 0x64); // d
-    expect(msg.root().getText(0)).toBe("abcd");
+    expect(() => msg.root().getText(0)).toThrow(CapnpError);
   });
 
   test("text length boundaries (word padding + max-ish)", () => {

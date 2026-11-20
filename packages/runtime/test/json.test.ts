@@ -112,7 +112,13 @@ describe("Cap'n Proto compat JSON codec", () => {
     expect(decoded.get("u64").asUInt64()).toBe(42n);
     expect(Number.isNaN(decoded.get("f32").asFloat32())).toBe(true);
     expect(decoded.get("f64").asFloat64()).toBe(Infinity);
-    expect(decoded.get("title").asText()).toBe("🚀");
+    // \uD83D\uDE80 is two UTF-16 units, stored as CESU-8, not one UTF-8 scalar.
+    const titlePtr = decoded.ptr.getP(sinkSchema.getFieldByName("title").offset);
+    const titleBytes = titlePtr.msg.segs[titlePtr.seg]!.data.subarray(
+      titlePtr.word * 8,
+      titlePtr.word * 8 + titlePtr.count - 1,
+    );
+    expect([...titleBytes]).toEqual([0xed, 0xa0, 0xbd, 0xed, 0xba, 0x80]);
 
     // Unknown enum ordinal encodes as number
     const unkB = new MessageBuilder();
