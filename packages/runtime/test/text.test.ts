@@ -18,6 +18,7 @@ import {
   canonicalize,
   canonicalizeFlat,
   decodeText,
+  encodeCEscapeTextBytes,
   encodeText,
   formatKjFloat32,
   formatKjFloat64,
@@ -301,6 +302,58 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
     expect(stream("(title = \"it's\")(i32 = 2)").length).toBe(2);
     expect(() => stream('(title = "B)\\0(")')).toThrow(CapnpError);
     expect(() => stream('(title = "a)b(")')).toThrow(CapnpError);
+  });
+
+  test("string printers decode non-UTF-8 Text with U+FFFD, not an escape, and keep a BOM", () => {
+    const person = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin")).resolveStruct("Person");
+    const cases: Array<[string, string]> = [
+      ["a\\377b", "a\ufffdb"],
+      ["a\\342\\202c", "a\ufffdc"],
+      ["\\300\\257", "\ufffd\ufffd"],
+      ["\\355\\240\\200", "\ufffd\ufffd\ufffd"],
+      ["ab\\303\\251\\377x", "ab\u00e9\ufffdx"],
+      ["\\357\\273\\277x", "\ufeffx"],
+      ["\\t\\\"\\177", "\\t\\\"\\177"],
+    ];
+    for (const [raw, shown] of cases) {
+      const reader = DynamicStruct.fromMessage(decodeText(`(name = "${raw}")`, person), person);
+      for (const printed of [
+        encodeText(reader, { pretty: false }),
+        encodeText(reader),
+        stringify(reader),
+        prettyPrint(reader),
+        new TextCodec({ prettyPrint: false }).encode(reader),
+      ]) {
+        expect(printed).toContain(`name = "${shown}"`);
+      }
+    }
+    expect(encodeCEscapeTextBytes(Uint8Array.of(0xff))).toBe("\ufffd");
+    expect(encodeCEscapeTextBytes(Uint8Array.of(0xc3, 0xa9))).toBe("\u00e9");
+  });
+
+  test.skipIf(!hasCapnp)("string printers equal capnp decode output decoded as UTF-8", () => {
+    const schemaPath = join(repoRoot, "schema/addressbook.capnp");
+    const person = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin")).resolveStruct("Person");
+    const lossy = (bytes: Uint8Array) =>
+      new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes).replace(/\n$/, "");
+    for (const raw of ["a\\377b", "a\\342\\202c", "\\300\\257", "\\355\\240\\200", "\\357\\273\\277x", "\\177\\001\\377"]) {
+      const bin = spawnSync("capnp", ["encode", schemaPath, "Person"], { input: `(name = "${raw}")` });
+      expect(bin.status).toBe(0);
+      const reader = DynamicStruct.fromMessage(Message.fromFlat(new Uint8Array(bin.stdout)), person);
+      const short = spawnSync("capnp", ["decode", "--short", schemaPath, "Person"], { input: bin.stdout });
+      const pretty = spawnSync("capnp", ["decode", schemaPath, "Person"], { input: bin.stdout });
+      expect(short.status).toBe(0);
+      expect(pretty.status).toBe(0);
+      for (const printed of [
+        encodeText(reader, { pretty: false }),
+        stringify(reader),
+        new TextCodec({ prettyPrint: false }).encode(reader),
+      ]) {
+        expect(printed).toBe(lossy(short.stdout));
+      }
+      expect(encodeText(reader)).toBe(lossy(pretty.stdout));
+      expect(prettyPrint(reader)).toBe(lossy(pretty.stdout));
+    }
   });
 
   test("formatKjFloat32 tries 6 then 8 significant digits like kj::FloatToBuffer", () => {

@@ -27,7 +27,7 @@ import {
 } from "./schema.ts";
 
 const UTF8_ENC = new TextEncoder();
-const UTF8_DEC = new TextDecoder("utf-8", { fatal: false });
+const UTF8_DEC = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
 
 function utf8ByteLength(s: string): number {
   return UTF8_ENC.encode(s).byteLength;
@@ -170,9 +170,14 @@ export function encodeCEscapeData(bytes: Uint8Array): string {
   return out;
 }
 
-/** Escape UTF-8 Text matching `kj::encodeCEscape()` for a string. */
-export function encodeCEscapeText(text: string): string {
-  const bytes = UTF8_ENC.encode(text);
+/**
+ * Print Text bytes as `kj::encodeCEscape` does for Text: control bytes,
+ * DEL, quotes and backslash are escaped and every other byte is written
+ * as is. A string cannot hold a byte that is not valid UTF-8, so each
+ * run of bytes from 0x80 up is decoded with U+FFFD replacement. The
+ * result is the string the bytes C++ prints decode to.
+ */
+export function encodeCEscapeTextBytes(bytes: Uint8Array): string {
   let out = "";
   let i = 0;
   while (i < bytes.length) {
@@ -182,29 +187,17 @@ export function encodeCEscapeText(text: string): string {
       i++;
       continue;
     }
-    // Preserve valid multi-byte UTF-8 sequences verbatim as KJ does for chars.
-    let seqLen = 0;
-    if ((b & 0xe0) === 0xc0) seqLen = 2;
-    else if ((b & 0xf0) === 0xe0) seqLen = 3;
-    else if ((b & 0xf8) === 0xf0) seqLen = 4;
-    if (seqLen > 0 && i + seqLen <= bytes.length) {
-      let valid = true;
-      for (let k = 1; k < seqLen; k++) {
-        if ((bytes[i + k]! & 0xc0) !== 0x80) {
-          valid = false;
-          break;
-        }
-      }
-      if (valid) {
-        out += UTF8_DEC.decode(bytes.subarray(i, i + seqLen));
-        i += seqLen;
-        continue;
-      }
-    }
-    out += escapeByteC(b);
-    i++;
+    let end = i + 1;
+    while (end < bytes.length && bytes[end]! >= 0x80) end++;
+    out += UTF8_DEC.decode(bytes.subarray(i, end));
+    i = end;
   }
   return out;
+}
+
+/** Escape UTF-8 Text matching `kj::encodeCEscape()` for a string. */
+export function encodeCEscapeText(text: string): string {
+  return encodeCEscapeTextBytes(UTF8_ENC.encode(text));
 }
 
 type PrintMode = "bare" | "prefixed" | "parenthesized";
@@ -287,7 +280,7 @@ function printDynamicValue(
       }
       return formatKjFloat64(value.asFloat64());
     case DynamicValueType.TEXT:
-      return `"${encodeCEscapeText(value.asText())}"`;
+      return `"${encodeCEscapeTextBytes(value.asTextBytes())}"`;
     case DynamicValueType.DATA:
       return `"${encodeCEscapeData(value.asData())}"`;
     case DynamicValueType.LIST: {
