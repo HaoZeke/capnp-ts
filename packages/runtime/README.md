@@ -47,7 +47,7 @@ Subpath entry points (same modules):
 - `@haozeke/capnp/canonical` — `canonicalize` / `canonicalizeFlat`
 - `@haozeke/capnp/schema`: `SchemaLoader`, `StructSchema`, `EnumSchema`, `InterfaceSchema`, `ConstSchema`, `AnnotationSchema`, `ListSchema`, `Type`
 - `@haozeke/capnp/dynamic`: `DynamicStruct`, `DynamicList`, `DynamicEnum`, `DynamicCapability`, `DynamicValue`, `DynamicOrphan`
-- `@haozeke/capnp/text`: `TextCodec`, `prettyPrint`, `stringify`, `encodeText`, `decodeText`, `splitTextMessages`
+- `@haozeke/capnp/text`: `TextCodec`, `prettyPrint`, `stringify`, `encodeText`, `encodeTextBytes`, `decodeText`, `splitTextMessages`
 - `@haozeke/capnp/json`: `JsonCodec`, `encodeJson`, `decodeJson`, `splitJsonMessages`
 - `@haozeke/capnp/cli`: `runCli`, `convertStream`, `evaluateSchemaPath` (CLI binary `capnp-ts`: `encode`, `decode`, `convert`, `eval`)
 

@@ -20,6 +20,7 @@ import {
   decodeText,
   encodeCEscapeTextBytes,
   encodeText,
+  encodeTextBytes,
   formatKjFloat32,
   formatKjFloat64,
   initDynamicRoot,
@@ -353,6 +354,41 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
       }
       expect(encodeText(reader)).toBe(lossy(pretty.stdout));
       expect(prettyPrint(reader)).toBe(lossy(pretty.stdout));
+    }
+  });
+
+  test.skipIf(!hasCapnp)("encodeTextBytes writes raw Text bytes like capnp decode", () => {
+    const schemaPath = join(repoRoot, "schema/addressbook.capnp");
+    const book = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin")).resolveStruct("AddressBook");
+    const names = [
+      "\\377",
+      "\\xc3",
+      "ab\\303\\251\\377x",
+      "\\300\\257",
+      "\\355\\240\\200",
+      "\\357\\273\\277bom",
+      "a\\000b",
+      "\\377".repeat(30),
+      `${"x".repeat(40)}${"\\377".repeat(12)}`,
+      "\\377".repeat(10),
+    ];
+    for (const name of names) {
+      const input = `(people = [(id = 1, name = "${name}", email = "e"), (id = 2, name = "${name}", phones = [(number = "${name.slice(0, 40)}", type = mobile)])])`;
+      const bin = spawnSync("capnp", ["encode", schemaPath, "AddressBook"], { input });
+      expect(bin.status).toBe(0);
+      const reader = DynamicStruct.fromMessage(Message.fromFlat(new Uint8Array(bin.stdout)), book);
+      for (const pretty of [true, false]) {
+        const args = ["decode", ...(pretty ? [] : ["--short"]), schemaPath, "AddressBook"];
+        const cpp = spawnSync("capnp", args, { input: bin.stdout });
+        expect(cpp.status).toBe(0);
+        const ts = Buffer.concat([encodeTextBytes(reader, { pretty }), Buffer.from("\n")]);
+        expect(ts.toString("hex")).toBe(Buffer.from(cpp.stdout).toString("hex"));
+        // The string printers return these bytes decoded as UTF-8, line breaks included.
+        const decoded = new TextDecoder("utf-8", { ignoreBOM: true }).decode(cpp.stdout);
+        expect(`${encodeText(reader, { pretty })}\n`).toBe(decoded);
+        expect(`${new TextCodec({ prettyPrint: pretty }).encode(reader)}\n`).toBe(decoded);
+        expect(`${pretty ? prettyPrint(reader) : stringify(reader)}\n`).toBe(decoded);
+      }
     }
   });
 

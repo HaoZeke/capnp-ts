@@ -30,7 +30,18 @@ const UTF8_ENC = new TextEncoder();
 const UTF8_DEC = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
 
 function utf8ByteLength(s: string): number {
-  return UTF8_ENC.encode(s).byteLength;
+  let size = 0;
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    if (code >= 0xdc00 && code <= 0xdcff) {
+      size++;
+      continue;
+    }
+    const cp = s.codePointAt(i)!;
+    size += UTF8_ENC.encode(String.fromCodePoint(cp)).byteLength;
+    if (cp > 0xffff) i++;
+  }
+  return size;
 }
 
 /**
@@ -195,6 +206,80 @@ export function encodeCEscapeTextBytes(bytes: Uint8Array): string {
   return out;
 }
 
+function validUtf8SeqLen(bytes: Uint8Array, i: number): number {
+  const b0 = bytes[i]!;
+  if (b0 >= 0xc2 && b0 <= 0xdf) {
+    return i + 1 < bytes.length && (bytes[i + 1]! & 0xc0) === 0x80 ? 2 : 0;
+  }
+  if (b0 >= 0xe0 && b0 <= 0xef) {
+    if (i + 2 >= bytes.length) return 0;
+    const b1 = bytes[i + 1]!;
+    const b2 = bytes[i + 2]!;
+    if ((b2 & 0xc0) !== 0x80) return 0;
+    if (b0 === 0xe0) return b1 >= 0xa0 && b1 <= 0xbf ? 3 : 0;
+    if (b0 === 0xed) return b1 >= 0x80 && b1 <= 0x9f ? 3 : 0;
+    return (b1 & 0xc0) === 0x80 ? 3 : 0;
+  }
+  if (b0 >= 0xf0 && b0 <= 0xf4) {
+    if (i + 3 >= bytes.length) return 0;
+    const b1 = bytes[i + 1]!;
+    const b2 = bytes[i + 2]!;
+    const b3 = bytes[i + 3]!;
+    if ((b2 & 0xc0) !== 0x80 || (b3 & 0xc0) !== 0x80) return 0;
+    if (b0 === 0xf0) return b1 >= 0x90 && b1 <= 0xbf ? 4 : 0;
+    if (b0 === 0xf4) return b1 >= 0x80 && b1 <= 0x8f ? 4 : 0;
+    return (b1 & 0xc0) === 0x80 ? 4 : 0;
+  }
+  return 0;
+}
+
+/** Internal byte output uses low-surrogate sentinels until it is encoded. */
+function encodeCEscapeRawTextBytes(bytes: Uint8Array): string {
+  let out = "";
+  let i = 0;
+  while (i < bytes.length) {
+    const b = bytes[i]!;
+    if (b < 0x80) {
+      out += escapeByteC(b);
+      i++;
+      continue;
+    }
+    const seqLen = validUtf8SeqLen(bytes, i);
+    if (seqLen > 0) {
+      out += UTF8_DEC.decode(bytes.subarray(i, i + seqLen));
+      i += seqLen;
+      continue;
+    }
+    out += String.fromCharCode(0xdc00 + b);
+    i++;
+  }
+  return out;
+}
+
+function textOutputBytes(text: string): Uint8Array {
+  const chunks: Uint8Array[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code >= 0xdc00 && code <= 0xdcff) {
+      chunks.push(Uint8Array.of(code - 0xdc00));
+      continue;
+    }
+    const cp = text.codePointAt(i)!;
+    chunks.push(UTF8_ENC.encode(String.fromCodePoint(cp)));
+    if (cp > 0xffff) i++;
+  }
+  return concatChunks(chunks);
+}
+
+/**
+ * The string the printed bytes decode to as UTF-8, with U+FFFD for each
+ * invalid sequence. Line breaks were chosen from the byte lengths, so
+ * they fall where capnp breaks its lines.
+ */
+function printedString(printed: string): string {
+  return UTF8_DEC.decode(textOutputBytes(printed));
+}
+
 /** Escape UTF-8 Text matching `kj::encodeCEscape()` for a string. */
 export function encodeCEscapeText(text: string): string {
   return encodeCEscapeTextBytes(UTF8_ENC.encode(text));
@@ -280,7 +365,7 @@ function printDynamicValue(
       }
       return formatKjFloat64(value.asFloat64());
     case DynamicValueType.TEXT:
-      return `"${encodeCEscapeTextBytes(value.asTextBytes())}"`;
+      return `"${encodeCEscapeRawTextBytes(value.asTextBytes())}"`;
     case DynamicValueType.DATA:
       return `"${encodeCEscapeData(value.asData())}"`;
     case DynamicValueType.LIST: {
@@ -419,17 +504,14 @@ export function prettyPrint(
     | DynamicListBuilder,
 ): string {
   const { reader, defaultTypeCode } = normalizePrintable(value);
-  return printDynamicValue(reader, defaultTypeCode, Indent.root(true), "bare");
+  return printedString(printDynamicValue(reader, defaultTypeCode, Indent.root(true), "bare"));
 }
 
 /** Single-line Cap'n Proto text output matching `kj::str(DynamicValue::Reader)`. */
 export function stringify(value: PrintableDynamic, type?: Type): string {
   const { reader, defaultTypeCode } = normalizePrintable(value);
-  return printDynamicValue(
-    reader,
-    type ? type.whichCode : defaultTypeCode,
-    Indent.root(false),
-    "bare",
+  return printedString(
+    printDynamicValue(reader, type ? type.whichCode : defaultTypeCode, Indent.root(false), "bare"),
   );
 }
 
@@ -1399,7 +1481,7 @@ export class TextCodec {
     this.pretty = enabled;
   }
 
-  encode(value: PrintableDynamic, type?: Type): string {
+  private render(value: PrintableDynamic, type: Type | undefined): string {
     const { reader, defaultTypeCode } = normalizePrintable(value);
     const code = type ? type.whichCode : defaultTypeCode;
     if (!this.pretty) {
@@ -1412,6 +1494,19 @@ export class TextCodec {
       return printDynamicValue(reader, code, Indent.root(true), "bare");
     }
     return printDynamicValue(reader, code, Indent.root(false), "bare");
+  }
+
+  /**
+   * Encode to a string: the bytes `encodeBytes` returns, decoded as UTF-8
+   * with U+FFFD for each invalid sequence, as encodeJson decodes Text.
+   */
+  encode(value: PrintableDynamic, type?: Type): string {
+    return printedString(this.render(value, type));
+  }
+
+  /** Encode to the exact bytes capnp prints, invalid UTF-8 in Text included. */
+  encodeBytes(value: PrintableDynamic, type?: Type): Uint8Array {
+    return textOutputBytes(this.render(value, type));
   }
 
   /**
@@ -1464,13 +1559,31 @@ export class TextCodec {
   }
 }
 
-/** Encode a DynamicStruct to Cap'n Proto text format (`pretty` defaults to true, like `capnp decode`). */
+/**
+ * Encode a DynamicStruct to Cap'n Proto text format (`pretty` defaults to
+ * true, like `capnp decode`). This is `encodeTextBytes` decoded as UTF-8:
+ * capnp writes Text bytes as they are, and a string cannot hold a byte that
+ * is not valid UTF-8, so each invalid sequence in Text shows as U+FFFD.
+ */
 export function encodeText(
   value: DynamicStructReader | DynamicStructBuilder,
   opts?: { pretty?: boolean },
 ): string {
   const codec = new TextCodec({ prettyPrint: opts?.pretty ?? true });
   return codec.encode(value);
+}
+
+/**
+ * Encode text-format output as the exact bytes `capnp decode` prints,
+ * invalid UTF-8 in Text included. Use this rather than `encodeText` when
+ * the output must match capnp byte for byte.
+ */
+export function encodeTextBytes(
+  value: DynamicStructReader | DynamicStructBuilder,
+  opts?: { pretty?: boolean },
+): Uint8Array {
+  const codec = new TextCodec({ prettyPrint: opts?.pretty ?? true });
+  return codec.encodeBytes(value);
 }
 
 /** Decode a single Cap'n Proto text struct literal into a stream-framed `Message`. */
