@@ -14,6 +14,7 @@ import {
   Message,
   PtrKind,
   SchemaLoader,
+  TextCodec,
   canonicalize,
   decodeText,
   isCanonical,
@@ -322,6 +323,11 @@ describe("text format against capnp 1.4.0", () => {
     expect(() => readText('(defaultTag = 0x"ff")')).toThrow(CapnpError);
     expect(() => readText("(defaultTag = [1])")).toThrow(CapnpError);
     expect(() => readText("(tags = [5])")).toThrow(/Type mismatch/);
+    const tagType = sink.getFieldByName("defaultTag").getType();
+    const codec = new TextCodec();
+    expect(codec.decodeValue('"k"', tagType).asStruct().get("key").asText()).toBe("k");
+    expect(codec.decodeValue('("k")', tagType).asStruct().get("key").asText()).toBe("k");
+    expect(() => codec.decodeValue("5", tagType)).toThrow(/Type mismatch/);
   });
 
   test("T-04 a parenthesized integer is a type mismatch for an enum", () => {
