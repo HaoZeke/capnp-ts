@@ -174,11 +174,137 @@ export function pack(input: Uint8Array, opts?: PackOptions): Uint8Array {
  * @param opts.maxWords Cap on expanded words (default {@link MAX_UNPACKED_WORDS}).
  *   Exceeding the cap throws `CapnpError("PACKED")` before unbounded allocation.
  */
+/**
+ * Unpack one or more packed messages, stopping zero-runs and verbatim runs
+ * on the reads InputStreamMessageReader issues: the first table word, the
+ * rest of the segment table, then the segment bodies.
+ */
+function unpackMessages(input: Uint8Array, maxWords: number): Uint8Array {
+  const src = new PackedReader(input);
+  const out: number[] = [];
+  while (src.pos < input.length) {
+    const msg = src.readMessage(maxWords - Math.floor(out.length / WORD_BYTES));
+    for (const b of msg) out.push(b);
+  }
+  if (out.length > maxWords * WORD_BYTES) {
+    throw new CapnpError("PACKED", "expanded size exceeds word cap");
+  }
+  return Uint8Array.from(out);
+}
+
+class PackedReader {
+  pos = 0;
+
+  constructor(private readonly input: Uint8Array) {}
+
+  /** Read exactly `nbytes` (a multiple of 8) using one packed read. */
+  readExact(nbytes: number): number[] {
+    const out: number[] = [];
+    while (out.length < nbytes) {
+      if (this.pos >= this.input.length) {
+        throw new CapnpError("PACKED", "Premature end of packed input.");
+      }
+      const tag = this.input[this.pos++]!;
+      for (let k = 0; k < 8; k++) {
+        if (tag & (1 << k)) {
+          if (this.pos >= this.input.length) {
+            throw new CapnpError("PACKED", "truncated tag payload");
+          }
+          out.push(this.input[this.pos++]!);
+        } else {
+          out.push(0);
+        }
+      }
+      if (out.length > nbytes) {
+        throw new CapnpError(
+          "PACKED",
+          "Packed input did not end cleanly on a segment boundary.",
+        );
+      }
+      if (tag === 0 || tag === 0xff) {
+        if (this.pos >= this.input.length) {
+          throw new CapnpError("PACKED", tag === 0 ? "truncated zero run" : "truncated verbatim count");
+        }
+        const cnt = this.input[this.pos++]!;
+        const run = cnt * WORD_BYTES;
+        if (out.length + run > nbytes) {
+          throw new CapnpError(
+            "PACKED",
+            "Packed input did not end cleanly on a segment boundary.",
+          );
+        }
+        if (tag === 0) {
+          for (let i = 0; i < run; i++) out.push(0);
+        } else {
+          if (this.pos + run > this.input.length) {
+            throw new CapnpError("PACKED", "truncated verbatim run");
+          }
+          for (let i = 0; i < run; i++) out.push(this.input[this.pos++]!);
+        }
+      }
+    }
+    return out;
+  }
+
+  readMessage(maxWords: number): number[] {
+    const first = this.readExact(WORD_BYTES);
+    const nsegs = u32(first, 0) + 1;
+    if (nsegs <= 0 || nsegs > 511) {
+      throw new CapnpError("FRAMING", "Message has too many segments.");
+    }
+    let total = BigInt(u32(first, 4));
+    const parts: number[][] = [first];
+    if (nsegs > 1) {
+      const restBytes = (nsegs & ~1) * 4;
+      const more = this.readExact(restBytes);
+      parts.push(more);
+      const extra = nsegs - 1;
+      for (let i = 0; i < extra; i++) {
+        total += BigInt(u32(more, i * 4));
+      }
+    }
+    if (total > BigInt(maxWords)) {
+      throw new CapnpError("PACKED", "expanded size exceeds word cap");
+    }
+    if (total > 0n) parts.push(this.readExact(Number(total) * WORD_BYTES));
+    const out: number[] = [];
+    for (const p of parts) for (const b of p) out.push(b);
+    const words = out.length / WORD_BYTES;
+    if (words > maxWords) {
+      throw new CapnpError("PACKED", "expanded size exceeds word cap");
+    }
+    return out;
+  }
+}
+
+function u32(b: number[], off: number): number {
+  return (
+    (b[off]! | (b[off + 1]! << 8) | (b[off + 2]! << 16) | (b[off + 3]! << 24)) >>>
+    0
+  );
+}
+
 export function unpack(
   input: Uint8Array,
   opts?: { maxWords?: number },
 ): Uint8Array {
   const maxWords = opts?.maxWords ?? MAX_UNPACKED_WORDS;
+  if (input.length > 0) {
+    try {
+      return unpackMessages(input, maxWords);
+    } catch (err) {
+      if (
+        err instanceof CapnpError &&
+        err.message.includes("segment boundary")
+      ) {
+        throw err;
+      }
+    }
+  }
+  return unpackFlat(input, maxWords);
+}
+
+function unpackFlat(input: Uint8Array, maxWords: number): Uint8Array {
   const maxBytes = maxWords * WORD_BYTES;
   const out: number[] = [];
   let ipos = 0;
