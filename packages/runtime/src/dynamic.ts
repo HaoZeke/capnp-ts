@@ -371,10 +371,13 @@ export type DynamicSetValue =
 export class DynamicValueReader {
   readonly type: DynamicValueType;
   private readonly payload: unknown;
+  /** The exact Text bytes (without the NUL), kept because Text need not be UTF-8. */
+  private readonly textBytes: Uint8Array | undefined;
 
-  private constructor(type: DynamicValueType, payload: unknown) {
+  private constructor(type: DynamicValueType, payload: unknown, textBytes?: Uint8Array) {
     this.type = type;
     this.payload = payload;
+    this.textBytes = textBytes;
   }
 
   static readonly UNKNOWN = new DynamicValueReader(DynamicValueType.UNKNOWN, null);
@@ -402,6 +405,15 @@ export class DynamicValueReader {
 
   static fromText(v: string): DynamicValueReader {
     return new DynamicValueReader(DynamicValueType.TEXT, v);
+  }
+
+  /** Text from raw bytes; `asText()` decodes them lossily, `asTextBytes()` keeps them. */
+  static fromTextBytes(bytes: Uint8Array): DynamicValueReader {
+    return new DynamicValueReader(
+      DynamicValueType.TEXT,
+      new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes),
+      bytes,
+    );
   }
 
   static fromData(v: Uint8Array): DynamicValueReader {
@@ -546,6 +558,12 @@ export class DynamicValueReader {
   asText(): string {
     assertCapnp(this.type === DynamicValueType.TEXT, "KIND", `expected text, got ${this.type}`);
     return this.payload as string;
+  }
+
+  /** The Text bytes as stored on the wire, without the NUL. */
+  asTextBytes(): Uint8Array {
+    assertCapnp(this.type === DynamicValueType.TEXT, "KIND", `expected text, got ${this.type}`);
+    return this.textBytes ?? new TextEncoder().encode(this.payload as string);
   }
 
   asData(): Uint8Array {
@@ -807,7 +825,7 @@ export function schemaValueToDynamic(
           );
         }
         if (type.isText()) {
-          return DynamicValueReader.fromText(readPtrAsText(sv.ptr, ""));
+          return DynamicValueReader.fromTextBytes(readPtrAsTextBytes(sv.ptr));
         }
         if (type.isData()) {
           return DynamicValueReader.fromData(readPtrAsData(sv.ptr, EMPTY_BYTES));
@@ -817,8 +835,8 @@ export function schemaValueToDynamic(
   }
 }
 
-function readPtrAsText(p: Ptr, dflt: string): string {
-  if (p.kind === PtrKind.Null) return dflt;
+function readPtrAsTextBytes(p: Ptr): Uint8Array {
+  if (p.kind === PtrKind.Null) return new Uint8Array(0);
   assertCapnp(
     p.kind === PtrKind.List && p.esize === ElemSize.Byte,
     "KIND",
@@ -831,7 +849,7 @@ function readPtrAsText(p: Ptr, dflt: string): string {
     "TEXT",
     "Text pointer is not NUL-terminated",
   );
-  return new TextDecoder().decode(s.data.subarray(start, start + p.count - 1));
+  return s.data.subarray(start, start + p.count - 1);
 }
 
 function readPtrAsData(p: Ptr, dflt: Uint8Array): Uint8Array {
@@ -960,7 +978,7 @@ export class DynamicOrphan {
         0,
         0,
       );
-      return DynamicValueReader.fromText(readPtrAsText(p, ""));
+      return DynamicValueReader.fromTextBytes(readPtrAsTextBytes(p));
     }
     if (this.type === DynamicValueType.DATA) {
       const p = Ptr.list(
@@ -1204,11 +1222,11 @@ export class DynamicStructReader {
         if (p.isNull) {
           if (dval.which === "text") return DynamicValueReader.fromText(dval.value);
           if (dval.which === "anyPointer" && !dval.ptr.isNull) {
-            return DynamicValueReader.fromText(readPtrAsText(dval.ptr, ""));
+            return DynamicValueReader.fromTextBytes(readPtrAsTextBytes(dval.ptr));
           }
           return DynamicValueReader.fromText("");
         }
-        return DynamicValueReader.fromText(readPtrAsText(p, ""));
+        return DynamicValueReader.fromTextBytes(readPtrAsTextBytes(p));
       }
       case TypeKind.Data: {
         const p = slotPtr();
@@ -1753,7 +1771,7 @@ export class DynamicStructBuilder {
         return;
       }
       case TypeKind.Text:
-        this.sb.setText(field.offset, val.asText());
+        this.sb.setTextBytes(field.offset, val.asTextBytes());
         return;
       case TypeKind.Data:
         this.sb.setData(field.offset, val.asData());
@@ -2017,7 +2035,7 @@ function writeAnyPointerValue(
 ): void {
   switch (val.getType()) {
     case DynamicValueType.TEXT:
-      sb.setText(ptrIndex, val.asText());
+      sb.setTextBytes(ptrIndex, val.asTextBytes());
       return;
     case DynamicValueType.DATA:
       sb.setData(ptrIndex, val.asData());
@@ -2203,9 +2221,9 @@ export class DynamicListReader implements Iterable<DynamicValueReader> {
             "KIND",
             "expected pointer list, got data-only struct list",
           );
-          return DynamicValueReader.fromText(readPtrAsText(compStruct.getP(0), ""));
+          return DynamicValueReader.fromTextBytes(readPtrAsTextBytes(compStruct.getP(0)));
         }
-        return DynamicValueReader.fromText(readPtrAsText(this.readPtrElem(index), ""));
+        return DynamicValueReader.fromTextBytes(readPtrAsTextBytes(this.readPtrElem(index)));
       case TypeKind.Data: {
         const p = compStruct
           ? this.readCompositePtr(compStruct)
@@ -2869,7 +2887,7 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
         return;
       case TypeKind.Text: {
         const slot = new BuilderPointer(this.builder, this.seg, this.pointerWord(index));
-        writeTextToSlot(this.builder, slot, val.asText());
+        writeTextBytesToSlot(this.builder, slot, val.asTextBytes());
         return;
       }
       case TypeKind.Data: {
@@ -3041,7 +3059,14 @@ function writeTextToSlot(
   slot: BuilderPointer,
   text: string,
 ): void {
-  const enc = new TextEncoder().encode(text);
+  writeTextBytesToSlot(builder, slot, new TextEncoder().encode(text));
+}
+
+function writeTextBytesToSlot(
+  builder: MessageBuilder,
+  slot: BuilderPointer,
+  enc: Uint8Array,
+): void {
   assertTextBlobSize(enc.length, "text blob too big");
   const nbytes = enc.length + 1;
   const nwords = bytesToWords(nbytes);

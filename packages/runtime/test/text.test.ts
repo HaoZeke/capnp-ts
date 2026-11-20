@@ -170,7 +170,7 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
       decodeText('(title = "\\377")', sinkSchema),
       sinkSchema,
     );
-    expect(invalidUtf8.get("title").asText()).toBe("\ufffd");
+    expect([...invalidUtf8.get("title").asTextBytes()]).toEqual([0xff]);
     expect(formatKjFloat32(1.401298464324817e-45)).toBe("1.4012985e-45");
   });
 
@@ -248,6 +248,40 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
     }
     expect(mismatches).toEqual([]);
   });
+  test.skipIf(!hasCapnp)(
+    "Text escapes that are not UTF-8 keep their raw bytes like capnp encode",
+    () => {
+      const abLoader = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin"));
+      const person = abLoader.resolveStruct("Person");
+      const abFile = join(repoRoot, "schema/addressbook.capnp");
+      const samples = [
+        '(name = "\\377")',
+        '(name = "\\xc3")',
+        '(name = "ab\\303\\251\\377x")',
+        '(name = "a\\000b")',
+        '(name = "\\377", phones = [(number = "\\376\\375")])',
+        '(employment = (employer = "\\200\\277"))',
+      ];
+      for (const sample of samples) {
+        const cliEnc = spawnSync("capnp", ["encode", abFile, "Person"], {
+          input: Buffer.from(sample, "utf-8"),
+        });
+        expect(cliEnc.status).toBe(0);
+        const cliBin = new Uint8Array(cliEnc.stdout);
+
+        const tsMsg = decodeText(sample, person);
+        expect(canonicalize(tsMsg)).toEqual(canonicalizeFlat(cliBin));
+
+        // Copying a Text field from a wire reader keeps the raw bytes too.
+        const name = DynamicStruct.fromMessage(Message.fromFlat(cliBin), person).get("name");
+        const copy = new MessageBuilder();
+        DynamicStruct.initRoot(copy, person).set("name", name);
+        const copied = DynamicStruct.fromMessage(Message.fromFlat(copy.toFlat()), person);
+        expect(copied.get("name").asTextBytes()).toEqual(name.asTextBytes());
+      }
+    },
+  );
+
   test.skipIf(!hasCapnp)(
     "differential text-exact and byte-exact parity against capnp decode and encode",
     () => {

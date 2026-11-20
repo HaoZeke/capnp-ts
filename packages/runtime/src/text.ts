@@ -1296,7 +1296,7 @@ function scalarTextValue(value: TextValue, type: Type): DynamicValueReader {
     case "float":
       return DynamicValueReader.fromFloat(value.value);
     case "text":
-      return DynamicValueReader.fromText(new TextDecoder("utf-8").decode(value.bytes));
+      return DynamicValueReader.fromTextBytes(value.bytes);
     case "data":
       return DynamicValueReader.fromData(value.bytes);
     case "enum":

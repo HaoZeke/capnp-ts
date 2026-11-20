@@ -273,4 +273,40 @@ describe("text and data edge cases", () => {
     expect(row2.esize).toBe(ElemSize.Pointer);
     expect(row2.listLen()).toBe(0);
   });
+
+  const kitchen = () =>
+    SchemaLoader.fromCgr(
+      new Uint8Array(readFileSync(join(here, "golden", "dynamic-kitchen.cgr.bin"))),
+    ).resolveStruct("KitchenSink");
+
+  function expectBomTextReads(msg: Message): void {
+    const sink = DynamicStruct.fromMessage(msg, kitchen());
+    const title = sink.get("title");
+    expect(title.asText()).toBe("\ufeffa");
+    expect([...title.asTextBytes()]).toEqual([0xef, 0xbb, 0xbf, 0x61]);
+    const row = sink.get("wordGrid").asList().get(0).asList();
+    expect(row.get(0).asText()).toBe("\ufeffb");
+    expect([...row.get(0).asTextBytes()]).toEqual([0xef, 0xbb, 0xbf, 0x62]);
+    expect(row.get(1).asText()).toBe("c");
+  }
+
+  test("dynamic Text field and List(Text) reads keep a leading BOM", () => {
+    const b = new MessageBuilder();
+    const sink = DynamicStruct.initRoot(b, kitchen());
+    sink.set("title", "\ufeffa");
+    const row = sink.init("wordGrid", 1).asList().init(0, 2).asList();
+    row.set(0, "\ufeffb");
+    row.set(1, "c");
+    expectBomTextReads(Message.fromFlat(b.toFlat()));
+  });
+
+  test.skipIf(!hasCapnp)("dynamic reads keep a leading BOM in Text that capnp encode writes", () => {
+    const cli = spawnSync(
+      "capnp",
+      ["encode", join(repoRoot, "schema/dynamic-kitchen.capnp"), "KitchenSink"],
+      { input: '(title = "\\xef\\xbb\\xbfa", wordGrid = [["\\xef\\xbb\\xbfb", "c"]])' },
+    );
+    expect(cli.status).toBe(0);
+    expectBomTextReads(Message.fromFlat(new Uint8Array(cli.stdout)));
+  });
 });

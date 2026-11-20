@@ -691,7 +691,11 @@ export class StructBuilder {
   }
 
   setText(ptrIndex: number, text: string): void {
-    const enc = new TextEncoder().encode(text);
+    this.setTextBytes(ptrIndex, new TextEncoder().encode(text));
+  }
+
+  /** Store Text bytes exactly as given (they need not be UTF-8) plus the NUL. */
+  setTextBytes(ptrIndex: number, enc: Uint8Array): void {
     assertTextBlobSize(enc.length, "text blob too big");
     const nbytes = enc.length + 1; // trailing NUL
     const nwords = bytesToWords(nbytes);
