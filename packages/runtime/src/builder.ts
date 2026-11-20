@@ -779,7 +779,10 @@ export class StructBuilder {
     return new BuilderPointer(this.builder, listSeg, listStart);
   }
 
-  /** Init primitive list and optionally copy little-endian payload. */
+  /**
+   * Init primitive list and optionally copy little-endian payload. A Bit
+   * list takes ceil(count / 8) bytes and ignores `itemBytes`.
+   */
   initPrimList(
     ptrIndex: number,
     esize: number,
@@ -788,7 +791,7 @@ export class StructBuilder {
     items?: Uint8Array,
   ): BuilderPointer {
     const slot = this.slot(ptrIndex);
-    const nbytes = count * itemBytes;
+    const nbytes = esize === ElemSize.Bit ? Math.ceil(count / 8) : count * itemBytes;
     const nwords = (nbytes + 7) >> 3;
     let startSeg: number;
     let startWord: number;
