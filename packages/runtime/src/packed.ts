@@ -64,33 +64,54 @@ function wordFewerThanTwoZeros(w: Uint8Array, off: number): boolean {
 }
 
 /**
- * Byte ends of the segment table and each segment, when `input` is exactly
- * one stream-framed message. Null when the buffer is not that frame, so raw
- * word buffers keep a single packing run.
+ * Byte ends of the segment table and each segment of the stream frame that
+ * starts at `start`, or null when the buffer does not hold a whole frame there.
  */
-function framedPieceEnds(input: Uint8Array): number[] | null {
-  if (input.length < WORD_BYTES) return null;
-  const nsegs = loadU32(input, 0) + 1;
+function frameEnds(input: Uint8Array, start: number): number[] | null {
+  if (input.length - start < WORD_BYTES) return null;
+  const nsegs = loadU32(input, start) + 1;
   if (nsegs <= 0 || nsegs > MAX_SEGMENTS) return null;
   let tableBytes = 4 + 4 * nsegs;
   if (tableBytes % WORD_BYTES !== 0) tableBytes += 4;
-  if (tableBytes > input.length) return null;
+  if (start + tableBytes > input.length) return null;
   let total = BigInt(tableBytes);
   const sizes: number[] = [];
   for (let i = 0; i < nsegs; i++) {
-    const sz = loadU32(input, 4 + 4 * i);
+    const sz = loadU32(input, start + 4 + 4 * i);
     sizes.push(sz);
     total += BigInt(sz) * BigInt(WORD_BYTES);
-    if (total > BigInt(input.length)) return null;
+    if (BigInt(start) + total > BigInt(input.length)) return null;
   }
-  if (total !== BigInt(input.length)) return null;
-  const ends: number[] = [tableBytes];
-  let off = tableBytes;
+  const ends: number[] = [start + tableBytes];
+  let off = start + tableBytes;
   for (const sz of sizes) {
     off += sz * WORD_BYTES;
     ends.push(off);
   }
   return ends;
+}
+
+/**
+ * Byte ends of every piece of `input` when it is exactly one stream-framed
+ * message, or several that each carry at least one word. Null otherwise, so
+ * raw word buffers keep a single packing run.
+ */
+function framedPieceEnds(input: Uint8Array): number[] | null {
+  const all: number[] = [];
+  let off = 0;
+  let frames = 0;
+  while (off < input.length) {
+    const ends = frameEnds(input, off);
+    if (!ends) return null;
+    const end = ends[ends.length - 1]!;
+    if (frames > 0 || end < input.length) {
+      if (end - ends[0]! === 0) return null;
+    }
+    for (const e of ends) all.push(e);
+    off = end;
+    frames++;
+  }
+  return frames > 0 ? all : null;
 }
 
 /** Pack words in [byteStart, byteEnd). The range is a multiple of 8. */
@@ -167,26 +188,12 @@ export function pack(input: Uint8Array, opts?: PackOptions): Uint8Array {
 }
 
 /**
- * Unpack a packed Cap'n Proto buffer.
- * @param opts.maxWords Cap on expanded words (default {@link MAX_UNPACKED_WORDS}).
- *   Exceeding the cap throws `CapnpError("PACKED")` before unbounded allocation.
+ * True when the unpacked words open with a stream frame that carries at
+ * least one word. Raw word buffers that only start with zeros do not.
  */
-/**
- * Unpack one or more packed messages, stopping zero-runs and verbatim runs
- * on the reads InputStreamMessageReader issues: the first table word, the
- * rest of the segment table, then the segment bodies.
- */
-function unpackMessages(input: Uint8Array, maxWords: number): Uint8Array {
-  const src = new PackedReader(input);
-  const out: number[] = [];
-  while (src.pos < input.length) {
-    const msg = src.readMessage(maxWords - Math.floor(out.length / WORD_BYTES));
-    for (const b of msg) out.push(b);
-  }
-  if (out.length > maxWords * WORD_BYTES) {
-    throw new CapnpError("PACKED", "expanded size exceeds word cap");
-  }
-  return Uint8Array.from(out);
+function startsWithFrame(flat: Uint8Array): boolean {
+  const ends = frameEnds(flat, 0);
+  return ends !== null && ends[ends.length - 1]! > ends[0]!;
 }
 
 class PackedReader {
@@ -281,14 +288,25 @@ function u32(b: number[], off: number): number {
   );
 }
 
+/**
+ * Unpack a packed Cap'n Proto buffer.
+ *
+ * Output matches a flat decode of every tag. When the result opens with a
+ * stream frame, the first message must also satisfy the reads that
+ * `InputStreamMessageReader` issues: a zero or verbatim run may not straddle
+ * the segment table or a segment end.
+ * @param opts.maxWords Cap on expanded words (default {@link MAX_UNPACKED_WORDS}).
+ *   Exceeding the cap throws `CapnpError("PACKED")` before unbounded allocation.
+ */
 export function unpack(
   input: Uint8Array,
   opts?: { maxWords?: number },
 ): Uint8Array {
   const maxWords = opts?.maxWords ?? MAX_UNPACKED_WORDS;
-  if (input.length > 0) {
+  const flat = unpackFlat(input, maxWords);
+  if (startsWithFrame(flat)) {
     try {
-      return unpackMessages(input, maxWords);
+      new PackedReader(input).readMessage(maxWords);
     } catch (err) {
       if (
         err instanceof CapnpError &&
@@ -298,7 +316,7 @@ export function unpack(
       }
     }
   }
-  return unpackFlat(input, maxWords);
+  return flat;
 }
 
 function unpackFlat(input: Uint8Array, maxWords: number): Uint8Array {
