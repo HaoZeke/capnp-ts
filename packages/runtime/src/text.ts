@@ -1243,7 +1243,7 @@ export class TextCodec {
     const ast = new TextParser(input).parseSingleExpression();
     if (type.isStruct()) {
       const root = initDynamicRoot(builder, type.asStruct());
-      fillStructFromAst(root, ast);
+      fillStructOrFirstField(root, ast);
       return DynamicValueReader.fromStruct(root.asReader());
     }
     if (type.isList()) {
