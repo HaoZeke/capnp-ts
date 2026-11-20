@@ -85,7 +85,7 @@ function writePackedMessage(frame: Uint8Array): Uint8Array {
       writeFileSync(src, PACKED_WRITER_SRC);
       const libDir = join(include, "../lib");
       const args = ["-std=c++17", "-O2", "-o", bin, src, `-I${include}`];
-      if (existsSync(libDir)) args.push(`-L${libDir}`);
+      if (existsSync(libDir)) args.push(`-L${libDir}`, `-Wl,-rpath,${libDir}`);
       args.push("-lcapnp", "-lkj", "-pthread");
       const compiled = spawnSync("g++", args, { encoding: "utf8" });
       packedWriterBin = compiled.status === 0 ? bin : null;
