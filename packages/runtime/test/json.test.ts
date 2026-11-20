@@ -30,6 +30,47 @@ function readGolden(name: string): Uint8Array {
   return new Uint8Array(readFileSync(join(goldenDir, name)));
 }
 
+/**
+ * Canonical bytes of `decodeJson(text, struct)` for each text, computed in a
+ * child Bun process that is killed after 8 s. A parser stuck in a synchronous
+ * loop never yields to the test runner, so `--timeout` alone cannot stop it.
+ */
+function decodeJsonCanonicalBounded(
+  cgr: Uint8Array,
+  structName: string,
+  texts: string[],
+): Uint8Array[] {
+  const dir = mkdtempSync(join(tmpdir(), "capnp-json-bounded-"));
+  try {
+    writeFileSync(join(dir, "schema.cgr"), cgr);
+    writeFileSync(join(dir, "texts.json"), JSON.stringify(texts));
+    const script = [
+      `import { readFileSync } from "node:fs";`,
+      `import { SchemaLoader, canonicalize, decodeJson } from ${JSON.stringify(join(here, "..", "src", "index.ts"))};`,
+      `const dir = ${JSON.stringify(dir)};`,
+      `const schema = SchemaLoader.fromCgr(new Uint8Array(readFileSync(dir + "/schema.cgr"))).resolveStruct(${JSON.stringify(structName)});`,
+      `const texts = JSON.parse(readFileSync(dir + "/texts.json", "utf8"));`,
+      `process.stdout.write(JSON.stringify(texts.map((t) => Buffer.from(canonicalize(decodeJson(t, schema))).toString("base64"))));`,
+    ].join("\n");
+    const r = spawnSync(process.execPath, ["-e", script], {
+      encoding: "utf8",
+      timeout: 8000,
+      killSignal: "SIGKILL",
+      maxBuffer: 1 << 28,
+    });
+    if (r.error || r.status !== 0) {
+      throw new Error(
+        `decodeJson child failed (${r.error?.message ?? `exit ${r.status}`}): ${r.stderr}`,
+      );
+    }
+    return (JSON.parse(r.stdout) as string[]).map(
+      (b) => new Uint8Array(Buffer.from(b, "base64")),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 describe("Cap'n Proto compat JSON codec", () => {
   test("matches exact AddressBook pretty and short JSON and round-trips to canonical bytes", () => {
     const loader = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin"));
@@ -577,4 +618,222 @@ describe("Cap'n Proto compat JSON codec", () => {
     }
     expect(mismatches).toEqual([]);
   });
+
+  test("hex float strings round like strtod without hanging or double-rounding", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const schema = loader.resolveStruct("KitchenSink");
+    const f64Bits = (n: number): bigint => {
+      const b = new ArrayBuffer(8);
+      const v = new DataView(b);
+      v.setFloat64(0, n, true);
+      return v.getBigUint64(0, true);
+    };
+    const cases: Array<[string, bigint]> = [
+      [`0x1${"0".repeat(300)}p-1200`, f64Bits(1)],
+      [`0x1.${"0".repeat(260)}1p0`, f64Bits(1)],
+      ["0x2000000000000bp-1077", 0x0004000000000001n],
+      ["0x0p100000000000000000000", 0x0000000000000000n],
+      ["-0x0p100000000000000000000", 0x8000000000000000n],
+      ["0x0.000p-100000000000000000000", 0x0000000000000000n],
+      ["0x1p+999999999999999999999", f64Bits(Infinity)],
+      ["-0x1p+999999999999999999999", f64Bits(-Infinity)],
+      ["0x1p-999999999999999999999", 0x0000000000000000n],
+      ["-0x1p-999999999999999999999", 0x8000000000000000n],
+      ["0x1p-1075", 0x0000000000000000n],
+      ["0x1.00000000000001p-1075", 0x0000000000000001n],
+      ["0x1p-1074", 0x0000000000000001n],
+      ["0x0.fffffffffffff8p-1022", 0x0010000000000000n],
+      ["0x1.fffffffffffff8p1023", f64Bits(Infinity)],
+      ["0x1.fffffffffffff7ffffffffp1023", f64Bits(Number.MAX_VALUE)],
+      // Real `capnp convert json:flat` output from C++ 1.4.0 / glibc strtod.
+      ["0x20000000000003p-1076", 0x0008000000000000n],
+      ["0x20000000000005p-1077", 0x0004000000000000n],
+      ["0x20000000000009p-1078", 0x0002000000000000n],
+      ["0x2000000000000bp-1076", 0x0008000000000002n],
+      ["0x20000000000011p-1079", 0x0001000000000000n],
+      ["0x20000000000013p-1076", 0x0008000000000004n],
+      ["0x20000000000015p-1077", 0x0004000000000002n],
+      ["0x2000000000001bp-1076", 0x0008000000000006n],
+      ["0x1.9Dedacc99f24A8p-1024", 0x000677b6b3267c92n],
+      ["0x7.ffffffffffff5p-1025", 0x000fffffffffffffn],
+      // glibc drops the first bit below the 53-bit significand before the
+      // subnormal shift, so these differ from correct rounding.
+      ["0x7fffffffffffe60p-1081", 0x000ffffffffffffcn],
+      ["-0x581fab38b420f6P-1077", 0x800b03f56716841en],
+      ["0x1fff.fffffffffd4P-1035", 0x000fffffffffffffn],
+      ["-0xffffffffffffee0p-1082", 0x800fffffffffffffn],
+      ["0x7FFF.FFFFFFFFF5p-1037", 0x000fffffffffffffn],
+      ["0x1FFFFFFFFFFFF94P-1079", 0x000ffffffffffffdn],
+      ["0x1.00000000000008p-1075", 0x0000000000000000n],
+      ["0x1.fffffffffffff7ffffp1023", 0x7fefffffffffffffn],
+      ["0x1.fffffffffffff8p1023", 0x7ff0000000000000n],
+    ];
+    const canon = decodeJsonCanonicalBounded(
+      readGolden("dynamic-kitchen.cgr.bin"),
+      "KitchenSink",
+      cases.map(([text]) => JSON.stringify({ f64: text })),
+    );
+    expect(canon.length).toBe(cases.length);
+    cases.forEach(([, wantBits], i) => {
+      const msg = Message.fromSegments([canon[i]!]);
+      const got = DynamicStruct.fromMessage(msg, schema).get("f64").asFloat64();
+      expect(f64Bits(got)).toBe(wantBits);
+    });
+  });
+
+  test.skipIf(!hasCapnp)(
+    "5000+ hex and decimal float strings match capnp convert json:flat bit-for-bit",
+    () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), "capnp-json-floats-"));
+      try {
+        const schemaPath = join(tmpDir, "floats.capnp");
+        writeFileSync(
+          schemaPath,
+          [
+            "@0x8123456789abcde3;",
+            "struct FloatVec {",
+            "  f64s @0 :List(Float64);",
+            "  f32s @1 :List(Float32);",
+            "}",
+          ].join("\n"),
+        );
+        const cgr = spawnSync("capnp", ["compile", "-o-", schemaPath]);
+        expect(cgr.status).toBe(0);
+
+        const inputs: string[] = [
+          "0",
+          "-0",
+          "+0",
+          "0x0",
+          "-0x0",
+          "0x0p0",
+          "0x0p100000000000000000000",
+          "-0x0p100000000000000000000",
+          "0x0.0000p-99999999999999999999",
+          `0x1${"0".repeat(300)}p-1200`,
+          `0x1.${"0".repeat(260)}1p0`,
+          `0x0.${"0".repeat(260)}1p1044`,
+          "0x2000000000000bp-1077",
+          "-0x2000000000000bp-1077",
+          "0x1p-1075",
+          "0x1.00000000000001p-1075",
+          "0x1.000000000000000000001p-1075",
+          "0x3p-1075",
+          "0x1p-1074",
+          "0x1.8p-1074",
+          "0x0.fffffffffffff4p-1022",
+          "0x0.fffffffffffff8p-1022",
+          "0x0.fffffffffffffcp-1022",
+          "0x1.00000000000008p0",
+          "0x1.00000000000018p0",
+          "0x1.fffffffffffff8p1023",
+          "0x1.fffffffffffff7ffffffffp1023",
+          "0x1p1024",
+          "-0x1p1024",
+          "0x1p+99999999999999999999",
+          "0x1p-99999999999999999999",
+          "inf",
+          "-inf",
+          "+INFINITY",
+          "1e309",
+          "-1e309",
+          "1e-325",
+          "-1e-325",
+          "5e-324",
+          "2.225073858507201e-308",
+          "2.2250738585072014e-308",
+          "1.7976931348623157e+308",
+        ];
+
+        // Deterministic PRNG (xorshift32) for reproducible differential fuzzing
+        let state = 0x5eed1234;
+        const nextU32 = (): number => {
+          state ^= state << 13;
+          state ^= state >>> 17;
+          state ^= state << 5;
+          return state >>> 0;
+        };
+        const hexChars = "0123456789abcdefABCDEF";
+        const randHex = (len: number): string => {
+          let s = "";
+          for (let i = 0; i < len; i++) s += hexChars[nextU32() % hexChars.length]!;
+          return s;
+        };
+        const randDec = (len: number): string => {
+          let s = "";
+          for (let i = 0; i < len; i++) s += String(nextU32() % 10);
+          return s;
+        };
+
+        // 2500 random hex floats covering normal, subnormal, tie, overflow, underflow
+        const expBands: Array<[number, number]> = [
+          [-1100, -1010],
+          [-160, -110],
+          [-50, 50],
+          [110, 140],
+          [1000, 1040],
+          [-2000, 2000],
+        ];
+        for (let i = 0; i < 2500; i++) {
+          const sign = nextU32() & 1 ? "-" : nextU32() & 3 ? "" : "+";
+          const prefix = nextU32() & 1 ? "0x" : "0X";
+          const pChar = nextU32() & 1 ? "p" : "P";
+          const kind = i % 6;
+          const [lo, hi] = expBands[i % expBands.length]!;
+          const exp = lo + (nextU32() % (hi - lo + 1));
+          const expSign = exp < 0 ? "" : nextU32() & 1 ? "+" : "";
+          if (kind === 0) {
+            // Exact half-way / near-tie 14-18 hex digit mantissa
+            inputs.push(`${sign}${prefix}1.${randHex(12)}${hexChars[nextU32() % 16]}${pChar}${expSign}${exp}`);
+          } else if (kind === 1) {
+            // Long hex integer + compensating exponent
+            const zeros = 1 + (nextU32() % 20);
+            inputs.push(`${sign}${prefix}${randHex(1 + (nextU32() % 18))}${"0".repeat(zeros)}${pChar}${exp - 4 * zeros}`);
+          } else if (kind === 2) {
+            // Leading fractional zeros + sticky tail
+            const lead = nextU32() % 10;
+            const tail = nextU32() % 15;
+            inputs.push(`${sign}${prefix}0.${"0".repeat(lead)}${randHex(1 + (nextU32() % 16))}${"0".repeat(tail)}${nextU32() & 1 ? "1" : ""}${pChar}${exp + 4 * lead}`);
+          } else if (kind === 3) {
+            // No dot
+            inputs.push(`${sign}${prefix}${randHex(1 + (nextU32() % 20))}${pChar}${expSign}${exp}`);
+          } else if (kind === 4) {
+            // No int part
+            inputs.push(`${sign}${prefix}.${randHex(1 + (nextU32() % 18))}${pChar}${expSign}${exp}`);
+          } else {
+            // No p-exponent
+            inputs.push(`${sign}${prefix}${randHex(1 + (nextU32() % 16))}.${randHex(nextU32() % 16)}`);
+          }
+        }
+
+        // 2500 random decimal floats across normal, subnormal, boundary, overflow.
+        for (let i = 0; i < 2500; i++) {
+          const sign = nextU32() & 1 ? "-" : nextU32() & 3 ? "" : "+";
+          const eChar = nextU32() & 1 ? "e" : "E";
+          const decExp =
+            i % 4 === 0
+              ? -330 + (nextU32() % 35)
+              : i % 4 === 1
+                ? 295 + (nextU32() % 25)
+                : -50 + (nextU32() % 100);
+          const intLen = 1 + (nextU32() % 6);
+          const fracLen = nextU32() % 22;
+          const mant = fracLen === 0 ? randDec(intLen) : `${randDec(intLen)}.${randDec(fracLen)}`;
+          inputs.push(`${sign}${mant}${eChar}${decExp >= 0 && (nextU32() & 1) ? "+" : ""}${decExp}`);
+        }
+
+        expect(inputs.length).toBeGreaterThanOrEqual(5000);
+        const json = JSON.stringify({ f64s: inputs, f32s: inputs });
+        const cli = spawnSync("capnp", ["convert", "json:flat", schemaPath, "FloatVec"], {
+          input: json,
+        });
+        expect(cli.status).toBe(0);
+        const cppFlat = new Uint8Array(cli.stdout);
+        const [tsCanon] = decodeJsonCanonicalBounded(new Uint8Array(cgr.stdout), "FloatVec", [json]);
+        expect(tsCanon).toEqual(canonicalize(Message.fromSegments([cppFlat])));
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
 });

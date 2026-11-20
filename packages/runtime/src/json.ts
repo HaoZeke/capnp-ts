@@ -568,6 +568,99 @@ function parseStrictBigIntString(raw: string, signed: boolean): bigint {
   return neg ? -mag : mag;
 }
 
+const FLOAT64_BUF = new ArrayBuffer(8);
+const FLOAT64_VIEW = new DataView(FLOAT64_BUF);
+
+function float64FromBits(bits: bigint): number {
+  FLOAT64_VIEW.setBigUint64(0, bits, true);
+  return FLOAT64_VIEW.getFloat64(0, true);
+}
+
+/**
+ * IEEE-754 binary64 conversion for a C99 hex float literal, bit-exact with
+ * glibc `strtod()`, which C++ uses to parse JSON floats. There are no loops
+ * over the exponent and no intermediate `Number` rounding.
+ *
+ * Normal results round to nearest, ties to even. For subnormal results
+ * glibc first truncates to a 53-bit significand, then shifts it right and
+ * rounds again. That second step takes its half bit from the 53-bit value
+ * and folds only the bits below the first discarded one into the sticky
+ * bit, so the first discarded bit itself is lost. This is not correctly
+ * rounded: 0x20000000000003p-1076 is 3/4 ULP above 0x0008000000000000 but
+ * parses to it.
+ */
+function parseHexFloat64(
+  negative: boolean,
+  intHex: string,
+  fracHex: string,
+  expStr: string | undefined,
+): number {
+  const intTrim = intHex.replace(/^0+/, "");
+  const fracTrim = fracHex.replace(/0+$/, "");
+  let sig: string;
+  if (intTrim.length > 0) {
+    sig = intTrim + fracTrim;
+  } else {
+    const fracLead = fracTrim.match(/^0+/)?.[0].length ?? 0;
+    sig = fracTrim.slice(fracLead);
+    if (sig.length === 0) return negative ? -0 : 0;
+  }
+  let binExp = -4n * BigInt(fracTrim.length);
+
+  if (expStr !== undefined) {
+    const expNeg = expStr.startsWith("-");
+    const expDigits = expStr.replace(/^[+-]?0*/, "");
+    if (expDigits.length > 15) {
+      binExp += expNeg ? -1000000000000000n : 1000000000000000n;
+    } else if (expDigits.length > 0) {
+      const mag = BigInt(expDigits);
+      binExp += expNeg ? -mag : mag;
+    }
+  }
+
+  const leadingBits = Number.parseInt(sig[0]!, 16).toString(2).length;
+  const significantBits = leadingBits + 4 * (sig.length - 1);
+  let exponent = binExp + BigInt(significantBits - 1);
+  const signBit = negative ? 1n << 63n : 0n;
+  const infinity = negative ? -Infinity : Infinity;
+
+  if (exponent > 1023n) return infinity;
+  if (exponent < -1075n) return negative ? -0 : 0;
+
+  // m53 holds the leading 53 bits; half is the next bit; sticky is any later one.
+  let m53: bigint;
+  let half = false;
+  let sticky = false;
+  if (significantBits <= 53) {
+    m53 = BigInt(`0x${sig}`) << BigInt(53 - significantBits);
+  } else {
+    const prefix = BigInt(`0x${sig.slice(0, 16)}`);
+    const below = BigInt(leadingBits + 4 * (Math.min(sig.length, 16) - 1) - 54);
+    m53 = prefix >> (below + 1n);
+    half = ((prefix >> below) & 1n) === 1n;
+    sticky = (prefix & ((1n << below) - 1n)) !== 0n || /[1-9a-fA-F]/.test(sig.slice(16));
+  }
+
+  if (exponent >= -1022n) {
+    if (half && (sticky || (m53 & 1n) === 1n)) {
+      m53 += 1n;
+      if (m53 === 1n << 53n) {
+        m53 >>= 1n;
+        exponent += 1n;
+        if (exponent > 1023n) return infinity;
+      }
+    }
+    return float64FromBits(signBit | ((exponent + 1023n) << 52n) | (m53 & ((1n << 52n) - 1n)));
+  }
+
+  const shift = -1022n - exponent;
+  const q = m53 >> shift;
+  const subHalf = ((m53 >> (shift - 1n)) & 1n) === 1n;
+  const subSticky = (m53 & ((1n << (shift - 1n)) - 1n)) !== 0n || sticky;
+  const rounded = subHalf && (subSticky || (q & 1n) === 1n) ? q + 1n : q;
+  return float64FromBits(signBit | rounded);
+}
+
 /**
  * Parse a JSON string holding a float the way kj's `parseAs<double>()`
  * does: C `strtod()` must consume the whole string. That accepts leading
@@ -589,21 +682,7 @@ function parseStrictFloatString(raw: string): number {
   if (m![3] !== undefined) return NaN;
   if (m![2] !== undefined) return negative ? -Infinity : Infinity;
   if (hex) {
-    const int = m![4]!;
-    const frac = m![5] ?? "";
-    const mantissa = BigInt(`0x${int}${frac}`);
-    let exp = (m![6] === undefined ? 0 : Number(m![6])) - 4 * frac.length;
-    let value = Number(mantissa);
-    while (exp > 1000 && Number.isFinite(value)) {
-      value *= 2 ** 1000;
-      exp -= 1000;
-    }
-    while (exp < -1000 && value !== 0) {
-      value *= 2 ** -1000;
-      exp += 1000;
-    }
-    value *= 2 ** exp;
-    return negative ? -value : value;
+    return parseHexFloat64(negative, m![4]!, m![5] ?? "", m![6]);
   }
   const value = Number(m![7]);
   return negative ? -value : value;
