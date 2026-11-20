@@ -798,10 +798,7 @@ describe("results sent elsewhere", () => {
     peer.receive(); // our bootstrap question
     a.pump();
 
-    const held = CapnpMessage.fromFlat(peer.receive()!).root();
-    const ret = Message_getReturn(held);
-    expect(Return_getAnswerId(ret)).toBe(2);
-    expect(Return_which(ret)).toBe(Return.resultsSentElsewhere);
+    expect(peer.receive()).toBeNull();
     expect(server.seen).toEqual([20]);
 
     peer.send(
@@ -814,6 +811,10 @@ describe("results sent elsewhere", () => {
       }),
     );
     a.pump();
+    const held = CapnpMessage.fromFlat(peer.receive()!).root();
+    const ret = Message_getReturn(held);
+    expect(Return_getAnswerId(ret)).toBe(2);
+    expect(Return_which(ret)).toBe(Return.resultsSentElsewhere);
     expect(a.isAnswered(mine)).toBe(true);
     expect(a.isFailed(mine)).toBe(false);
     expect(a.answerContent(mine)?.getU32(0)).toBe(21);
@@ -859,10 +860,7 @@ describe("results sent elsewhere", () => {
     peer.receive();
     a.pump();
 
-    const held = CapnpMessage.fromFlat(peer.receive()!).root();
-    const ret = Message_getReturn(held);
-    expect(Return_getAnswerId(ret)).toBe(2);
-    expect(Return_which(ret)).toBe(Return.resultsSentElsewhere);
+    expect(peer.receive()).toBeNull();
 
     peer.send(
       frame((root) => {
@@ -874,6 +872,10 @@ describe("results sent elsewhere", () => {
       }),
     );
     a.pump();
+    const held = CapnpMessage.fromFlat(peer.receive()!).root();
+    const ret = Message_getReturn(held);
+    expect(Return_getAnswerId(ret)).toBe(2);
+    expect(Return_which(ret)).toBe(Return.resultsSentElsewhere);
     expect(a.isFailed(mine)).toBe(true);
     expect(a.answerError(mine)?.type).toBe("overloaded");
     expect(a.answerError(mine)?.message).toBe("tail failed");
@@ -1201,8 +1203,7 @@ describe("pipeline-only calls", () => {
     peer.receive();
     a.pump();
     expect(server.seen).toEqual([76]);
-    const held = CapnpMessage.fromFlat(peer.receive()!).root();
-    expect(Return_which(Message_getReturn(held))).toBe(Return.resultsSentElsewhere);
+    expect(peer.receive()).toBeNull();
 
     const claim = (questionId: number): void => {
       peer.send(
@@ -1218,6 +1219,8 @@ describe("pipeline-only calls", () => {
     claim(first);
     a.pump();
     expect(a.disconnected).toBeUndefined();
+    const held = CapnpMessage.fromFlat(peer.receive()!).root();
+    expect(Return_which(Message_getReturn(held))).toBe(Return.resultsSentElsewhere);
     expect(a.answerContent(first)?.getU32(0)).toBe(77);
 
     claim(second);

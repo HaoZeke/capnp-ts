@@ -24,8 +24,8 @@ class Counter implements RpcServer {
   }
 }
 
-describe("a peer that does not implement a message", () => {
-  test("an Unimplemented echo of a Call fails that question", () => {
+describe("a peer that does not implement a required message", () => {
+  test("an Unimplemented echo of a Call aborts the connection", () => {
     const pair = new MemoryTransportPair();
     const a = new RpcConnection(pair.a);
     const q = a.sendCall(0, IFACE, 0);
@@ -39,6 +39,8 @@ describe("a peer that does not implement a message", () => {
     pair.b.send(b.toFlat());
     a.pump();
     expect(a.isFailed(q)).toBe(true);
+    expect(a.disconnected?.message).toContain("required RPC message type");
+    expect(Message_which(CapnpMessage.fromFlat(pair.b.receive()!).root())).toBe(Message.abort);
     expect(Message_which(Message_getUnimplemented(CapnpMessage.fromFlat(b.toFlat()).root()))).toBe(
       Message.call,
     );
