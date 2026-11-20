@@ -19,6 +19,7 @@ import {
   decodeText,
   encodeText,
   formatKjFloat32,
+  formatKjFloat64,
   initDynamicRoot,
   prettyPrint,
   splitTextMessages,
@@ -289,6 +290,48 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
       const m = /f32 = ([^,)]*)/.exec(cliDec.stdout);
       const reader = DynamicStruct.fromMessage(Message.fromFlat(new Uint8Array(cliEnc.stdout)), ks);
       expect(formatKjFloat32(reader.get("f32").asFloat32())).toBe(m![1]!);
+    }
+  });
+
+  test("float output rounds exact decimal ties to even like printf", () => {
+    expect(formatKjFloat32(2910510.25)).toBe("2910510.2");
+    expect(formatKjFloat32(-576302.625)).toBe("-576302.62");
+    expect(formatKjFloat32(4175634.25)).toBe("4175634.2");
+    expect(formatKjFloat32(-388997.625)).toBe("-388997.62");
+    expect(formatKjFloat64(-49202031784.94531)).toBe("-49202031784.945312");
+    expect(formatKjFloat64(0.5)).toBe("0.5");
+  });
+
+  test.skipIf(!hasCapnp)("float ties print like capnp decode", () => {
+    const ksLoader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const ks = ksLoader.resolveStruct("KitchenSink");
+    const ksFile = join(repoRoot, "schema/dynamic-kitchen.capnp");
+    const f32s = [2910510.25, -576302.625, 4175634.25, -388997.625];
+    const f64s = [-49202031784.94531, -843794949303690.1, -893966297318091.6];
+    for (const [field, values] of [
+      ["f32", f32s],
+      ["f64", f64s],
+    ] as const) {
+      for (const v of values) {
+        const cliEnc = spawnSync("capnp", ["encode", ksFile, "KitchenSink"], {
+          input: Buffer.from(`(${field} = ${v})`, "utf-8"),
+        });
+        expect(cliEnc.status).toBe(0);
+        const cliDec = spawnSync("capnp", ["decode", "--short", ksFile, "KitchenSink"], {
+          input: cliEnc.stdout,
+          encoding: "utf8",
+        });
+        const m = new RegExp(`${field} = ([^,)]*)`).exec(cliDec.stdout);
+        const reader = DynamicStruct.fromMessage(
+          Message.fromFlat(new Uint8Array(cliEnc.stdout)),
+          ks,
+        );
+        const got =
+          field === "f32"
+            ? formatKjFloat32(reader.get(field).asFloat32())
+            : formatKjFloat64(reader.get(field).asFloat64());
+        expect(got).toBe(m![1]!);
+      }
     }
   });
 

@@ -34,6 +34,42 @@ function utf8ByteLength(s: string): number {
 }
 
 /**
+ * `Number.prototype.toExponential` rounds exact ties up, but glibc `printf`
+ * rounds them to even. Detect a tie with exact integer arithmetic and round
+ * it down when the kept digit is even.
+ */
+function toExponentialHalfEven(abs: number, fractionDigits: number): string {
+  const rounded = abs.toExponential(fractionDigits);
+  if (fractionDigits >= 100) return rounded;
+  const longer = abs.toExponential(fractionDigits + 1);
+  const eIdx = longer.indexOf("e");
+  if (longer[eIdx - 1] !== "5") return rounded;
+
+  const bits = new DataView(new ArrayBuffer(8));
+  bits.setFloat64(0, abs);
+  const hi = bits.getUint32(0);
+  const lo = bits.getUint32(4);
+  const biased = (hi >>> 20) & 0x7ff;
+  let mant = (BigInt(hi & 0xfffff) << 32n) | BigInt(lo);
+  if (biased !== 0) mant |= 1n << 52n;
+  const q = (biased === 0 ? 1 : biased) - 1075;
+
+  const exp10 = Number.parseInt(longer.slice(eIdx + 1), 10);
+  const digits = BigInt(longer.slice(0, eIdx).replace(".", ""));
+  const s = exp10 - (fractionDigits + 1);
+  const lhs = mant * 2n ** BigInt(Math.max(q, 0)) * 10n ** BigInt(Math.max(-s, 0));
+  const rhs = digits * 10n ** BigInt(Math.max(s, 0)) * 2n ** BigInt(Math.max(-q, 0));
+  if (lhs !== rhs) return rounded;
+
+  const kept = digits / 10n;
+  if (kept % 2n !== 0n) return rounded;
+  const keptStr = kept.toString();
+  const mantissa =
+    fractionDigits === 0 ? keptStr : `${keptStr[0]}.${keptStr.slice(1)}`;
+  return `${mantissa}e${exp10 < 0 ? "-" : "+"}${Math.abs(exp10)}`;
+}
+
+/**
  * Format a positive/negative finite number using C `snprintf("%.*g", prec, v)`
  * rules with KJ exponent normalization (`e+06` -> `e06`, `e-05` -> `e-05`).
  */
@@ -42,7 +78,7 @@ function formatCPrintfG(v: number, prec: number): string {
   const abs = Math.abs(v);
   if (abs === 0) return `${sign}0`;
 
-  const expStr = abs.toExponential(prec - 1);
+  const expStr = toExponentialHalfEven(abs, prec - 1);
   const eIdx = expStr.indexOf("e");
   const mant = expStr.slice(0, eIdx);
   const exp = Number.parseInt(expStr.slice(eIdx + 1), 10);
