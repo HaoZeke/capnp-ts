@@ -30,7 +30,7 @@ Two package names are reserved for release, both ESM:
 
 #+begin_src console
 $ bun install
-$ bun test
+$ bun run test
 #+end_src
 
 Registry publication is staged; until release tags are cut, consume from the
