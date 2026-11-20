@@ -1099,6 +1099,83 @@ describe("other incoming protocol errors", () => {
     expectAbort(pair.a, vat, "Unimplemented Disembargo type");
   });
 
+  test("Disembargo.senderLoopback on a finished answer aborts immediately even when Finish is deferred", async () => {
+    const srv: RpcServer = {
+      dispatch(_i, _m, params, _r, ctx) {
+        ctx.allowCancellation();
+        const cap = ctx.getCap(params.getP(0));
+        ctx.setResultCap(ctx.initResults(0, 1), 0, cap);
+        return Promise.resolve();
+      },
+    };
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.b, srv);
+    pair.a.send(bootstrapFrame(0));
+    pair.a.send(
+      (() => {
+        const b = new MessageBuilder();
+        const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+        root.setU16(0, Message.call);
+        const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
+        call.setU32(0, 1);
+        call.setU64(8, IFACE);
+        writePromisedAnswer(call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS), {
+          answer: 0,
+        });
+        const payload = call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+        payload.initStruct(0, 0, 1).adopt(0, Orphan.cap(b, 0));
+        const table = payload.initCompositeList(1, 1, CAP_DESCRIPTOR_DWORDS, CAP_DESCRIPTOR_PWORDS);
+        table.setU16(0, CapDescriptor.senderHosted);
+        table.setU32(4, 77);
+        return b.toFlat();
+      })(),
+    );
+    pair.a.send(finishFrame(1, true));
+    pair.a.send(
+      frame((root) => {
+        root.setU16(0, Message.disembargo);
+        const dis = root.initStruct(0, DISEMBARGO_DWORDS, DISEMBARGO_PWORDS);
+        writePromisedAnswer(dis.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS), {
+          answer: 1,
+          ops: [1],
+        });
+        dis.setU16(4, Disembargo_context.senderLoopback);
+        dis.setU32(0, 42);
+      }),
+    );
+    vat.pump();
+    await nextTurn();
+    expect(vat.disconnected?.message).toContain(
+      "Pipeline call on a request that returned no capabilities or was already closed.",
+    );
+    const kinds: number[] = [];
+    let f: Uint8Array | null;
+    while ((f = pair.a.receive()) !== null) {
+      kinds.push(Message_which(CapnpMessage.fromFlat(f).root()));
+    }
+    expect(kinds).toContain(Message.abort);
+    expect(kinds).not.toContain(Message.disembargo);
+  });
+
+  test("Disembargo.senderLoopback with an unsupported op on an unknown answer aborts", () => {
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.b, new Counter());
+    pair.a.send(
+      frame((root) => {
+        root.setU16(0, Message.disembargo);
+        const dis = root.initStruct(0, DISEMBARGO_DWORDS, DISEMBARGO_PWORDS);
+        writePromisedAnswer(dis.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS), {
+          answer: 99,
+          ops: [5],
+        });
+        dis.setU16(4, Disembargo_context.senderLoopback);
+        dis.setU32(0, 43);
+      }),
+    );
+    vat.pump();
+    expectAbort(pair.a, vat, "Unsupported pipeline op");
+  });
+
   test("an unsupported pipeline op aborts", () => {
     const pair = new MemoryTransportPair();
     const vat = new RpcConnection(pair.b, new Counter());
