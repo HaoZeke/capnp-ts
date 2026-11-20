@@ -37,6 +37,24 @@ function readGolden(name: string): Uint8Array {
 }
 
 describe("DynamicStruct / DynamicList / DynamicEnum / DynamicCapability", () => {
+  test("rejects a list whose wire elements are narrower than its schema", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const builder = new MessageBuilder();
+    // `defaultNums` is pointer slot 3 and has type `List(Int32)`.
+    builder.initRoot(0, 4).initPrimList(3, ElemSize.Byte, 1, 1);
+    const sink = DynamicStruct.fromMessage(
+      Message.fromFlat(builder.toFlat()),
+      loader.resolveStruct("KitchenSink"),
+    );
+    const values = sink.get("defaultNums").asList();
+    expect(() => values.get(0)).toThrow(CapnpError);
+    try {
+      values.get(0);
+    } catch (err) {
+      expect((err as CapnpError).code).toBe("SCHEMA");
+    }
+  });
+
   test("decodes AddressBook golden and builds canonical byte-identical message", () => {
     const loader = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin"));
     const bookSchema = loader.resolveStruct("AddressBook");

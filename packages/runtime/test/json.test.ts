@@ -113,6 +113,11 @@ describe("Cap'n Proto compat JSON codec", () => {
     expect(Number.isNaN(decoded.get("f32").asFloat32())).toBe(true);
     expect(decoded.get("f64").asFloat64()).toBe(Infinity);
     expect(decoded.get("title").asText()).toBe("🚀");
+    expect(
+      Number.isNaN(
+        rawCodec.decode('{"f32":"-NaN"}', sinkSchema).get("f32").asFloat32(),
+      ),
+    ).toBe(true);
 
     // Unknown enum ordinal encodes as number
     const unkB = new MessageBuilder();

@@ -569,7 +569,14 @@ function parseStrictBigIntString(raw: string, signed: boolean): bigint {
 }
 
 function parseStrictFloatString(raw: string): number {
-  if (raw === "NaN" || raw === "nan" || raw === "-nan" || raw === "+nan") {
+  if (
+    raw === "NaN" ||
+    raw === "nan" ||
+    raw === "-NaN" ||
+    raw === "-nan" ||
+    raw === "+NaN" ||
+    raw === "+nan"
+  ) {
     return NaN;
   }
   if (raw === "Infinity" || raw === "inf" || raw === "+Infinity" || raw === "+inf") {

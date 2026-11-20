@@ -633,12 +633,14 @@ export class Ptr {
       list.kind === PtrKind.List && list.esize === ElemSize.Byte,
       "KIND",
     );
-    if (list.count === 0) return "";
     const s = list.msg.segs[list.seg]!;
     const start = list.word * WORD_BYTES;
-    let n = list.count;
-    if (n > 0 && s.data[start + n - 1] === 0) n -= 1;
-    return new TextDecoder("utf-8", { ignoreBOM: true }).decode(s.data.subarray(start, start + n));
+    assertCapnp(
+      s.data[start + list.count - 1] === 0,
+      "TEXT",
+      "Text pointer is not NUL-terminated",
+    );
+    return new TextDecoder("utf-8", { ignoreBOM: true }).decode(s.data.subarray(start, start + list.count - 1));
   }
 
   getData(ptrIndex: number, dflt: Uint8Array = EMPTY_DATA): Uint8Array {
@@ -785,9 +787,12 @@ export class Ptr {
       if (elem.kind === PtrKind.List && elem.esize === ElemSize.Byte) {
         const s = elem.msg.segs[elem.seg]!;
         const start = elem.word * WORD_BYTES;
-        let n = elem.count;
-        if (n > 0 && s.data[start + n - 1] === 0) n -= 1;
-        return new TextDecoder("utf-8", { ignoreBOM: true }).decode(s.data.subarray(start, start + n));
+        assertCapnp(
+          elem.count > 0 && s.data[start + elem.count - 1] === 0,
+          "TEXT",
+          "Text pointer is not NUL-terminated",
+        );
+        return new TextDecoder("utf-8", { ignoreBOM: true }).decode(s.data.subarray(start, start + elem.count - 1));
       }
       throw new CapnpError("KIND");
     }

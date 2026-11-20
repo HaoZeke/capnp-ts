@@ -18,6 +18,7 @@ import {
   canonicalizeFlat,
   decodeText,
   encodeText,
+  formatKjFloat32,
   initDynamicRoot,
   prettyPrint,
   splitTextMessages,
@@ -164,6 +165,13 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
     ]) {
       expect(() => decodeText(badText, sinkSchema)).toThrow(CapnpError);
     }
+
+    const invalidUtf8 = DynamicStruct.fromMessage(
+      decodeText('(title = "\\377")', sinkSchema),
+      sinkSchema,
+    );
+    expect(invalidUtf8.get("title").asText()).toBe("\ufffd");
+    expect(formatKjFloat32(1.401298464324817e-45)).toBe("1.4012985e-45");
   });
 
 

@@ -73,6 +73,10 @@ export function formatKjFloat32(v: number): string {
   if (f === -Infinity) return "-inf";
   if (f === 0) return Object.is(f, -0) ? "-0" : "0";
 
+  // KJ retains eight significant digits for Float32 subnormals even when
+  // fewer digits would round-trip in JavaScript.
+  if (Math.abs(f) < 1.1754943508222875e-38) return formatCPrintfG(f, 8);
+
   for (const prec of [6, 7, 8, 9]) {
     const s = formatCPrintfG(f, prec);
     if (Math.fround(Number(s)) === f) return s;
@@ -1292,11 +1296,7 @@ function scalarTextValue(value: TextValue, type: Type): DynamicValueReader {
     case "float":
       return DynamicValueReader.fromFloat(value.value);
     case "text":
-      try {
-        return DynamicValueReader.fromText(new TextDecoder("utf-8", { fatal: true }).decode(value.bytes));
-      } catch {
-        throw new CapnpError("TEXT", "Text literal contains invalid UTF-8 bytes");
-      }
+      return DynamicValueReader.fromText(new TextDecoder("utf-8").decode(value.bytes));
     case "data":
       return DynamicValueReader.fromData(value.bytes);
     case "enum":

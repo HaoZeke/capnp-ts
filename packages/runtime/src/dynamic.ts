@@ -824,12 +824,14 @@ function readPtrAsText(p: Ptr, dflt: string): string {
     "KIND",
     "Text pointer is not a byte list",
   );
-  if (p.count === 0) return "";
   const s = p.msg.segs[p.seg]!;
   const start = p.word * WORD_BYTES;
-  let n = p.count;
-  if (n > 0 && s.data[start + n - 1] === 0) n -= 1;
-  return new TextDecoder().decode(s.data.subarray(start, start + n));
+  assertCapnp(
+    s.data[start + p.count - 1] === 0,
+    "TEXT",
+    "Text pointer is not NUL-terminated",
+  );
+  return new TextDecoder().decode(s.data.subarray(start, start + p.count - 1));
 }
 
 function readPtrAsData(p: Ptr, dflt: Uint8Array): Uint8Array {
@@ -2307,13 +2309,13 @@ export class DynamicListReader implements Iterable<DynamicValueReader> {
         break;
       default:
         throw new CapnpError(
-          "KIND",
+          "SCHEMA",
           `list element size mismatch: wire=${this.ptr.esize} expected>=${minBytes}B`,
         );
     }
     assertCapnp(
       srcBytes >= minBytes,
-      "KIND",
+      "SCHEMA",
       `list element width ${srcBytes}B smaller than requested ${minBytes}B`,
     );
     const s = this.ptr.msg.segs[this.ptr.seg]!;
@@ -2324,7 +2326,7 @@ export class DynamicListReader implements Iterable<DynamicValueReader> {
   private readPtrElem(index: number): Ptr {
     assertCapnp(
       this.ptr.esize === ElemSize.Pointer,
-      "KIND",
+      "SCHEMA",
       "expected pointer list",
     );
     return this.ptr.listGetP(index);

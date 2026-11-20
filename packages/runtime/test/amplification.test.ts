@@ -127,11 +127,11 @@ function runBomb(mode: string): void {
 
   const elapsed = Date.now() - t0;
   const heap = process.memoryUsage().heapUsed - heap0;
-  if (elapsed > 1000) {
+  if (elapsed > 100) {
     console.error(`elapsed ${elapsed}`);
     process.exit(8);
   }
-  if (heap > 64 * 1024 * 1024) {
+  if (heap > 1024 * 1024) {
     console.error(`heap ${heap}`);
     process.exit(9);
   }
