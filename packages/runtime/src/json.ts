@@ -568,29 +568,45 @@ function parseStrictBigIntString(raw: string, signed: boolean): bigint {
   return neg ? -mag : mag;
 }
 
+/**
+ * Parse a JSON string holding a float the way kj's `parseAs<double>()`
+ * does: C `strtod()` must consume the whole string. That accepts leading
+ * whitespace, a sign, decimal and hex floats, case-insensitive `inf`,
+ * `infinity`, and `nan` with an optional `(n-char-sequence)`.
+ */
 function parseStrictFloatString(raw: string): number {
-  if (
-    raw === "NaN" ||
-    raw === "nan" ||
-    raw === "-NaN" ||
-    raw === "-nan" ||
-    raw === "+NaN" ||
-    raw === "+nan"
-  ) {
-    return NaN;
-  }
-  if (raw === "Infinity" || raw === "inf" || raw === "+Infinity" || raw === "+inf") {
-    return Infinity;
-  }
-  if (raw === "-Infinity" || raw === "-inf") {
-    return -Infinity;
-  }
+  const m =
+    /^[ \t\n\v\f\r]*([+-]?)(?:(inf(?:inity)?)|(nan(?:\([A-Za-z0-9_]*\))?)|0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?(?:[pP]([+-]?[0-9]+))?|((?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?))$/i.exec(
+      raw,
+    );
+  const hex = m !== null && m[4] !== undefined && (m[4] !== "" || (m[5] ?? "") !== "");
   assertCapnp(
-    /^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/.test(raw),
+    m !== null && (m[7] !== undefined || m[2] !== undefined || m[3] !== undefined || hex),
     "JSON",
     `invalid float string '${raw}'`,
   );
-  return Number(raw);
+  const negative = m![1] === "-";
+  if (m![3] !== undefined) return NaN;
+  if (m![2] !== undefined) return negative ? -Infinity : Infinity;
+  if (hex) {
+    const int = m![4]!;
+    const frac = m![5] ?? "";
+    const mantissa = BigInt(`0x${int}${frac}`);
+    let exp = (m![6] === undefined ? 0 : Number(m![6])) - 4 * frac.length;
+    let value = Number(mantissa);
+    while (exp > 1000 && Number.isFinite(value)) {
+      value *= 2 ** 1000;
+      exp -= 1000;
+    }
+    while (exp < -1000 && value !== 0) {
+      value *= 2 ** -1000;
+      exp += 1000;
+    }
+    value *= 2 ** exp;
+    return negative ? -value : value;
+  }
+  const value = Number(m![7]);
+  return negative ? -value : value;
 }
 
 // ---------------------------------------------------------------------------

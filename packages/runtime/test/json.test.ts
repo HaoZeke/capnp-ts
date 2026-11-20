@@ -497,4 +497,84 @@ describe("Cap'n Proto compat JSON codec", () => {
       }
     },
   );
+
+  const floatStrings: Array<[string, number | "nan" | "error"]> = [
+    ["NaN", "nan"],
+    ["NAN", "nan"],
+    ["-NAN", "nan"],
+    ["+NAN", "nan"],
+    ["nAn", "nan"],
+    ["nan(1)", "nan"],
+    ["NAN(abc_1)", "nan"],
+    ["nan()", "nan"],
+    ["INF", Infinity],
+    ["Inf", Infinity],
+    ["+Inf", Infinity],
+    ["-Inf", -Infinity],
+    ["-INF", -Infinity],
+    ["Infinity", Infinity],
+    ["INFINITY", Infinity],
+    ["-infinity", -Infinity],
+    [" 1.5", 1.5],
+    ["\t2", 2],
+    ["0x10", 16],
+    ["0x1p3", 8],
+    ["0X1.8P1", 3],
+    ["-0x.8p1", -1],
+    ["1.e3", 1000],
+    ["+.5", 0.5],
+    ["nan(", "error"],
+    ["nan(!)", "error"],
+    ["infin", "error"],
+    ["infinityx", "error"],
+    ["nanx", "error"],
+    ["1.5 ", "error"],
+    ["", "error"],
+    ["+", "error"],
+    [".", "error"],
+    ["1e", "error"],
+    ["0x", "error"],
+    ["0xg", "error"],
+    ["- 1", "error"],
+  ];
+
+  test("float strings follow strtod like kj parseAs<double>", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const schema = loader.resolveStruct("KitchenSink");
+    for (const [text, want] of floatStrings) {
+      for (const field of ["f64", "f32"]) {
+        const json = JSON.stringify({ [field]: text });
+        if (want === "error") {
+          expect(() => decodeJson(json, schema)).toThrow(CapnpError);
+          continue;
+        }
+        const v = DynamicStruct.fromMessage(decodeJson(json, schema), schema).get(field).asFloat64();
+        if (want === "nan") expect(Number.isNaN(v)).toBe(true);
+        else expect(v).toBe(want);
+      }
+    }
+  });
+
+  test.skipIf(!hasCapnp)("float strings are accepted and rejected like capnp convert json:text", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const schema = loader.resolveStruct("KitchenSink");
+    const file = join(repoRoot, "schema/dynamic-kitchen.capnp");
+    const mismatches: string[] = [];
+    for (const [text, want] of floatStrings) {
+      const json = JSON.stringify({ f64: text });
+      const cli = spawnSync("capnp", ["convert", "json:text", file, "KitchenSink"], {
+        input: json,
+        encoding: "utf8",
+      });
+      expect(cli.status === 0).toBe(want !== "error");
+      let tsAccepts = true;
+      try {
+        decodeJson(json, schema);
+      } catch {
+        tsAccepts = false;
+      }
+      if (tsAccepts !== (cli.status === 0)) mismatches.push(text);
+    }
+    expect(mismatches).toEqual([]);
+  });
 });
