@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { CapnpError } from "../src/kinds.ts";
 import { MessageBuilder } from "../src/builder.ts";
 import { Message } from "../src/message.ts";
@@ -12,8 +12,73 @@ import { pack, unpack } from "../src/packed.ts";
 const golden = (name: string) =>
   new Uint8Array(readFileSync(join(import.meta.dir, "golden", name)));
 
+function capnpVersion(bin: string): string | null {
+  const r = spawnSync(bin, ["--version"], { encoding: "utf8" });
+  if (r.status !== 0) return null;
+  const text = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
+  const match = text.match(/(\d+\.\d+\.\d+)/);
+  return match?.[1] ?? null;
+}
+
+interface CapnpInstall {
+  bin: string;
+  include: string;
+  libDir: string;
+}
+
+/** Locate an installed capnp 1.4.0 from PATH. CAPNP_INCLUDE is optional. */
+function locateCapnp140(): CapnpInstall | null {
+  const which = spawnSync("which", ["capnp"], { encoding: "utf8" });
+  const bin = which.status === 0 ? which.stdout.trim() : "";
+  if (!bin || capnpVersion(bin) !== "1.4.0") return null;
+
+  const prefix = dirname(dirname(bin));
+  const include = [
+    process.env.CAPNP_INCLUDE,
+    join(prefix, "include"),
+    "/usr/local/include",
+    "/usr/include",
+    join(homedir(), ".local/include"),
+  ]
+    .filter((dir): dir is string => !!dir)
+    .find((dir) => existsSync(join(dir, "capnp/serialize-packed.h")));
+  if (!include) return null;
+
+  const libDir = [
+    join(dirname(include), "lib"),
+    join(prefix, "lib"),
+    join(prefix, "lib64"),
+    "/usr/local/lib",
+    "/usr/lib",
+  ].find(
+    (dir) =>
+      existsSync(join(dir, "libcapnp.so")) ||
+      existsSync(join(dir, "libcapnp.a")) ||
+      existsSync(join(dir, "libcapnp.dylib")),
+  );
+  if (!libDir) return null;
+  return { bin, include, libDir };
+}
+
+const capnp140 = locateCapnp140();
+const inCi = Boolean(
+  process.env.CI ||
+    process.env.GITHUB_ACTIONS ||
+    process.env.GITLAB_CI ||
+    process.env.CIRRUS_CI,
+);
+
+function requireCapnp140(): CapnpInstall {
+  if (capnp140) return capnp140;
+  throw new Error(
+    "capnp 1.4.0 was not found on PATH with its headers and libcapnp. Install it, or set CAPNP_INCLUDE to that install's include directory. This test fails in CI instead of skipping.",
+  );
+}
+
 function hasCapnp(): boolean {
-  return spawnSync("capnp", ["--version"], { encoding: "utf8" }).status === 0;
+  const which = spawnSync("which", ["capnp"], { encoding: "utf8" });
+  const bin = which.status === 0 ? which.stdout.trim() : "";
+  return bin !== "" && capnpVersion(bin) === "1.4.0";
 }
 
 const PACKED_WRITER_SRC = `
@@ -57,48 +122,47 @@ int main() {
 }
 `;
 
-function capnpIncludeDir(): string | null {
-  const candidates = [
-    process.env.CAPNP_INCLUDE,
-    join(homedir(), ".local/include"),
-    "/usr/include",
-    "/usr/local/include",
-  ].filter((p): p is string => !!p);
-  for (const dir of candidates) {
-    if (existsSync(join(dir, "capnp/serialize-packed.h"))) return dir;
-  }
-  return null;
-}
+let packedWriterBin: string | undefined;
 
-let packedWriterBin: string | null | undefined;
-
-/** Compile writePackedMessage once. Null when headers or g++ are absent. */
+/** Compile writePackedMessage against the installed capnp 1.4.0. */
 function writePackedMessage(frame: Uint8Array): Uint8Array {
   if (packedWriterBin === undefined) {
-    const include = capnpIncludeDir();
-    if (!include || spawnSync("g++", ["--version"]).status !== 0) {
-      packedWriterBin = null;
-    } else {
-      const dir = mkdtempSync(join(tmpdir(), "capnp-pack-"));
-      const src = join(dir, "packmsg.c++");
-      const bin = join(dir, "packmsg");
-      writeFileSync(src, PACKED_WRITER_SRC);
-      const libDir = join(include, "../lib");
-      const args = ["-std=c++17", "-O2", "-o", bin, src, `-I${include}`];
-      if (existsSync(libDir)) args.push(`-L${libDir}`, `-Wl,-rpath,${libDir}`);
-      args.push("-lcapnp", "-lkj", "-pthread");
-      const compiled = spawnSync("g++", args, { encoding: "utf8" });
-      packedWriterBin = compiled.status === 0 ? bin : null;
-      if (compiled.status !== 0) {
-        throw new Error(`g++ pack helper failed: ${compiled.stderr}`);
-      }
+    const install = requireCapnp140();
+    if (spawnSync("g++", ["--version"]).status !== 0) {
+      throw new Error(
+        "g++ is required to compile the capnp 1.4.0 writePackedMessage helper",
+      );
     }
-  }
-  if (!packedWriterBin) {
-    throw new Error("writePackedMessage helper is not available");
+    const dir = mkdtempSync(join(tmpdir(), "capnp-pack-"));
+    const src = join(dir, "packmsg.c++");
+    const bin = join(dir, "packmsg");
+    writeFileSync(src, PACKED_WRITER_SRC);
+    const args = [
+      "-std=c++17",
+      "-O2",
+      "-o",
+      bin,
+      src,
+      `-I${install.include}`,
+      `-L${install.libDir}`,
+      `-Wl,-rpath,${install.libDir}`,
+      "-lcapnp",
+      "-lkj",
+      "-pthread",
+    ];
+    const compiled = spawnSync("g++", args, { encoding: "utf8" });
+    if (compiled.status !== 0) {
+      throw new Error(
+        `g++ pack helper failed (include ${install.include}, lib ${install.libDir}): ${compiled.stderr}`,
+      );
+    }
+    packedWriterBin = bin;
   }
   const r = spawnSync(packedWriterBin, [], { input: frame });
-  expect(r.status).toBe(0);
+  if (r.status !== 0) {
+    const err = r.stderr ? new TextDecoder().decode(r.stderr) : "";
+    throw new Error(`writePackedMessage helper exited ${r.status}: ${err}`);
+  }
   return new Uint8Array(r.stdout as Uint8Array);
 }
 
@@ -168,16 +232,16 @@ describe("packed codec", () => {
     expect([...unpack(packed)]).toEqual([...frame]);
   });
 
-  test.skipIf(!hasCapnp() || !capnpIncludeDir())(
+  test.skipIf(!capnp140 && !inCi)(
     "default pack matches writePackedMessage on a 3-segment frame",
     () => {
-    const frame = buildMultiSegmentTextFrame();
-    expect(Message.fromFlat(frame).segmentCount).toBe(3);
-    const packed = pack(frame);
-    expect([...unpack(packed)]).toEqual([...frame]);
-    const cpp = writePackedMessage(frame);
-    expect([...packed]).toEqual([...cpp]);
-    expect(packed.length).toBe(106);
+      const frame = buildMultiSegmentTextFrame();
+      expect(Message.fromFlat(frame).segmentCount).toBe(3);
+      const packed = pack(frame);
+      expect([...unpack(packed)]).toEqual([...frame]);
+      const cpp = writePackedMessage(frame);
+      expect([...packed]).toEqual([...cpp]);
+      expect(packed.length).toBe(106);
     },
   );
 

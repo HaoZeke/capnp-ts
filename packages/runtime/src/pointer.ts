@@ -29,6 +29,15 @@ export function wpListCount(w: bigint): number {
   return Number((w >> 35n) & 0x1fff_ffffn);
 }
 
+/**
+ * Element count stored in an inline-composite tag.
+ * C++ `inlineCompositeListElementCount` keeps 29 bits of the offset field
+ * (`LIST_ELEMENT_COUNT_BITS`), not the full 30-bit offset.
+ */
+export function wpCompositeElementCount(tag: bigint): number {
+  return Number((tag >> 2n) & 0x1fff_ffffn);
+}
+
 export function wpFarTwo(w: bigint): boolean {
   return ((w >> 2n) & 1n) !== 0n;
 }

@@ -26,6 +26,12 @@ import {
   WORD_BYTES,
   WireKind,
   assertCapnp,
+  assertDataBlobSize,
+  assertListElementCount,
+  assertTextBlobSize,
+  bytesToWords,
+  compositeContentWords,
+  exactProduct,
 } from "./kinds.ts";
 import { serializeToFlat } from "./serialize.ts";
 import { Message, type Ptr } from "./message.ts";
@@ -63,6 +69,8 @@ export interface BuilderOptions {
   maxSegWords?: number;
   /** Grow last segment instead of appending (canonical path). */
   forceSingle?: boolean;
+  /** Allocate subsequent segments at max(firstWords, need) without doubling. */
+  fixedSegmentGrowth?: boolean;
 }
 
 /** Pointer slot or object body location inside a MessageBuilder. */
@@ -180,13 +188,17 @@ export class MessageBuilder {
   segs: BSeg[] = [];
   maxSegWords: number;
   forceSingle: boolean;
+  readonly firstWords: number;
+  readonly fixedSegmentGrowth: boolean;
 
   constructor(opts: BuilderOptions = {}) {
     this.maxSegWords = opts.maxSegWords ?? 0;
     this.forceSingle = opts.forceSingle ?? false;
+    this.fixedSegmentGrowth = opts.fixedSegmentGrowth ?? false;
     let first = opts.firstWords ?? DEFAULT_FIRST_WORDS;
     if (first < 1) first = 1;
     if (first > MAX_SEGMENT_WORDS) first = MAX_SEGMENT_WORDS;
+    this.firstWords = first;
     this.appendSegment(first);
   }
 
@@ -264,7 +276,11 @@ export class MessageBuilder {
       s.words += n;
       return { seg: lastIdx, word };
     }
-    let ncap = last.cap ? last.cap * 2 : 16;
+    let ncap = this.fixedSegmentGrowth
+      ? Math.max(this.firstWords, n)
+      : last.cap
+        ? last.cap * 2
+        : 16;
     if (ncap < n) ncap = n;
     if (ncap > lim) ncap = lim;
     assertCapnp(ncap >= n, "ALLOC");
@@ -287,6 +303,7 @@ export class MessageBuilder {
     const s = this.segs[seg];
     if (!s) return null;
     if (s.words + n > this.limWords()) return null;
+    if (this.fixedSegmentGrowth && s.words + n > s.cap) return null;
     try {
       this.segEnsure(seg, s.words + n);
     } catch {
@@ -675,8 +692,9 @@ export class StructBuilder {
 
   setText(ptrIndex: number, text: string): void {
     const enc = new TextEncoder().encode(text);
+    assertTextBlobSize(enc.length, "text blob too big");
     const nbytes = enc.length + 1; // trailing NUL
-    const nwords = (nbytes + 7) >> 3;
+    const nwords = bytesToWords(nbytes);
     const slot = this.slot(ptrIndex);
     const { seg: startSeg, word: startWord } = this.builder.allocWords(nwords);
     const data = this.builder.segBytes(startSeg);
@@ -694,8 +712,9 @@ export class StructBuilder {
   }
 
   setData(ptrIndex: number, bytes: Uint8Array): void {
+    assertDataBlobSize(bytes.length, "text blob too big");
     const slot = this.slot(ptrIndex);
-    const nwords = (bytes.length + 7) >> 3;
+    const nwords = bytesToWords(bytes.length);
     let startSeg: number;
     let startWord: number;
     if (nwords) {
@@ -729,7 +748,7 @@ export class StructBuilder {
   ): StructBuilder {
     const slot = this.slot(ptrIndex);
     const step = elemDwords + elemPwords;
-    const contentWords = count * step;
+    const contentWords = compositeContentWords(count, step);
     const need = 1 + contentWords;
     const { seg: tagSeg, word: tagWord } = this.builder.allocWords(need);
     this.builder.storeW(
@@ -766,6 +785,7 @@ export class StructBuilder {
 
   /** Init List of pointer-sized elements (e.g. List(Text) slots). */
   initPointerList(ptrIndex: number, count: number): BuilderPointer {
+    assertListElementCount(count);
     const slot = this.slot(ptrIndex);
     let listSeg: number;
     let listStart: number;
@@ -796,9 +816,10 @@ export class StructBuilder {
     itemBytes: number,
     items?: Uint8Array,
   ): BuilderPointer {
+    assertListElementCount(count);
     const slot = this.slot(ptrIndex);
-    const nbytes = esize === ElemSize.Bit ? Math.ceil(count / 8) : count * itemBytes;
-    const nwords = (nbytes + 7) >> 3;
+    const nbytes = esize === ElemSize.Bit ? Math.ceil(count / 8) : exactProduct(count, itemBytes);
+    const nwords = bytesToWords(nbytes);
     let startSeg: number;
     let startWord: number;
     if (nwords) {
