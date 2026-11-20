@@ -112,15 +112,33 @@ describe("nesting depth limit", () => {
   });
 
   test("listGetP pointer elements accumulate depth", () => {
+    // root (d=0) → list (d=1) → listGetP resolves element at d=2.
+    const msg = Message.fromSegments(
+      [
+        {
+          data: packWords([
+            wpMakeStruct(0, 0, 1),
+            wpMakeList(0, ElemSize.Pointer, 1),
+            wpMakeStruct(-1, 0, 0),
+          ]),
+          words: 3,
+        },
+      ],
+      { depthLimit: 2 },
+    );
+    const lst = msg.root().getP(0);
+    expect(lst.depth).toBe(1);
+    expectCode(() => lst.listGetP(0), "DEPTH");
+  });
+
+  test("null pointer elements are answered before the depth limit", () => {
     const b = new MessageBuilder();
     const root = b.initRoot(0, 1);
     root.initPointerList(0, 1);
-    // root (d=0) → list (d=1) → listGetP resolves element at d=2.
     const msg = Message.fromFlat(b.toFlat(), { depthLimit: 2 });
     const lst = msg.root().getP(0);
     expect(lst.depth).toBe(1);
-    // Null element still runs depth check before accepting null.
-    expectCode(() => lst.listGetP(0), "DEPTH");
+    expect(lst.listGetP(0).kind).toBe(PtrKind.Null);
   });
 
   test("double-far does not consume an extra nesting level", () => {
@@ -132,7 +150,7 @@ describe("nesting depth limit", () => {
     storeU64(seg0, 0, wpMakeFar(true, 0, 1));
     storeU64(seg1, 0, wpMakeFar(false, 0, 2));
     storeU64(seg1, 8, wpMakeStruct(0, 0, 1));
-    storeU64(seg2, 0, 0n);
+    storeU64(seg2, 0, wpMakeStruct(-1, 0, 0));
 
     const msg = Message.fromSegments(
       [

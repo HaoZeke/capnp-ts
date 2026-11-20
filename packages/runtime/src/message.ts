@@ -311,12 +311,15 @@ function resolveWord(
   depth: number,
   fromFar: boolean,
 ): Ptr {
-  // nestingLimit is decremented once per struct or list pointer, including the root.
-  if (depth >= m.depthLimit) throw new CapnpError("DEPTH");
   // A far landing pad of all zeros is an empty struct. Null is only a direct zero word.
   if (w === 0n && !fromFar) return Ptr.nullPtr(m, seg, word, depth);
 
   const kind = wpKind(w);
+  // nestingLimit is decremented once per struct or list pointer, including the
+  // root. Null pointers are answered before the limit is consulted.
+  if (kind !== WireKind.Cap && depth >= m.depthLimit) {
+    throw new CapnpError("DEPTH");
+  }
   if (kind === WireKind.Far) {
     // followFars is one hop. A second far word is a non-struct/non-list pointer.
     if (fromFar) {
@@ -338,6 +341,12 @@ function resolveWord(
       assertCapnp(wpKind(pad) === WireKind.Far, "KIND");
       const cseg = wpFarSeg(pad);
       const coff = wpFarOff(pad);
+      // ReaderArena::tryGetSegment treats an empty segment as absent.
+      assertCapnp(
+        cseg >= 0 && cseg < m.segs.length && m.segs[cseg]!.words > 0,
+        "SEGMENT",
+        "Message contains double-far pointer to unknown segment.",
+      );
       if (wpKind(tag) === WireKind.Struct) {
         const dwords = wpStructDwords(tag);
         const pwords = wpStructPwords(tag);
@@ -345,8 +354,6 @@ function resolveWord(
           const end = coff + dwords + pwords;
           boundsWord(m, cseg, coff);
           if (end > 0) boundsWord(m, cseg, end - 1);
-        } else {
-          assertCapnp(cseg >= 0 && cseg < m.segs.length, "SEGMENT");
         }
         chargeWords(m, dwords + pwords);
         return Ptr.struct(m, cseg, coff, dwords, pwords, depth);
@@ -714,10 +721,20 @@ export class Ptr {
         this.word + index * this.stepWords,
         this.dwords,
         this.pwords,
-        this.depth,
+        this.elementDepth(),
       );
     }
     throw new CapnpError("KIND");
+  }
+
+  /**
+   * Depth of a struct element. ListReader::getStructElement requires a
+   * remaining nesting budget and hands the element one level less.
+   */
+  private elementDepth(): number {
+    const depth = this.depth + 1;
+    if (depth >= this.msg.depthLimit) throw new CapnpError("DEPTH");
+    return depth;
   }
 
   listGetp(index: number): Ptr {
@@ -739,6 +756,7 @@ export class Ptr {
   listGetStruct(index: number): Ptr {
     assertCapnp(this.kind === PtrKind.List, "KIND");
     assertCapnp(index >= 0 && index < this.count, "BOUNDS");
+    const depth = this.elementDepth();
 
     if (this.esize === ElemSize.Composite) {
       return Ptr.struct(
@@ -747,7 +765,7 @@ export class Ptr {
         this.word + index * this.stepWords,
         this.dwords,
         this.pwords,
-        this.depth,
+        depth,
       );
     }
     if (this.esize === ElemSize.Pointer) {
@@ -759,7 +777,7 @@ export class Ptr {
         kind: PtrKind.Struct,
         dwords: 0,
         pwords: 1,
-        depth: this.depth,
+        depth,
       });
     }
     // encoding.html: "any element size (except C = 1, i.e. 1-bit) may be
@@ -776,7 +794,7 @@ export class Ptr {
         dwords: 0,
         pwords: 0,
         dataBits: 0,
-        depth: this.depth,
+        depth,
       });
     }
 
@@ -808,7 +826,7 @@ export class Ptr {
       pwords: 0,
       bodyByte: absByte % WORD_BYTES,
       dataBits: elemBytes * 8,
-      depth: this.depth,
+      depth,
     });
   }
 

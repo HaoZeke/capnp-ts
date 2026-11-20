@@ -319,3 +319,47 @@ describe("json codec against capnp 1.4.0", () => {
     expect(codec.decode('{"prio":1.5}', custom).get("prio").asEnum().getRaw()).toBe(1);
   });
 });
+
+describe("nesting limit against capnp 1.4.0 pointer reads", () => {
+  test("a null pointer is read before the nesting limit is consulted", () => {
+    const msg = Message.fromSegments([words(wpMakeStruct(0, 0, 1), 0n)], { depthLimit: 1 });
+    expect(msg.root().getP(0).kind).toBe(PtrKind.Null);
+    const chained = Message.fromSegments([words(wpMakeStruct(0, 0, 1), wpMakeStruct(-1, 0, 0))], {
+      depthLimit: 1,
+    });
+    expect(() => chained.root().getP(0)).toThrow(CapnpError);
+  });
+
+  test("composite list elements use one nesting level", () => {
+    const listed = words(
+      wpMakeStruct(0, 0, 1),
+      wpMakeList(0, ElemSize.Composite, 2),
+      wpMakeStruct(2, 0, 1),
+      wpMakeStruct(-1, 0, 0),
+      0n,
+    );
+    const open = (limit: number) => Message.fromSegments([listed], { depthLimit: limit }).root();
+    expect(() => open(2).getP(0).listGetStruct(0)).toThrow(/DEPTH|nest/i);
+    const element = open(3).getP(0).listGetStruct(0);
+    expect(element.depth).toBe(2);
+    expect(() => element.getP(0)).toThrow(CapnpError);
+    expect(open(3).getP(0).listGetStruct(1).getP(0).kind).toBe(PtrKind.Null);
+    expect(() => open(3).getP(0).listGetP(0)).not.toThrow(CapnpError);
+  });
+
+  test("a double-far landing in an unknown or empty segment is rejected", () => {
+    const zeroSized = (landing: Uint8Array, landingWords: number) =>
+      Message.fromSegments([
+        { data: words(wpMakeFar(true, 0, 1)), words: 1 },
+        { data: words(wpMakeFar(false, 0, 2), wpMakeStruct(0, 0, 0)), words: 2 },
+        { data: landing, words: landingWords },
+      ]);
+    expect(() => zeroSized(new Uint8Array(0), 0).root()).toThrow(/unknown segment/);
+    expect(zeroSized(words(0n), 1).root().kind).toBe(PtrKind.Struct);
+    const absent = Message.fromSegments([
+      words(wpMakeFar(true, 0, 1)),
+      words(wpMakeFar(false, 0, 9), wpMakeStruct(0, 0, 0)),
+    ]);
+    expect(() => absent.root()).toThrow(/unknown segment/);
+  });
+});
