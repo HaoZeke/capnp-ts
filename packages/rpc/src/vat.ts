@@ -328,6 +328,13 @@ interface AnswerState {
   /** The call said `sendResultsTo.yourself`: the results stay here for the caller to claim. */
   resultsElsewhere: boolean;
   /**
+   * A `Return.takeFromOtherQuestion` already claimed these results. Kept
+   * apart from `resultsElsewhere`, which still decides how the answer's own
+   * Return is written, as capnp-C++ keeps `redirectResults` and the claim
+   * separate.
+   */
+  resultsClaimed: boolean;
+  /**
    * `Call.onlyPromisePipeline`: keep the answer so the peer can pipeline,
    * but do not send `Return` or export the result capabilities.
    */
@@ -1283,7 +1290,15 @@ export class RpcConnection implements RemoteHost {
     }
     // The first claim consumes the redirected answer. A second claim of the
     // same answer is a protocol error, as in capnp-C++.
-    other.resultsElsewhere = false;
+    if (other.resultsClaimed) {
+      this.abort(
+        new RpcError(
+          "`Return.takeFromOtherQuestion` referenced a call that did not use `sendResultsTo.yourself`.",
+        ),
+      );
+      return;
+    }
+    other.resultsClaimed = true;
     if (q.finished) {
       other.call.release();
       return;
@@ -1523,6 +1538,7 @@ export class RpcConnection implements RemoteHost {
       call: undefined as unknown as CallState,
       resultExports: [],
       resultsElsewhere: false,
+      resultsClaimed: false,
       onlyPromisePipeline: false,
       tailSent: false,
       returned: false,

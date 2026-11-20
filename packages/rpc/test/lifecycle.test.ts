@@ -1225,4 +1225,77 @@ describe("pipeline-only calls", () => {
     expect(a.disconnected?.message).toContain("sendResultsTo.yourself");
     expect(a.answerContent(first)?.getU32(0)).toBe(77);
   });
+
+  test("an async call forwarded to us is answered resultsSentElsewhere after the claim", async () => {
+    const pair = new MemoryTransportPair();
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const seen: number[] = [];
+    const slow: RpcServer = {
+      async dispatch(_i, _m, params, results) {
+        seen.push(params.getU32(0));
+        await gate;
+        results.setU32(0, params.getU32(0) + 1);
+      },
+    };
+    const a = new RpcConnection(pair.a, slow);
+    const peer = pair.b;
+
+    peer.send(
+      frame((root) => {
+        root.setU16(0, Message.bootstrap);
+        root.initStruct(0, BOOTSTRAP_DWORDS, BOOTSTRAP_PWORDS).setU32(0, 1);
+      }),
+    );
+    a.pump();
+    peer.receive();
+
+    peer.send(
+      frame((root) => {
+        root.setU16(0, Message.call);
+        const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
+        call.setU32(0, 10);
+        call.setU16(6, Call_sendResultsTo.yourself);
+        const target = call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS);
+        target.setU16(4, MessageTarget.importedCap);
+        target.setU32(0, 0);
+        call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS).initStruct(0, 1, 0).setU32(0, 40);
+      }),
+    );
+    const mine = a.sendBootstrap();
+    peer.receive();
+    a.pump();
+    expect(seen).toEqual([40]);
+    expect(peer.receive()).toBeNull();
+
+    peer.send(
+      frame((root) => {
+        root.setU16(0, Message.return);
+        const r = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+        r.setU32(0, mine);
+        r.setU16(6, Return.takeFromOtherQuestion);
+        r.setU32(8, 10);
+      }),
+    );
+    a.pump();
+    expect(a.disconnected).toBeUndefined();
+    expect(a.answerContent(mine)).toBeUndefined();
+
+    open();
+    await gate;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    a.pump();
+
+    expect(a.disconnected).toBeUndefined();
+    const held = CapnpMessage.fromFlat(peer.receive()!).root();
+    const ret = Message_getReturn(held);
+    expect(Return_getAnswerId(ret)).toBe(10);
+    expect(Return_which(ret)).toBe(Return.resultsSentElsewhere);
+    expect(peer.receive()).toBeNull();
+    expect(a.isAnswered(mine)).toBe(true);
+    expect(a.isFailed(mine)).toBe(false);
+    expect(a.answerContent(mine)?.getU32(0)).toBe(41);
+  });
 });
