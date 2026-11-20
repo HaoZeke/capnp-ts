@@ -1786,8 +1786,8 @@ export class RpcConnection implements RemoteHost {
    *   an answer that is gone or finished has no pipeline left.
    * - `descriptor` is `receiveCap` for `receiverAnswer`: the transform is
    *   only read when the answer still has a pipeline.
-   * - `legacy` serves `Provide`, `Join` and `Disembargo`, which keep the
-   *   pre-parity behavior.
+   * - `legacy` serves `Provide` and `Join`, which keep the pre-parity
+   *   behavior.
    */
   private pipelinedCap(
     promised: Ptr,
@@ -1898,11 +1898,8 @@ export class RpcConnection implements RemoteHost {
       }
       case Disembargo_context.senderLoopback: {
         const id = Disembargo_context_getSenderLoopback(context);
-        const hook = this.targetHook(Disembargo_getTarget(disembargo));
-        if (hook === undefined) {
-          this.abort(new RpcError("Disembargo target does not exist"));
-          return;
-        }
+        const hook = this.targetHook(Disembargo_getTarget(disembargo), true);
+        if (hook === undefined) return;
         const finishLoopback = (resolved: ClientHook): void => {
           if (this.gone !== undefined) {
             resolved.release();
@@ -1910,9 +1907,11 @@ export class RpcConnection implements RemoteHost {
           }
           const inner = innermost(resolved);
           if (inner.brand !== this) {
+            const broken = inner.brokenError;
             resolved.release();
             this.abort(
-              new RpcError("Disembargo senderLoopback sent to an object that does not point back"),
+              broken ??
+                new RpcError("Disembargo senderLoopback sent to an object that does not point back"),
             );
             return;
           }
