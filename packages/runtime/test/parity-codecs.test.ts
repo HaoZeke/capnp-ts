@@ -10,6 +10,7 @@ import {
   CapnpError,
   DynamicStruct,
   ElemSize,
+  JsonCodec,
   Message,
   PtrKind,
   SchemaLoader,
@@ -25,9 +26,11 @@ import {
 } from "../src/index.ts";
 
 const goldenDir = join(dirname(fileURLToPath(import.meta.url)), "golden");
-const sink = SchemaLoader.fromCgr(
+const kitchen = SchemaLoader.fromCgr(
   new Uint8Array(readFileSync(join(goldenDir, "dynamic-kitchen.cgr.bin"))),
-).resolveStruct("KitchenSink");
+);
+const sink = kitchen.resolveStruct("KitchenSink");
+const custom = kitchen.resolveStruct("JsonCustom");
 
 function readText(src: string) {
   return DynamicStruct.fromMessage(decodeText(src, sink), sink);
@@ -266,5 +269,53 @@ describe("text format against capnp 1.4.0", () => {
     expect(() => readText("(title = 'abc')")).toThrow(/Parse error/);
     expect(() => readText("(raw = 0x'dead')")).toThrow(/Parse error/);
     expect(readText("(title = `hello\n)").get("title").asText()).toBe("hello\n");
+  });
+});
+
+describe("json codec against capnp 1.4.0", () => {
+  test("J-01 each unicode escape is one WTF-8 code unit", () => {
+    const codec = new JsonCodec();
+    const readTitle = (json: string): number[] => {
+      const decoded = codec.decode(json, sink);
+      const p = decoded.ptr.getP(sink.getFieldByName("title").offset);
+      const raw = p.msg.segs[p.seg]!.data.subarray(p.word * 8, p.word * 8 + p.count - 1);
+      return [...raw];
+    };
+    expect(readTitle('{"title":"\\uD83D\\uDE00"}')).toEqual([
+      0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80,
+    ]);
+    expect(readTitle('{"title":"\\uD800"}')).toEqual([0xed, 0xa0, 0x80]);
+    expect(readTitle('{"title":"\\uDC00"}')).toEqual([0xed, 0xb0, 0x80]);
+    expect(readTitle('{"title":"\\u00e9"}')).toEqual([0xc3, 0xa9]);
+    expect(readTitle('{"title":"😀"}')).toEqual([0xf0, 0x9f, 0x98, 0x80]);
+  });
+
+  test("J-02 a flattened field on another arm throws", () => {
+    const codec = new JsonCodec();
+    codec.handleByAnnotation(custom);
+    expect(() => codec.decode('{"kind":"empty","v_key":"x"}', custom)).toThrow(CapnpError);
+  });
+
+  test("J-03 an unknown discriminator is ignored", () => {
+    const codec = new JsonCodec({ rejectUnknownFields: true });
+    codec.handleByAnnotation(custom);
+    expect(codec.decode('{"kind":"bogus"}', custom).which()?.name).toBe("emptyVariant");
+  });
+
+  test("J-04 raw control characters in strings are kept", () => {
+    const codec = new JsonCodec();
+    expect(codec.decode('{"title":"a\tb"}', sink).get("title").asText()).toBe("a\tb");
+    expect(codec.decode('{"title":"a\u0001b"}', sink).get("title").asText()).toBe("a\u0001b");
+  });
+
+  test("J-05 a trailing decimal point is a number", () => {
+    expect(new JsonCodec().decode('{"f64":1.}', sink).get("f64").asFloat64()).toBe(1);
+  });
+
+  test("J-06 annotated enum numbers truncate to uint16", () => {
+    const codec = new JsonCodec();
+    codec.handleByAnnotation(custom);
+    expect(codec.decode('{"prio":70000}', custom).get("prio").asEnum().getRaw()).toBe(4464);
+    expect(codec.decode('{"prio":1.5}', custom).get("prio").asEnum().getRaw()).toBe(1);
   });
 });

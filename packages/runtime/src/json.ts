@@ -529,7 +529,7 @@ class RawJsonParser {
 
     if (this.pos < this.src.length && this.src[this.pos] === ".") {
       this.pos++;
-      const fracStart = this.pos;
+      // C++ consumeWhile(digit) allows zero digits after the decimal point.
       while (
         this.pos < this.src.length &&
         this.src[this.pos]! >= "0" &&
@@ -537,7 +537,6 @@ class RawJsonParser {
       ) {
         this.pos++;
       }
-      if (this.pos === fracStart) this.fail("expected fraction digits after '.'");
     }
 
     if (
@@ -1203,13 +1202,8 @@ class AnnotatedStructHandler implements JsonCustomHandler {
         if (targetField) {
           output.clear(targetField);
           unionsSeen.add(key);
-        } else {
-          assertCapnp(
-            !codec.getRejectUnknownFields(),
-            "JSON",
-            `unknown union tag '${value.value}'`,
-          );
         }
+        // An unknown discriminator is ignored, including under rejectUnknownFields.
         return true;
       }
       case "flattenedFromUnion": {
@@ -1218,7 +1212,11 @@ class AnnotatedStructHandler implements JsonCustomHandler {
         const variant = output.which();
         if (!variant) return true;
         const subHandler = this.fields[variant.index]!.flattenHandler;
-        if (!subHandler) return true;
+        assertCapnp(
+          subHandler != null,
+          "JSON",
+          "expected flattened union field",
+        );
         return subHandler.decodeProperty(
           codec,
           name.slice(route.prefixLength),
@@ -1635,6 +1633,10 @@ export class JsonCodec {
       return;
     }
 
+    if (fType.isText() && value.which === "string" && value.bytes) {
+      output.setTextBytes(field, value.bytes);
+      return;
+    }
     output.set(field, this._decodeValueAst(value, fType, output.sb.builder));
   }
 
@@ -1651,6 +1653,8 @@ export class JsonCodec {
         assertCapnp(item.which === "array", "JSON", "expected nested JSON array");
         const sub = lb.init(i, item.value.length).asList();
         this.decodeArrayIntoList(item.value, sub);
+      } else if (elemType.isText() && item.which === "string" && item.bytes) {
+        lb.setTextBytes(i, item.bytes);
       } else {
         lb.set(i, this._decodeValueAst(item, elemType, lb.builder));
       }

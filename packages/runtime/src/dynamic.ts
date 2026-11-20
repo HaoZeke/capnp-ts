@@ -1682,6 +1682,14 @@ export class DynamicStructBuilder {
     );
   }
 
+  /** Write text bytes plus a trailing NUL, and select the field's union arm. */
+  setTextBytes(fieldOrName: StructField | string, bytes: Uint8Array): void {
+    const field = this.resolveField(fieldOrName);
+    assertCapnp(field.getType().isText(), "KIND", `expected text field '${field.name}'`);
+    this.setInUnion(field);
+    this.sb.setTextBytes(field.offset, bytes);
+  }
+
   set(fieldOrName: StructField | string, rawInput: DynamicSetValue): void {
     const field = this.resolveField(fieldOrName);
     this.setInUnion(field);
@@ -2858,6 +2866,13 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
     }
     assertCapnp(this.esize === ElemSize.Pointer, "KIND", "expected pointer list");
     return this.word + index;
+  }
+
+  setTextBytes(index: number, bytes: Uint8Array): void {
+    const elemType = this.schema.getElementType();
+    assertCapnp(elemType.isText(), "KIND", "expected a list of text");
+    const slot = new BuilderPointer(this.builder, this.seg, this.pointerWord(index));
+    writeTextBytesToSlot(this.builder, slot, bytes);
   }
 
   set(index: number, rawInput: DynamicSetValue): void {
