@@ -46,7 +46,7 @@ export type JsonAst =
   | { readonly which: "null" }
   | { readonly which: "boolean"; readonly value: boolean }
   | { readonly which: "number"; readonly value: number }
-  | { readonly which: "string"; readonly value: string }
+  | { readonly which: "string"; readonly value: string; readonly bytes?: Uint8Array }
   | { readonly which: "array"; readonly value: readonly JsonAst[] }
   | {
       readonly which: "object";
@@ -287,7 +287,8 @@ class RawJsonParser {
         this.expectLiteral("true");
         return { which: "boolean", value: true };
       case '"':
-        return { which: "string", value: this.parseQuotedString() };
+        const parsed = this.parseQuotedString();
+        return { which: "string", value: parsed.text, bytes: parsed.bytes };
       case "[":
         return this.parseArray();
       case "{":
@@ -354,7 +355,7 @@ class RawJsonParser {
         if (this.pos >= this.src.length || this.src[this.pos] !== '"') {
           this.fail("expected quoted property name in JSON object");
         }
-        const name = this.parseQuotedString();
+        const name = this.parseQuotedString().text;
         this.skipWs();
         if (this.pos >= this.src.length || this.src[this.pos] !== ":") {
           this.fail("expected ':' after property name in JSON object");
@@ -378,21 +379,41 @@ class RawJsonParser {
     }
   }
 
-  private parseQuotedString(): string {
+  private parseQuotedString(): { text: string; bytes: Uint8Array } {
     this.pos++; // '"'
-    let out = "";
+    let text = "";
+    const bytes: number[] = [];
+    const pushUtf8 = (cp: number): void => {
+      if (cp < 0x80) bytes.push(cp);
+      else if (cp < 0x800) {
+        bytes.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f));
+      } else if (cp < 0x10000) {
+        bytes.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+      } else {
+        bytes.push(
+          0xf0 | (cp >> 18),
+          0x80 | ((cp >> 12) & 0x3f),
+          0x80 | ((cp >> 6) & 0x3f),
+          0x80 | (cp & 0x3f),
+        );
+      }
+    };
+    const pushUnit = (cu: number): void => {
+      // Each \uXXXX is one UTF-16 code unit, including lone surrogates.
+      pushUtf8(cu);
+      text += String.fromCharCode(cu);
+    };
     while (this.pos < this.src.length) {
       const ch = this.src[this.pos]!;
       if (ch === '"') {
         this.pos++;
-        return out;
-      }
-      if (ch.charCodeAt(0) < 0x20) {
-        this.fail("unescaped control character in JSON string");
+        return { text, bytes: Uint8Array.from(bytes) };
       }
       if (ch !== "\\") {
-        out += ch;
-        this.pos++;
+        const cp = this.src.codePointAt(this.pos)!;
+        pushUtf8(cp);
+        text += String.fromCodePoint(cp);
+        this.pos += cp > 0xffff ? 2 : 1;
         continue;
       }
       this.pos++;
@@ -400,58 +421,40 @@ class RawJsonParser {
       const esc = this.src[this.pos]!;
       switch (esc) {
         case '"':
-          out += '"';
+          pushUnit(0x22);
           this.pos++;
           break;
         case "\\":
-          out += "\\";
+          pushUnit(0x5c);
           this.pos++;
           break;
         case "/":
-          out += "/";
+          pushUnit(0x2f);
           this.pos++;
           break;
         case "b":
-          out += "\b";
+          pushUnit(0x08);
           this.pos++;
           break;
         case "f":
-          out += "\f";
+          pushUnit(0x0c);
           this.pos++;
           break;
         case "n":
-          out += "\n";
+          pushUnit(0x0a);
           this.pos++;
           break;
         case "r":
-          out += "\r";
+          pushUnit(0x0d);
           this.pos++;
           break;
         case "t":
-          out += "\t";
+          pushUnit(0x09);
           this.pos++;
           break;
         case "u": {
           this.pos++;
-          const u1 = this.readHex4();
-          if (u1 >= 0xd800 && u1 <= 0xdbff) {
-            if (
-              this.pos + 5 < this.src.length &&
-              this.src[this.pos] === "\\" &&
-              this.src[this.pos + 1] === "u"
-            ) {
-              const saved = this.pos;
-              this.pos += 2;
-              const u2 = this.readHex4();
-              if (u2 >= 0xdc00 && u2 <= 0xdfff) {
-                const cp = 0x10000 + ((u1 - 0xd800) << 10) + (u2 - 0xdc00);
-                out += String.fromCodePoint(cp);
-                break;
-              }
-              this.pos = saved;
-            }
-          }
-          out += String.fromCharCode(u1);
+          pushUnit(this.readHex4());
           break;
         }
         default:
@@ -498,7 +501,7 @@ class RawJsonParser {
 
     if (this.pos < this.src.length && this.src[this.pos] === ".") {
       this.pos++;
-      const fracStart = this.pos;
+      // C++ consumeWhile(digit) allows zero digits after the decimal point.
       while (
         this.pos < this.src.length &&
         this.src[this.pos]! >= "0" &&
@@ -506,7 +509,6 @@ class RawJsonParser {
       ) {
         this.pos++;
       }
-      if (this.pos === fracStart) this.fail("expected fraction digits after '.'");
     }
 
     if (
@@ -661,16 +663,10 @@ class AnnotatedEnumHandler implements JsonCustomHandler {
 
   decode(_codec: JsonCodec, input: JsonAst): DynamicValueReader {
     if (input.which === "number") {
-      assertCapnp(
-        Number.isInteger(input.value) &&
-          input.value >= 0 &&
-          input.value <= 0xffff,
-        "JSON",
-        `invalid enum number ${input.value}`,
-      );
-      return DynamicValueReader.fromEnum(
-        new DynamicEnum(this.schema, input.value),
-      );
+      assertCapnp(Number.isFinite(input.value), "JSON", `invalid enum number ${input.value}`);
+      // static_cast<uint16_t> truncates toward zero, then wraps modulo 2^16.
+      const raw = Math.trunc(input.value) & 0xffff;
+      return DynamicValueReader.fromEnum(new DynamicEnum(this.schema, raw));
     }
     assertCapnp(input.which === "string", "JSON", "expected string or number for enum");
     const ord = this.nameToOrdinal.get(input.value);
@@ -1042,13 +1038,8 @@ class AnnotatedStructHandler implements JsonCustomHandler {
         if (targetField) {
           output.clear(targetField);
           unionsSeen.add(key);
-        } else {
-          assertCapnp(
-            !codec.getRejectUnknownFields(),
-            "JSON",
-            `unknown union tag '${value.value}'`,
-          );
         }
+        // An unknown discriminator is ignored, including under rejectUnknownFields.
         return true;
       }
       case "flattenedFromUnion": {
@@ -1057,7 +1048,11 @@ class AnnotatedStructHandler implements JsonCustomHandler {
         const variant = output.which();
         if (!variant) return true;
         const subHandler = this.fields[variant.index]!.flattenHandler;
-        if (!subHandler) return true;
+        assertCapnp(
+          subHandler != null,
+          "JSON",
+          "expected flattened union field",
+        );
         return subHandler.decodeProperty(
           codec,
           name.slice(route.prefixLength),
@@ -1438,6 +1433,10 @@ export class JsonCodec {
       return;
     }
 
+    if (fType.isText() && value.which === "string" && value.bytes) {
+      output.setTextBytes(field, value.bytes);
+      return;
+    }
     output.set(field, this._decodeValueAst(value, fType, output.sb.builder));
   }
 
@@ -1454,6 +1453,8 @@ export class JsonCodec {
         assertCapnp(item.which === "array", "JSON", "expected nested JSON array");
         const sub = lb.init(i, item.value.length).asList();
         this.decodeArrayIntoList(item.value, sub);
+      } else if (elemType.isText() && item.which === "string" && item.bytes) {
+        lb.setTextBytes(i, item.bytes);
       } else {
         lb.set(i, this._decodeValueAst(item, elemType, lb.builder));
       }

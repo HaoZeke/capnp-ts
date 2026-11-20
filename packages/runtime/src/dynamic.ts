@@ -1590,6 +1590,14 @@ export class DynamicStructBuilder {
     );
   }
 
+  /** Write text bytes plus a trailing NUL, and select the field's union arm. */
+  setTextBytes(fieldOrName: StructField | string, bytes: Uint8Array): void {
+    const field = this.resolveField(fieldOrName);
+    assertCapnp(field.getType().isText(), "KIND", `expected text field '${field.name}'`);
+    this.setInUnion(field);
+    this.sb.setTextBytes(field.offset, bytes);
+  }
+
   set(fieldOrName: StructField | string, rawInput: DynamicSetValue): void {
     const field = this.resolveField(fieldOrName);
     this.setInUnion(field);
@@ -2743,6 +2751,13 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
     return this.word + index;
   }
 
+  setTextBytes(index: number, bytes: Uint8Array): void {
+    const elemType = this.schema.getElementType();
+    assertCapnp(elemType.isText(), "KIND", "expected a list of text");
+    const slot = new BuilderPointer(this.builder, this.seg, this.pointerWord(index));
+    writeTextBytesToSlot(this.builder, slot, bytes);
+  }
+
   set(index: number, rawInput: DynamicSetValue): void {
     this.checkIndex(index);
     const elemType = this.schema.getElementType();
@@ -3036,15 +3051,22 @@ function writeTextToSlot(
   slot: BuilderPointer,
   text: string,
 ): void {
-  const enc = new TextEncoder().encode(text);
-  assertTextBlobSize(enc.length, "text blob too big");
-  const nbytes = enc.length + 1;
+  writeTextBytesToSlot(builder, slot, new TextEncoder().encode(text));
+}
+
+function writeTextBytesToSlot(
+  builder: MessageBuilder,
+  slot: BuilderPointer,
+  bytes: Uint8Array,
+): void {
+  assertTextBlobSize(bytes.length, "text blob too big");
+  const nbytes = bytes.length + 1;
   const nwords = bytesToWords(nbytes);
   const { seg, word } = builder.allocWords(nwords);
   const data = builder.segBytes(seg);
   const base = word * WORD_BYTES;
   data.fill(0, base, base + nwords * WORD_BYTES);
-  data.set(enc, base);
+  data.set(bytes, base);
   builder.writeListPtr(slot.seg, slot.word, seg, word, ElemSize.Byte, nbytes);
 }
 
