@@ -3,12 +3,18 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   CapnpError,
+  DynamicStruct,
   ElemSize,
   Message,
   PtrKind,
+  SchemaLoader,
   canonicalize,
+  decodeText,
   isCanonical,
   storeU32,
   storeU64,
@@ -17,6 +23,15 @@ import {
   wpMakeList,
   wpMakeStruct,
 } from "../src/index.ts";
+
+const goldenDir = join(dirname(fileURLToPath(import.meta.url)), "golden");
+const sink = SchemaLoader.fromCgr(
+  new Uint8Array(readFileSync(join(goldenDir, "dynamic-kitchen.cgr.bin"))),
+).resolveStruct("KitchenSink");
+
+function readText(src: string) {
+  return DynamicStruct.fromMessage(decodeText(src, sink), sink);
+}
 
 function words(...ws: bigint[]): Uint8Array {
   const b = new Uint8Array(ws.length * 8);
@@ -213,5 +228,43 @@ describe("canonical form against capnp 1.4.0", () => {
   test("C-03 a null root canonicalizes to the empty-struct pointer", () => {
     const out = canonicalize(Message.fromSegments([words(0n)]));
     expect(out).toEqual(words(wpMakeStruct(-1, 0, 0)));
+  });
+});
+
+describe("text format against capnp 1.4.0", () => {
+  test("T-01 a single unnamed parenthesized value unwraps", () => {
+    expect(readText("(i32 = (5))").get("i32").asInt32()).toBe(5);
+    expect(readText("(i32 = ((5)))").get("i32").asInt32()).toBe(5);
+    expect(readText("((i8 = 1))").get("i8").asInt8()).toBe(1);
+    expect(readText("((i8 = 1),)").get("i8").asInt8()).toBe(1);
+    const nums = readText("(defaultNums = [(1), (2)])").get("defaultNums").asList();
+    expect(nums.get(0).asInt32()).toBe(1);
+    expect(nums.get(1).asInt32()).toBe(2);
+    expect(readText('(title = ("hi"))').get("title").asText()).toBe("hi");
+    expect(readText("(priority = (high))").get("priority").asEnum().getRaw()).toBe(2);
+    expect(readText("(flag = (true))").get("flag").asBool()).toBe(true);
+  });
+
+  test("T-02 later field and union assignments win", () => {
+    expect(readText("(i32 = 1, i32 = 2)").get("i32").asInt32()).toBe(2);
+    const u = readText('(none = void, note = "both")');
+    expect(u.which()?.name).toBe("note");
+    expect(u.get("note").asText()).toBe("both");
+  });
+
+  test("T-03 a non-tuple group value fills the first field", () => {
+    expect(readText('(meta = "ada")').get("meta").asStruct().get("author").asText()).toBe("ada");
+    expect(() => readText("(meta = 42)")).toThrow(/expected group/);
+  });
+
+  test("T-04 a parenthesized integer is a type mismatch for an enum", () => {
+    expect(() => readText("(priority = (77))")).toThrow(/Type mismatch/);
+    expect(() => readText("(priority = 77)")).toThrow(/Type mismatch/);
+  });
+
+  test("T-05 single quotes are a parse error and backticks stay", () => {
+    expect(() => readText("(title = 'abc')")).toThrow(/Parse error/);
+    expect(() => readText("(raw = 0x'dead')")).toThrow(/Parse error/);
+    expect(readText("(title = `hello\n)").get("title").asText()).toBe("hello\n");
   });
 });

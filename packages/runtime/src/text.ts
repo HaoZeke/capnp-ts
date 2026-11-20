@@ -517,7 +517,10 @@ class TextParser {
     if (c === 0x5b /* '[' */) {
       return this.parseList();
     }
-    if (c === 0x22 /* '"' */ || c === 0x27 /* '\'' */ || c === 0x60 /* '`' */) {
+    if (c === 0x27 /* '\'' */) {
+      this.fail("Parse error.");
+    }
+    if (c === 0x22 /* '"' */ || c === 0x60 /* '`' */) {
       return this.parseStringChain(false);
     }
     if (
@@ -526,6 +529,7 @@ class TextParser {
       (this.src[this.pos + 1] === "x" || this.src[this.pos + 1] === "X") &&
       (this.src[this.pos + 2] === '"' || this.src[this.pos + 2] === "'")
     ) {
+      if (this.src[this.pos + 2] === "'") this.fail("Parse error.");
       return this.parseHexBlobChain();
     }
     if (
@@ -602,6 +606,10 @@ class TextParser {
       this.fail("expected ',' or ')' in struct literal");
     }
 
+    // A parenthesized single unnamed value is that value, not a tuple.
+    if (entries.length === 1 && entries[0]!.name === null) {
+      return entries[0]!.value;
+    }
     return { kind: "tuple", entries };
   }
 
@@ -754,7 +762,8 @@ class TextParser {
       this.skipSpaceAndComments();
       if (this.pos >= this.src.length) break;
       const ch = this.src[this.pos];
-      if (ch === '"' || ch === "'") {
+      if (ch === "'") this.fail("Parse error.");
+      if (ch === '"') {
         chunks.push(this.readQuotedBytes(ch));
         continue;
       }
@@ -775,9 +784,9 @@ class TextParser {
         this.pos + 2 < this.src.length &&
         this.src[this.pos] === "0" &&
         (this.src[this.pos + 1] === "x" || this.src[this.pos + 1] === "X") &&
-        (this.src[this.pos + 2] === '"' || this.src[this.pos + 2] === "'")
+        this.src[this.pos + 2] === '"'
       ) {
-        const quote = this.src[this.pos + 2]!;
+        const quote = '"';
         this.pos += 3;
         const bytes: number[] = [];
         while (this.pos < this.src.length && this.src[this.pos] !== quote) {
@@ -959,8 +968,6 @@ function fillStructFromAst(output: DynamicStructBuilder, ast: TextAst): void {
     `expected struct tuple '(...)' for ${output.getSchema().getShortDisplayName()}`,
   );
   const schema = output.getSchema();
-  const seenFields = new Set<number>();
-  let seenUnion = false;
 
   for (const entry of ast.entries) {
     assertCapnp(
@@ -974,24 +981,42 @@ function fillStructFromAst(output: DynamicStructBuilder, ast: TextAst): void {
       "TEXT",
       `struct '${schema.getShortDisplayName()}' has no field '${entry.name}'`,
     );
-    assertCapnp(
-      !seenFields.has(field.index),
-      "TEXT",
-      `duplicate assignment to field '${field.name}'`,
-    );
-    seenFields.add(field.index);
-
-    if (field.isUnionMember) {
-      assertCapnp(
-        !seenUnion,
-        "TEXT",
-        `multiple union members initialized in '${schema.getShortDisplayName()}'`,
-      );
-      seenUnion = true;
-    }
-
+    // Later assignments win, including a second union arm.
     assignFieldFromAst(output, field, entry.value);
   }
+}
+
+function scalarMatchesField(ast: TextAst, field: StructField): boolean {
+  if (field.isGroup()) return false;
+  const t = field.getType();
+  if (t.isStruct() || t.isList() || t.isAnyPointer() || t.isInterface()) return false;
+  if (ast.kind === "int") {
+    return (
+      t.isInt8() ||
+      t.isInt16() ||
+      t.isInt32() ||
+      t.isInt64() ||
+      t.isUInt8() ||
+      t.isUInt16() ||
+      t.isUInt32() ||
+      t.isUInt64() ||
+      t.isFloat32() ||
+      t.isFloat64()
+    );
+  }
+  if (ast.kind === "float") return t.isFloat32() || t.isFloat64();
+  if (ast.kind === "ident") {
+    if (t.isBool()) return ast.name === "true" || ast.name === "false";
+    if (t.isVoid()) return ast.name === "void";
+    if (t.isEnum()) return true;
+    if (t.isFloat32() || t.isFloat64()) return ast.name === "inf" || ast.name === "nan";
+    return false;
+  }
+  if (ast.kind === "bytes") {
+    if (t.isText()) return !ast.isHexBlob;
+    if (t.isData()) return true;
+  }
+  return false;
 }
 
 function assignFieldFromAst(
@@ -1002,8 +1027,16 @@ function assignFieldFromAst(
   const t = field.getType();
   if (field.isGroup()) {
     const grp = output.init(field).asStruct();
-    fillStructFromAst(grp, ast);
-    return;
+    if (ast.kind === "tuple") {
+      fillStructFromAst(grp, ast);
+      return;
+    }
+    const first = grp.getSchema().getFields()[0];
+    if (first && scalarMatchesField(ast, first)) {
+      assignFieldFromAst(grp, first, ast);
+      return;
+    }
+    throw new CapnpError("TEXT", "Type mismatch; expected group.");
   }
 
   if (t.isStruct()) {
@@ -1125,19 +1158,9 @@ function evalScalarOrBlobAst(ast: TextAst, type: Type): DynamicValueReader {
           DynamicEnum.fromEnumerant(enumSchema.getEnumerantByName(ast.name)),
         );
       }
-      // Also support `(rawOrdinal)` emitted when printing unrecognized ordinals.
-      if (
-        ast.kind === "tuple" &&
-        ast.entries.length === 1 &&
-        ast.entries[0]!.name === null &&
-        ast.entries[0]!.value.kind === "int"
-      ) {
-        const ord = Number(ast.entries[0]!.value.value);
-        return DynamicValueReader.fromEnum(new DynamicEnum(enumSchema, ord));
-      }
       throw new CapnpError(
         "TEXT",
-        `expected enumerant identifier for ${enumSchema.getShortDisplayName()}`,
+        `Type mismatch; expected ${enumSchema.getShortDisplayName()}.`,
       );
     }
     default:

@@ -102,7 +102,7 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
         title = "part1-" "part2-" \`raw line
         ,
         raw = 0x"de ad\nbe ef",
-        priority = (77),
+        priority = high,
         matrix = [[1, 2,], [],],
       ) # trailing comment
     `;
@@ -116,9 +116,11 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
     expect(parsed.get("raw").asData()).toEqual(
       new Uint8Array([0xde, 0xad, 0xbe, 0xef]),
     );
-    expect(parsed.get("priority").asEnum().getRaw()).toBe(77);
-    expect(parsed.get("priority").asEnum().getEnumerant()).toBeNull();
+    expect(parsed.get("priority").asEnum().getEnumerant()?.name).toBe("high");
+    // Unknown ordinals still print as `(77)`. Cap'n Proto 1.4.0 rejects that
+    // form on input (`Type mismatch`).
     expect(stringify(new DynamicEnum(prioSchema, 77))).toBe("(77)");
+    expect(() => decodeText("(priority = (77))", sinkSchema)).toThrow(CapnpError);
 
     // Stream splitting with comments and parens inside strings
     const stream = `
@@ -144,9 +146,10 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
     expect(() => decodeText("(unknownField = 1)", sinkSchema)).toThrow(
       CapnpError,
     );
-    expect(() => decodeText("(none = void, note = \"both\")", sinkSchema)).toThrow(
-      CapnpError,
-    );
+    const lastUnion = decodeText('(none = void, note = "both")', sinkSchema);
+    expect(
+      DynamicStruct.fromMessage(lastUnion, sinkSchema).get("note").asText(),
+    ).toBe("both");
     expect(() => decodeText("(i8 = 999)", sinkSchema)).toThrow(CapnpError);
     for (const badText of [
       "(i8 = +1)",
