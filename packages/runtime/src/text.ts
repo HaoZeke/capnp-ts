@@ -1008,15 +1008,35 @@ function scalarMatchesField(ast: TextAst, field: StructField): boolean {
   if (ast.kind === "ident") {
     if (t.isBool()) return ast.name === "true" || ast.name === "false";
     if (t.isVoid()) return ast.name === "void";
-    if (t.isEnum()) return true;
     if (t.isFloat32() || t.isFloat64()) return ast.name === "inf" || ast.name === "nan";
     return false;
   }
-  if (ast.kind === "bytes") {
-    if (t.isText()) return !ast.isHexBlob;
-    if (t.isData()) return true;
-  }
+  if (ast.kind === "bytes") return t.isText() && !ast.isHexBlob;
   return false;
+}
+
+/**
+ * `ValueTranslator::compileValue`: a value that is not a tuple may stand in
+ * for the first field of the struct that is expected.
+ */
+function fillStructOrFirstField(
+  output: DynamicStructBuilder,
+  ast: TextAst,
+): void {
+  if (ast.kind === "tuple") {
+    fillStructFromAst(output, ast);
+    return;
+  }
+  const schema = output.getSchema();
+  const first = schema.getFields()[0];
+  if (first && scalarMatchesField(ast, first)) {
+    assignFieldFromAst(output, first, ast);
+    return;
+  }
+  throw new CapnpError(
+    "TEXT",
+    `Type mismatch; expected ${schema.getShortDisplayName()}.`,
+  );
 }
 
 function assignFieldFromAst(
@@ -1041,7 +1061,7 @@ function assignFieldFromAst(
 
   if (t.isStruct()) {
     const sub = output.init(field).asStruct();
-    fillStructFromAst(sub, ast);
+    fillStructOrFirstField(sub, ast);
     return;
   }
 
@@ -1063,7 +1083,7 @@ function fillListFromAst(
   for (let i = 0; i < items.length; i++) {
     const item = items[i]!;
     if (elemType.isStruct()) {
-      fillStructFromAst(lb.get(i).asStruct(), item);
+      fillStructOrFirstField(lb.get(i).asStruct(), item);
     } else if (elemType.isList()) {
       assertCapnp(item.kind === "list", "TEXT", "expected nested '[...]' list");
       const sub = lb.init(i, item.items.length).asList();

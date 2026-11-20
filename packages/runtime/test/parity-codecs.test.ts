@@ -272,6 +272,21 @@ describe("text format against capnp 1.4.0", () => {
     expect(() => readText("(meta = 42)")).toThrow(/expected group/);
   });
 
+  test("T-03 a non-tuple struct or list element value fills the first field", () => {
+    expect(readText('(defaultTag = "k")').get("defaultTag").asStruct().get("key").asText()).toBe("k");
+    expect(readText('(defaultTag = ("k"))').get("defaultTag").asStruct().get("key").asText()).toBe(
+      "k",
+    );
+    const tags = readText('(tags = ["a", (key = "b", code = 2), "c"])').get("tags").asList();
+    expect(tags.get(0).asStruct().get("key").asText()).toBe("a");
+    expect(tags.get(1).asStruct().get("code").asInt32()).toBe(2);
+    expect(tags.get(2).asStruct().get("key").asText()).toBe("c");
+    expect(() => readText("(defaultTag = 5)")).toThrow(/Type mismatch; expected/);
+    expect(() => readText('(defaultTag = 0x"ff")')).toThrow(CapnpError);
+    expect(() => readText("(defaultTag = [1])")).toThrow(CapnpError);
+    expect(() => readText("(tags = [5])")).toThrow(/Type mismatch/);
+  });
+
   test("T-04 a parenthesized integer is a type mismatch for an enum", () => {
     expect(() => readText("(priority = (77))")).toThrow(/Type mismatch/);
     expect(() => readText("(priority = 77)")).toThrow(/Type mismatch/);
