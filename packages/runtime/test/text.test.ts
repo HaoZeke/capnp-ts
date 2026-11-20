@@ -26,6 +26,7 @@ import {
   splitTextMessages,
   stringify,
 } from "../src/index.ts";
+import { readMessagesInFormat } from "../src/cli.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..", "..");
@@ -286,6 +287,20 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
     expect(title('(title = "\\623")')).toEqual([0x93]);
     expect(title('(title = "\\777x")')).toEqual([0xff, 0x78]);
     expect(title('(title = "\\400")')).toEqual([0x00]);
+  });
+
+  test("text streams split on parentheses only, even inside strings, like capnp 1.4.0", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const sinkSchema = loader.resolveStruct("KitchenSink");
+    const stream = (text: string) =>
+      readMessagesInFormat(new TextEncoder().encode(text), "text", sinkSchema);
+    expect(splitTextMessages("(title = \"it's\")(i32 = 2)")).toEqual([
+      '(title = "it\'s")',
+      "(i32 = 2)",
+    ]);
+    expect(stream("(title = \"it's\")(i32 = 2)").length).toBe(2);
+    expect(() => stream('(title = "B)\\0(")')).toThrow(CapnpError);
+    expect(() => stream('(title = "a)b(")')).toThrow(CapnpError);
   });
 
   test("formatKjFloat32 tries 6 then 8 significant digits like kj::FloatToBuffer", () => {

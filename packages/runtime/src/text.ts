@@ -1499,11 +1499,7 @@ export function splitTextMessages(input: string): string[] {
   let state:
     | "normal"
     | "comment"
-    | "quote"
-    | "quoteEscape"
-    | "dquote"
-    | "dquoteEscape"
-    | "backtick" = "normal";
+    = "normal";
   let depth = 0;
   let sawClose = false;
   let start = 0;
@@ -1514,12 +1510,6 @@ export function splitTextMessages(input: string): string[] {
       case "normal":
         if (c === "#") {
           state = "comment";
-        } else if (c === "'") {
-          state = "quote";
-        } else if (c === '"') {
-          state = "dquote";
-        } else if (c === "`") {
-          state = "backtick";
         } else if (c === "(") {
           if (depth === 0 && sawClose) {
             messages.push(input.slice(start, i));
@@ -1538,23 +1528,6 @@ export function splitTextMessages(input: string): string[] {
         break;
       case "comment":
         if (c === "\n") state = "normal";
-        break;
-      case "quote":
-        if (c === "'") state = "normal";
-        else if (c === "\\") state = "quoteEscape";
-        break;
-      case "quoteEscape":
-        state = "quote";
-        break;
-      case "dquote":
-        if (c === '"') state = "normal";
-        else if (c === "\\") state = "dquoteEscape";
-        break;
-      case "dquoteEscape":
-        state = "dquote";
-        break;
-      case "backtick":
-        if (c === "\n" || c === "\r") state = "normal";
         break;
     }
   }
