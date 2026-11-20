@@ -158,8 +158,7 @@ function copyList(
     if (n > 0) {
       ({ seg: listSeg, word: listStart } = builder.allocWords(n));
     } else {
-      listSeg = slot.seg;
-      listStart = slot.word + 1;
+      ({ seg: listSeg, word: listStart } = builder.emptyListTarget(slot.seg));
     }
     builder.writeListPtr(
       slot.seg,
@@ -200,8 +199,7 @@ function copyList(
       startWord * WORD_BYTES,
     );
   } else {
-    startSeg = slot.seg;
-    startWord = slot.word + 1;
+    ({ seg: startSeg, word: startWord } = builder.emptyListTarget(slot.seg));
   }
   builder.writeListPtr(slot.seg, slot.word, startSeg, startWord, esize, n);
 }

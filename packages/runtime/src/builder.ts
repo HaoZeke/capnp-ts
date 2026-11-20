@@ -274,6 +274,14 @@ export class MessageBuilder {
     return { seg: this.segs.length - 1, word: 0 };
   }
 
+  /**
+   * Target of a zero-word list body. Like C++ `allocate(0)`, it is the
+   * current end of the slot's segment, not the word after the slot.
+   */
+  emptyListTarget(slotSeg: number): { seg: number; word: number } {
+    return { seg: slotSeg, word: this.segs[slotSeg]!.words };
+  }
+
   /** Allocate `n` words inside a specific segment (grow in place). */
   private allocIn(seg: number, n: number): number | null {
     const s = this.segs[seg];
@@ -697,8 +705,7 @@ export class StructBuilder {
       data.fill(0, base, base + nwords * WORD_BYTES);
       data.set(bytes, base);
     } else {
-      startSeg = slot.seg;
-      startWord = slot.word + 1;
+      ({ seg: startSeg, word: startWord } = this.builder.emptyListTarget(slot.seg));
     }
     this.builder.writeListPtr(
       slot.seg,
@@ -765,8 +772,7 @@ export class StructBuilder {
     if (count) {
       ({ seg: listSeg, word: listStart } = this.builder.allocWords(count));
     } else {
-      listSeg = slot.seg;
-      listStart = slot.word + 1;
+      ({ seg: listSeg, word: listStart } = this.builder.emptyListTarget(slot.seg));
     }
     this.builder.writeListPtr(
       slot.seg,
@@ -802,8 +808,7 @@ export class StructBuilder {
       data.fill(0, base, base + nwords * WORD_BYTES);
       if (items && nbytes) data.set(items.subarray(0, nbytes), base);
     } else {
-      startSeg = slot.seg;
-      startWord = slot.word + 1;
+      ({ seg: startSeg, word: startWord } = this.builder.emptyListTarget(slot.seg));
     }
     this.builder.writeListPtr(
       slot.seg,
