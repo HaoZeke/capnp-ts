@@ -159,9 +159,9 @@ export class Message {
 
   root(): Ptr {
     assertCapnp(this.segs.length > 0, "ARG");
-    // Nesting level 0 (capnp-fortran / encoding.html): depth_limit=0 still
-    // allows the root object; the first getP uses depth 1 and fails.
-    return resolvePtr(this, 0, 0, 0);
+    // C++ charges the root word in MessageReader::getRootInternal and again
+    // in PointerReader::getRoot. Nesting limit 0 rejects this read.
+    return resolvePtr(this, 0, 0, 0, 2);
   }
 
   /** Word count of segment `seg`. */
@@ -289,10 +289,18 @@ function primitiveListWords(count: number, stepBits: number): bigint {
   return (bits + 63n) / 64n;
 }
 
-function resolvePtr(m: Message, seg: number, word: number, depth: number): Ptr {
+function resolvePtr(
+  m: Message,
+  seg: number,
+  word: number,
+  depth: number,
+  pointerWords: number,
+): Ptr {
   boundsWord(m, seg, word);
-  m.charge(1);
-  return resolveWord(m, seg, word, readWord(m, seg, word), depth);
+  // Child pointer words are already inside a charged struct or list. The root
+  // word is charged twice, matching getRootInternal plus PointerReader::getRoot.
+  if (pointerWords > 0) m.charge(pointerWords);
+  return resolveWord(m, seg, word, readWord(m, seg, word), depth, false);
 }
 
 function resolveWord(
@@ -301,27 +309,35 @@ function resolveWord(
   word: number,
   w: bigint,
   depth: number,
+  fromFar: boolean,
 ): Ptr {
-  // Absolute nesting level (capnp-fortran): root = 0; each far hop / getP +1.
-  if (depth > m.depthLimit) throw new CapnpError("DEPTH");
-  if (w === 0n) return Ptr.nullPtr(m, seg, word, depth);
+  // nestingLimit is decremented once per struct or list pointer, including the root.
+  if (depth >= m.depthLimit) throw new CapnpError("DEPTH");
+  // A far landing pad of all zeros is an empty struct. Null is only a direct zero word.
+  if (w === 0n && !fromFar) return Ptr.nullPtr(m, seg, word, depth);
 
   const kind = wpKind(w);
   if (kind === WireKind.Far) {
+    // followFars is one hop. A second far word is a non-struct/non-list pointer.
+    if (fromFar) {
+      throw new CapnpError(
+        "KIND",
+        "Schema mismatch: Message contains non-struct pointer where struct pointer was expected.",
+      );
+    }
     const tseg = wpFarSeg(w);
     const toff = wpFarOff(w);
     if (wpFarTwo(w)) {
-      // Double-far counts as one nesting step for the landing object.
-      if (depth + 1 > m.depthLimit) throw new CapnpError("DEPTH");
+      // Far hops do not consume nesting depth. The landing object stays at `depth`.
       boundsWord(m, tseg, toff);
       boundsWord(m, tseg, toff + 1);
       m.charge(2);
       const pad = readWord(m, tseg, toff);
       const tag = readWord(m, tseg, toff + 1);
-      assertCapnp(wpKind(pad) === WireKind.Far && !wpFarTwo(pad), "KIND");
+      // C++ checks kind == FAR and does not reject a landing pad with the double-far bit set.
+      assertCapnp(wpKind(pad) === WireKind.Far, "KIND");
       const cseg = wpFarSeg(pad);
       const coff = wpFarOff(pad);
-      const landDepth = depth + 1;
       if (wpKind(tag) === WireKind.Struct) {
         const dwords = wpStructDwords(tag);
         const pwords = wpStructPwords(tag);
@@ -333,16 +349,16 @@ function resolveWord(
           assertCapnp(cseg >= 0 && cseg < m.segs.length, "SEGMENT");
         }
         chargeWords(m, dwords + pwords);
-        return Ptr.struct(m, cseg, coff, dwords, pwords, landDepth);
+        return Ptr.struct(m, cseg, coff, dwords, pwords, depth);
       }
       if (wpKind(tag) === WireKind.List) {
-        return finishList(m, cseg, coff, tag, landDepth);
+        return finishList(m, cseg, coff, tag, depth);
       }
       throw new CapnpError("KIND");
     }
     boundsWord(m, tseg, toff);
     m.charge(1);
-    return resolveWord(m, tseg, toff, readWord(m, tseg, toff), depth + 1);
+    return resolveWord(m, tseg, toff, readWord(m, tseg, toff), depth, true);
   }
 
   if (kind === WireKind.Struct) {
@@ -643,6 +659,7 @@ export class Ptr {
       this.seg,
       this.word + this.dwords + ptrIndex,
       this.depth + 1,
+      0,
     );
   }
 
@@ -687,6 +704,7 @@ export class Ptr {
         this.seg,
         this.word + index,
         this.depth + 1,
+        0,
       );
     }
     if (this.esize === ElemSize.Composite) {
