@@ -337,6 +337,40 @@ describe("queued calls", () => {
     expect(param.disposed).toBe(1);
     resolve(Client.local(new Counter()));
   });
+
+  test("a pipelined cap keeps a queued call alive after its promise is released", async () => {
+    let resolve!: (c: Client) => void;
+    const queued = Client.fromPromise(new Promise<Client>((r) => (resolve = r)));
+    const factory = new Factory();
+    const pending = queued.call(IFACE, 0);
+    const counter = pending.pipeline(0);
+    pending.release();
+    const out = counter.call(IFACE, 0, arg(4));
+    resolve(Client.local(factory));
+    expect((await out).content.getU32(0)).toBe(5);
+    expect(factory.made.length).toBe(1);
+  });
+
+  test("a queued call is still canceled when its pipelined caps are dropped too", () => {
+    let resolve!: (c: Client) => void;
+    const queued = Client.fromPromise(new Promise<Client>((r) => (resolve = r)));
+    const param = new Counter();
+    const factory = new Factory();
+    const pending = queued.call(
+      IFACE,
+      0,
+      (p, cb) => cb.setCap(p, 0, Client.local(param).hook),
+      0,
+      1,
+    );
+    const counter = pending.pipeline(0);
+    pending.release();
+    expect(param.disposed).toBe(0);
+    counter.hook.release();
+    expect(param.disposed).toBe(1);
+    resolve(Client.local(factory));
+    expect(factory.made.length).toBe(0);
+  });
 });
 
 describe("streaming calls on a local server", () => {

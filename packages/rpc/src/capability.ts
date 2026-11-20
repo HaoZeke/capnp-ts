@@ -712,21 +712,9 @@ export class QueuedClient extends RefHook implements ClientHook {
     const outer = new CallState();
     const inner = new Settle<CallState>();
     let canceledBeforeSend = false;
-    outer.pipeline = {
-      getPipelinedCap: (ops) => {
-        if (inner.state === "ok") return inner.value.pipeline.getPipelinedCap(ops);
-        if (inner.state === "err") return new BrokenClient(inner.error);
-        const eventual = new Settle<ClientHook>();
-        inner.onSettled((s) => {
-          eventual.resolve(
-            s.state === "ok"
-              ? s.value.pipeline.getPipelinedCap(ops)
-              : new BrokenClient(s.error),
-          );
-        });
-        return new QueuedClient(eventual);
-      },
-    };
+    let sent = false;
+    let completionReleased = false;
+    let pipelineRefs = 0;
     // Keep this QueuedClient (and any underlying pipeline ref) alive until
     // the queued call is forwarded or canceled.
     this.addRef();
@@ -736,18 +724,49 @@ export class QueuedClient extends RefHook implements ClientHook {
       releasedSelf = true;
       this.release();
     };
+    // The queued call is only dropped once neither the caller's result
+    // promise nor any capability taken from its pipeline still wants it,
+    // as in capnp-C++ where QueuedClient::call() forks the two apart.
+    const cancelIfUnwanted = (): void => {
+      if (sent || canceledBeforeSend || !completionReleased || pipelineRefs > 0) return;
+      canceledBeforeSend = true;
+      params.release();
+      const err = new RpcError("canceled");
+      inner.reject(err);
+      outer.result.reject(err);
+      releaseSelf();
+    };
+    outer.pipeline = {
+      getPipelinedCap: (ops) => {
+        if (inner.state === "ok") return inner.value.pipeline.getPipelinedCap(ops);
+        if (inner.state === "err") return new BrokenClient(inner.error);
+        const eventual = new Settle<ClientHook>();
+        pipelineRefs++;
+        let dropped = false;
+        const dropPipelineRef = (): void => {
+          if (dropped) return;
+          dropped = true;
+          pipelineRefs--;
+          cancelIfUnwanted();
+        };
+        inner.onSettled((s) => {
+          eventual.resolve(
+            s.state === "ok"
+              ? s.value.pipeline.getPipelinedCap(ops)
+              : new BrokenClient(s.error),
+          );
+          dropPipelineRef();
+        });
+        return new QueuedClient(eventual, dropPipelineRef);
+      },
+    };
     outer.onRelease = () => {
-      if (this.redirect === undefined && !canceledBeforeSend) {
-        canceledBeforeSend = true;
-        params.release();
-        const err = new RpcError("canceled");
-        inner.reject(err);
-        outer.result.reject(err);
-        releaseSelf();
-      }
+      completionReleased = true;
+      cancelIfUnwanted();
     };
     this.eventual.onSettled(() => {
       if (canceledBeforeSend) return;
+      sent = true;
       const handle = this.redirect!.call(interfaceId, methodId, params, opts);
       inner.resolve(handle);
       handle.result.onSettled((s) => {
