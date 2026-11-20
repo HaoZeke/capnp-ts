@@ -195,6 +195,11 @@ export class CallState {
   pipeline!: PipelineHook;
   released = false;
   onRelease: (() => void) | undefined;
+  /**
+   * A server-side failure that escaped the call, such as `dispose` throwing
+   * while a result capability is dropped. The connection aborts.
+   */
+  onError: ((error: unknown) => void) | undefined;
   /** Bytes the call occupied on the wire, for flow control; zero when it never was sent. */
   wireSize = 0;
 
@@ -646,15 +651,29 @@ export class LocalClient extends RefHook implements ClientHook {
       isStreaming ||= r.streaming === true;
       if (r.allowCancellation) ctx.allowCancellation();
     }
+    const guard = (body: () => void): void => {
+      try {
+        body();
+      } catch (e) {
+        if (state.onError === undefined) throw e;
+        try {
+          state.onError(e);
+        } catch {
+          // Aborting the connection can itself drop capabilities.
+        }
+      }
+    };
     if (promise === undefined) {
-      finish();
+      guard(finish);
       return;
     }
     const done = promise.then(
-      () => finish(),
+      () => guard(finish),
       (e) => {
-        if (isStreaming) this.broken = toRpcError(e);
-        finish(e);
+        guard(() => {
+          if (isStreaming) this.broken = toRpcError(e);
+          finish(e);
+        });
       },
     );
     if (isStreaming) {

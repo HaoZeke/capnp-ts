@@ -776,6 +776,118 @@ describe("other incoming protocol errors", () => {
     }
   });
 
+  test("a redirected Finish reports resultsSentElsewhere before the next message when the call stops", () => {
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    const srv: RpcServer = {
+      dispatch(_i, _m, _p, _r, ctx) {
+        ctx.allowCancellation();
+        return gate.then(() => ctx.initResults(1, 0).setU32(0, 1));
+      },
+    };
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.b, srv);
+    pair.a.send(bootstrapFrame(0));
+    pair.a.send(
+      frame((root) => {
+        root.setU16(0, Message.call);
+        const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
+        call.setU32(0, 1);
+        call.setU64(8, IFACE);
+        writePromisedAnswer(call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS), {
+          answer: 0,
+        });
+        call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+        call.setU16(6, Call_sendResultsTo.yourself);
+      }),
+    );
+    pair.a.send(finishFrame(1, true));
+    pair.a.send(bootstrapFrame(2));
+    vat.pump();
+    expect(drainReturns(pair.a)).toEqual(["0:results", "1:other", "2:results"]);
+    release();
+  });
+
+  test("a redirected Finish waits for a call that refuses cancellation", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    const srv: RpcServer = {
+      dispatch(_i, _m, _p, _r, ctx) {
+        return gate.then(() => ctx.initResults(1, 0).setU32(0, 1));
+      },
+    };
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.b, srv);
+    pair.a.send(bootstrapFrame(0));
+    pair.a.send(
+      frame((root) => {
+        root.setU16(0, Message.call);
+        const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
+        call.setU32(0, 1);
+        call.setU64(8, IFACE);
+        writePromisedAnswer(call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS), {
+          answer: 0,
+        });
+        call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+        call.setU16(6, Call_sendResultsTo.yourself);
+      }),
+    );
+    pair.a.send(finishFrame(1, false));
+    pair.a.send(bootstrapFrame(2));
+    vat.pump();
+    expect(drainReturns(pair.a)).toEqual(["0:results", "2:results"]);
+    await nextTurn();
+    expect(pair.a.receive()).toBeNull();
+    release();
+    await gate;
+    await nextTurn();
+    expect(drainReturns(pair.a)).toEqual(["1:other"]);
+    expect(vat.disconnected).toBeUndefined();
+  });
+
+  test("a result capability whose dispose throws aborts when the call ends", async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (e: unknown): void => {
+      rejections.push(e);
+    };
+    process.on("unhandledRejection", onRejection);
+    try {
+      let release!: () => void;
+      const gate = new Promise<void>((res) => (release = res));
+      const child: RpcServer = {
+        dispatch() {},
+        dispose() {
+          throw new Error("dispose failed");
+        },
+      };
+      const srv: RpcServer = {
+        dispatch(_i, _m, _p, _r, ctx) {
+          ctx.allowCancellation();
+          return gate.then(() => {
+            const results = ctx.initResults(0, 1);
+            ctx.setResultCap(results, 0, Client.local(child).hook);
+          });
+        },
+      };
+      const pair = new MemoryTransportPair();
+      const vat = new RpcConnection(pair.b, srv);
+      pair.a.send(bootstrapFrame(0));
+      pair.a.send(callFrame(1, { answer: 0 }));
+      vat.pump();
+      pair.a.send(finishFrame(1, false));
+      vat.pump();
+      release();
+      await gate;
+      await nextTurn();
+      await nextTurn();
+      expect(vat.disconnected?.message).toContain("dispose failed");
+      expect(drainReturns(pair.a)).toContain("abort");
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+  });
+
   test("a deferred cancellation that throws aborts the connection instead of escaping", async () => {
     let release!: () => void;
     const gate = new Promise<void>((res) => (release = res));

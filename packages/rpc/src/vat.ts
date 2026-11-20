@@ -1562,6 +1562,10 @@ export class RpcConnection implements RemoteHost {
     );
     target.release();
     answer.call = state;
+    state.onError = (e) => {
+      const message = e instanceof Error ? e.message : String(e);
+      this.abort(new RpcError(message));
+    };
     state.result.onSettled((s) => this.completeAnswer(questionId, answer, s));
   }
 
@@ -1639,7 +1643,10 @@ export class RpcConnection implements RemoteHost {
       return;
     }
     if (answer.resultsElsewhere) {
-      // Redirected results wait for `Return.takeFromOtherQuestion` or `Finish`.
+      // A Finish that arrived while this call was still open is answered
+      // once the call settles. Until then the peer has not been told that
+      // the redirect is done.
+      if (answer.finished && !answer.returned) this.sendRedirectReturn(questionId, answer);
       return;
     }
     if (answer.onlyPromisePipeline) {
@@ -1700,12 +1707,21 @@ export class RpcConnection implements RemoteHost {
       if (answer.call.result.state !== "pending") answer.call.release();
       return;
     }
+    if (answer.resultsElsewhere) {
+      // `sendResultsTo.yourself` is a redirected task in C++. Finish drops
+      // it before the next message is read. `requireEarlyCancellationWorkaround`
+      // does not postpone that drop: the flag only covers a still-running
+      // direct call. A call that refuses cancellation keeps running, and
+      // `resultsSentElsewhere` follows when the call settles.
+      answer.call.release();
+      if (!answer.returned && answer.call.result.state !== "pending") {
+        this.sendRedirectReturn(questionId, answer);
+      }
+      return;
+    }
     const releaseCall = (): void => {
       // Releasing the call is what cancels it, if it is still running.
       answer.call.release();
-      if (answer.resultsElsewhere && !answer.returned) {
-        this.sendRedirectReturn(questionId, answer);
-      }
       if (answer.returned && this.answers.get(questionId) === answer) {
         this.answers.delete(questionId);
       }
