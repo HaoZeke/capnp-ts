@@ -18,13 +18,9 @@ import {
   bitsToF64,
   f32ToBits,
   f64ToBits,
-  loadF32,
-  loadF64,
   loadU16,
   loadU32,
   loadU64,
-  storeF32,
-  storeF64,
   storeU16,
   storeU32,
   storeU64,
@@ -373,11 +369,23 @@ export class DynamicValueReader {
   private readonly payload: unknown;
   /** The exact Text bytes (without the NUL), kept because Text need not be UTF-8. */
   private readonly textBytes: Uint8Array | undefined;
+  /** Exact IEEE-754 float64 bits when known, preserving NaN sign and payload. */
+  private readonly float64Bits: bigint | undefined;
+  /** Exact IEEE-754 float32 bits when known, preserving NaN sign and payload. */
+  private readonly float32Bits: number | undefined;
 
-  private constructor(type: DynamicValueType, payload: unknown, textBytes?: Uint8Array) {
+  private constructor(
+    type: DynamicValueType,
+    payload: unknown,
+    textBytes?: Uint8Array,
+    float64Bits?: bigint,
+    float32Bits?: number,
+  ) {
     this.type = type;
     this.payload = payload;
     this.textBytes = textBytes;
+    this.float64Bits = float64Bits;
+    this.float32Bits = float32Bits;
   }
 
   static readonly UNKNOWN = new DynamicValueReader(DynamicValueType.UNKNOWN, null);
@@ -401,6 +409,30 @@ export class DynamicValueReader {
 
   static fromFloat(v: number): DynamicValueReader {
     return new DynamicValueReader(DynamicValueType.FLOAT, v);
+  }
+
+  /** Float64 from exact IEEE-754 bits, preserving NaN sign and payload. */
+  static fromFloat64Bits(bits: bigint): DynamicValueReader {
+    const raw = BigInt.asUintN(64, bits);
+    return new DynamicValueReader(
+      DynamicValueType.FLOAT,
+      bitsToF64(raw),
+      undefined,
+      raw,
+      undefined,
+    );
+  }
+
+  /** Float32 from exact IEEE-754 bits, preserving NaN sign and payload. */
+  static fromFloat32Bits(bits: number): DynamicValueReader {
+    const raw = bits >>> 0;
+    return new DynamicValueReader(
+      DynamicValueType.FLOAT,
+      bitsToF32(raw),
+      undefined,
+      undefined,
+      raw,
+    );
   }
 
   static fromText(v: string): DynamicValueReader {
@@ -537,6 +569,23 @@ export class DynamicValueReader {
     return Math.fround(this.asFloat64());
   }
 
+  /** IEEE-754 binary32 bits, preserving NaN sign and narrowed payload when carried. */
+  asFloat32Bits(): number {
+    if (this.type === DynamicValueType.FLOAT) {
+      if (this.float32Bits !== undefined) return this.float32Bits;
+      if (this.float64Bits !== undefined) {
+        const exp = this.float64Bits & 0x7ff0000000000000n;
+        const frac = this.float64Bits & 0x000fffffffffffffn;
+        if (exp === 0x7ff0000000000000n && frac !== 0n) {
+          const sign = (this.float64Bits & 0x8000000000000000n) !== 0n ? 0x80000000 : 0;
+          const payload = Number(frac >> 29n) | 0x00400000;
+          return (sign | 0x7f800000 | payload) >>> 0;
+        }
+      }
+    }
+    return f32ToBits(this.asFloat32());
+  }
+
   asFloat64(): number {
     if (this.type === DynamicValueType.FLOAT) {
       return this.payload as number;
@@ -545,6 +594,23 @@ export class DynamicValueReader {
       return Number(this.payload as bigint);
     }
     throw new CapnpError("KIND", `expected float, got ${this.type}`);
+  }
+
+  /** IEEE-754 binary64 bits, preserving NaN sign and payload when carried. */
+  asFloat64Bits(): bigint {
+    if (this.type === DynamicValueType.FLOAT) {
+      if (this.float64Bits !== undefined) return this.float64Bits;
+      if (this.float32Bits !== undefined) {
+        const exp = this.float32Bits & 0x7f800000;
+        const frac = this.float32Bits & 0x007fffff;
+        if (exp === 0x7f800000 && frac !== 0) {
+          const sign = (this.float32Bits & 0x80000000) !== 0 ? 0x8000000000000000n : 0n;
+          const payload = (BigInt(frac) << 29n) | 0x0008000000000000n;
+          return sign | 0x7ff0000000000000n | payload;
+        }
+      }
+    }
+    return f64ToBits(this.asFloat64());
   }
 
   asNumber(): number {
@@ -778,8 +844,9 @@ export function schemaValueToDynamic(
     case "uint64":
       return DynamicValueReader.fromUInt(sv.value);
     case "float32":
+      return DynamicValueReader.fromFloat32Bits(sv.rawBits);
     case "float64":
-      return DynamicValueReader.fromFloat(sv.value);
+      return DynamicValueReader.fromFloat64Bits(sv.rawBits);
     case "text":
       return DynamicValueReader.fromText(sv.value);
     case "data":
@@ -1200,14 +1267,14 @@ export class DynamicStructReader {
         );
       case TypeKind.Float32: {
         const wireBits = this.ptr.getU32(field.offset * 4, 0);
-        return DynamicValueReader.fromFloat(
-          bitsToF32((wireBits ^ defaultFloat32Bits(dval)) >>> 0),
+        return DynamicValueReader.fromFloat32Bits(
+          (wireBits ^ defaultFloat32Bits(dval)) >>> 0,
         );
       }
       case TypeKind.Float64: {
         const wireBits = this.ptr.getU64(field.offset * 8, 0n);
-        return DynamicValueReader.fromFloat(
-          bitsToF64(wireBits ^ defaultFloat64Bits(dval)),
+        return DynamicValueReader.fromFloat64Bits(
+          wireBits ^ defaultFloat64Bits(dval),
         );
       }
       case TypeKind.Enum: {
@@ -1725,7 +1792,7 @@ export class DynamicStructBuilder {
         return;
       case TypeKind.Float32: {
         checkDataBytes(field.offset * 4, 4);
-        const bits = f32ToBits(val.asFloat32());
+        const bits = val.asFloat32Bits();
         this.sb.setU32(
           field.offset * 4,
           (bits ^ defaultFloat32Bits(dval)) >>> 0,
@@ -1735,7 +1802,7 @@ export class DynamicStructBuilder {
       }
       case TypeKind.Float64: {
         checkDataBytes(field.offset * 8, 8);
-        const bits = f64ToBits(val.asFloat64());
+        const bits = val.asFloat64Bits();
         this.sb.setU64(
           field.offset * 8,
           bits ^ defaultFloat64Bits(dval),
@@ -2229,10 +2296,10 @@ export class DynamicListReader implements Iterable<DynamicValueReader> {
         return DynamicValueReader.fromUInt(u >>> 0);
       }
       case TypeKind.Float32: {
-        const f = compStruct
-          ? this.readCompositePrimF32(compStruct)
-          : loadF32(this.readPrimBytes(index, 4), 0);
-        return DynamicValueReader.fromFloat(f);
+        const bits = compStruct
+          ? this.readCompositePrimU32(compStruct)
+          : loadU32(this.readPrimBytes(index, 4), 0);
+        return DynamicValueReader.fromFloat32Bits(bits >>> 0);
       }
       case TypeKind.Int64: {
         const u = compStruct
@@ -2247,10 +2314,10 @@ export class DynamicListReader implements Iterable<DynamicValueReader> {
         return DynamicValueReader.fromUInt(u);
       }
       case TypeKind.Float64: {
-        const f = compStruct
-          ? this.readCompositePrimF64(compStruct)
-          : loadF64(this.readPrimBytes(index, 8), 0);
-        return DynamicValueReader.fromFloat(f);
+        const bits = compStruct
+          ? this.readCompositePrimU64(compStruct)
+          : loadU64(this.readPrimBytes(index, 8), 0);
+        return DynamicValueReader.fromFloat64Bits(bits);
       }
       case TypeKind.Text:
         if (compStruct) {
@@ -2324,19 +2391,9 @@ export class DynamicListReader implements Iterable<DynamicValueReader> {
     return el.getU32(0);
   }
 
-  private readCompositePrimF32(el: Ptr): number {
-    this.assertCompositeData();
-    return el.getF32(0);
-  }
-
   private readCompositePrimU64(el: Ptr): bigint {
     this.assertCompositeData();
     return el.getU64(0);
-  }
-
-  private readCompositePrimF64(el: Ptr): number {
-    this.assertCompositeData();
-    return el.getF64(0);
   }
 
   private readCompositePtr(el: Ptr): Ptr {
@@ -2912,7 +2969,7 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
         storeU32(data, this.primByte(index, 4), val.asUInt32());
         return;
       case TypeKind.Float32:
-        storeF32(data, this.primByte(index, 4), val.asFloat32());
+        storeU32(data, this.primByte(index, 4), val.asFloat32Bits());
         return;
       case TypeKind.Int64:
         storeU64(data, this.primByte(index, 8), BigInt.asUintN(64, val.asInt64()));
@@ -2921,7 +2978,7 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
         storeU64(data, this.primByte(index, 8), val.asUInt64());
         return;
       case TypeKind.Float64:
-        storeF64(data, this.primByte(index, 8), val.asFloat64());
+        storeU64(data, this.primByte(index, 8), val.asFloat64Bits());
         return;
       case TypeKind.Text: {
         const slot = new BuilderPointer(this.builder, this.seg, this.pointerWord(index));

@@ -836,4 +836,98 @@ describe("Cap'n Proto compat JSON codec", () => {
       }
     },
   );
+
+  test("JSON NaN spellings keep sign and payload bits on the wire", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const schema = loader.resolveStruct("KitchenSink");
+    const cases: Array<[string, bigint, number]> = [
+      ["nan", 0x7ff8000000000000n, 0x7fc00000],
+      ["-NAN", 0xfff8000000000000n, 0xffc00000],
+      ["nan(1)", 0x7ff8000000000001n, 0x7fc00000],
+      ["-nan(1)", 0xfff8000000000001n, 0xffc00000],
+      ["nan(0x123456789abcd)", 0x7ff923456789abcdn, 0x7fc91a2b],
+      ["nan(010)", 0x7ff8000000000008n, 0x7fc00000],
+      ["nan(42)", 0x7ff800000000002an, 0x7fc00000],
+      ["nan(0x0007ffffffffffff)", 0x7fffffffffffffffn, 0x7fffffff],
+      ["nan(0x10000000000000000)", 0x7fffffffffffffffn, 0x7fffffff],
+      ["nan(08)", 0x7ff8000000000000n, 0x7fc00000],
+      ["nan(abc_1)", 0x7ff8000000000000n, 0x7fc00000],
+    ];
+    for (const [text, wantF64, wantF32] of cases) {
+      const msg = decodeJson(JSON.stringify({ f64: text, f32: text }), schema);
+      const reader = DynamicStruct.fromMessage(msg, schema);
+      expect(reader.get("f64").asFloat64Bits()).toBe(wantF64);
+      expect(reader.get("f32").asFloat32Bits()).toBe(wantF32);
+      expect(Number.isNaN(reader.get("f64").asFloat64())).toBe(true);
+      expect(Number.isNaN(reader.get("f32").asFloat32())).toBe(true);
+    }
+  });
+
+  test.skipIf(!hasCapnp)(
+    "JSON NaN sign and payload wire bits match capnp convert json:flat",
+    () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), "capnp-json-nan-"));
+      try {
+        const schemaPath = join(tmpDir, "nans.capnp");
+        writeFileSync(
+          schemaPath,
+          [
+            "@0x8123456789abcde8;",
+            "struct NanVec {",
+            "  f64s @0 :List(Float64);",
+            "  f32s @1 :List(Float32);",
+            "  f64Def @2 :Float64 = -2.25;",
+            "  f32Def @3 :Float32 = 1.5;",
+            "}",
+          ].join("\n"),
+        );
+        const cgr = spawnSync("capnp", ["compile", "-o-", schemaPath]);
+        expect(cgr.status).toBe(0);
+        const schema = SchemaLoader.fromCgr(new Uint8Array(cgr.stdout)).resolveStruct("NanVec");
+        const spellings = [
+          "nan",
+          "NaN",
+          "+nan",
+          "-nan",
+          "-NAN",
+          "nan()",
+          "-nan()",
+          "nan(0)",
+          "nan(1)",
+          "-nan(1)",
+          "nan(0x1)",
+          "nan(0x1234)",
+          "nan(0x123456789abcd)",
+          "nan(0x4000000000000)",
+          "nan(0x8000000000000)",
+          "nan(0x0007ffffffffffff)",
+          "nan(0xffffffffffffffff)",
+          "nan(0x10000000000000000)",
+          "nan(999999999999999999999999999999)",
+          "nan(010)",
+          "nan(42)",
+          "nan(08)",
+          "nan(0x)",
+          "nan(abc_1)",
+        ];
+        const json = JSON.stringify({
+          f64s: [...spellings, null],
+          f32s: [...spellings, null],
+          f64Def: "-nan(1)",
+          f32Def: "-NAN",
+        });
+        const cli = spawnSync("capnp", ["convert", "json:flat", schemaPath, "NanVec"], {
+          input: json,
+        });
+        expect(cli.status).toBe(0);
+        const cppFlat = new Uint8Array(cli.stdout);
+        const tsMsg = decodeJson(json, schema);
+        expect(canonicalize(tsMsg)).toEqual(
+          canonicalize(Message.fromSegments([cppFlat])),
+        );
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
 });

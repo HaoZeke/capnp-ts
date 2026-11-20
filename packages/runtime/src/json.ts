@@ -662,30 +662,59 @@ function parseHexFloat64(
 }
 
 /**
+ * Parse a C `nan(tag)` payload like glibc `strtod()` (`strtoull(tag, &endp, 0)`):
+ * accept decimal, `0x`/`0X` hex, or `0`-prefixed octal consuming the whole tag,
+ * saturate at `UINT64_MAX`, and mask to the 51 quiet-NaN payload bits.
+ */
+function parseNanPayloadBits(tag: string): bigint {
+  if (tag.length === 0) return 0n;
+  let val: bigint;
+  if (/^0[xX][0-9a-fA-F]+$/.test(tag)) {
+    val = BigInt(tag);
+  } else if (/^0[0-7]*$/.test(tag)) {
+    val = BigInt(`0o${tag}`);
+  } else if (/^[1-9][0-9]*$/.test(tag)) {
+    val = BigInt(tag);
+  } else {
+    return 0n;
+  }
+  const u64Max = 0xffffffffffffffffn;
+  return (val > u64Max ? u64Max : val) & 0x0007ffffffffffffn;
+}
+
+/**
  * Parse a JSON string holding a float the way kj's `parseAs<double>()`
  * does: C `strtod()` must consume the whole string. That accepts leading
  * whitespace, a sign, decimal and hex floats, case-insensitive `inf`,
  * `infinity`, and `nan` with an optional `(n-char-sequence)`.
  */
-function parseStrictFloatString(raw: string): number {
+function parseStrictFloatString(raw: string): DynamicValueReader {
   const m =
-    /^[ \t\n\v\f\r]*([+-]?)(?:(inf(?:inity)?)|(nan(?:\([A-Za-z0-9_]*\))?)|0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?(?:[pP]([+-]?[0-9]+))?|((?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?))$/i.exec(
+    /^[ \t\n\v\f\r]*([+-]?)(?:(inf(?:inity)?)|(nan(?:\(([A-Za-z0-9_]*)\))?)|0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?(?:[pP]([+-]?[0-9]+))?|((?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?))$/i.exec(
       raw,
     );
-  const hex = m !== null && m[4] !== undefined && (m[4] !== "" || (m[5] ?? "") !== "");
+  const hex = m !== null && m[5] !== undefined && (m[5] !== "" || (m[6] ?? "") !== "");
   assertCapnp(
-    m !== null && (m[7] !== undefined || m[2] !== undefined || m[3] !== undefined || hex),
+    m !== null && (m[8] !== undefined || m[2] !== undefined || m[3] !== undefined || hex),
     "JSON",
     `invalid float string '${raw}'`,
   );
   const negative = m![1] === "-";
-  if (m![3] !== undefined) return NaN;
-  if (m![2] !== undefined) return negative ? -Infinity : Infinity;
-  if (hex) {
-    return parseHexFloat64(negative, m![4]!, m![5] ?? "", m![6]);
+  if (m![3] !== undefined) {
+    const signBit = negative ? 0x8000000000000000n : 0n;
+    const payload = m![4] === undefined ? 0n : parseNanPayloadBits(m![4]);
+    return DynamicValueReader.fromFloat64Bits(signBit | 0x7ff8000000000000n | payload);
   }
-  const value = Number(m![7]);
-  return negative ? -value : value;
+  if (m![2] !== undefined) {
+    return DynamicValueReader.fromFloat(negative ? -Infinity : Infinity);
+  }
+  if (hex) {
+    return DynamicValueReader.fromFloat(
+      parseHexFloat64(negative, m![5]!, m![6] ?? "", m![7]),
+    );
+  }
+  const value = Number(m![8]);
+  return DynamicValueReader.fromFloat(negative ? -value : value);
 }
 
 // ---------------------------------------------------------------------------
@@ -1628,7 +1657,7 @@ export class JsonCodec {
           return DynamicValueReader.fromFloat(input.value);
         }
         if (input.which === "string") {
-          return DynamicValueReader.fromFloat(parseStrictFloatString(input.value));
+          return parseStrictFloatString(input.value);
         }
         throw new CapnpError("JSON", "expected float value");
       }
