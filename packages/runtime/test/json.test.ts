@@ -147,7 +147,7 @@ describe("Cap'n Proto compat JSON codec", () => {
       '{"flag":true,"meta":{"nested":{}},"source":{}}',
     );
 
-    // Decode numeric and string integers, null->NaN floats, unicode surrogates, and unknown fields
+    // Decode numeric and string integers, null->NaN floats, \u surrogate escapes, and unknown fields
     const decoded = rawCodec.decode(
       '{"i32":"-55","i64":-12,"u64":42,"f32":null,"f64":"Infinity","title":"\\uD83D\\uDE80","extraIgnored":{"x":1}}',
       sinkSchema,
@@ -157,7 +157,8 @@ describe("Cap'n Proto compat JSON codec", () => {
     expect(decoded.get("u64").asUInt64()).toBe(42n);
     expect(Number.isNaN(decoded.get("f32").asFloat32())).toBe(true);
     expect(decoded.get("f64").asFloat64()).toBe(Infinity);
-    expect(decoded.get("title").asText()).toBe("🚀");
+    // Like C++, each \u escape is UTF-8 encoded on its own, even in a pair.
+    expect([...decoded.get("title").asTextBytes()]).toEqual([0xed, 0xa0, 0xbd, 0xed, 0xba, 0x80]);
     expect(
       Number.isNaN(
         rawCodec.decode('{"f32":"-NaN"}', sinkSchema).get("f32").asFloat32(),
@@ -969,6 +970,55 @@ describe("Cap'n Proto compat JSON codec", () => {
       }
       const bom = DynamicStruct.fromMessage(decodeText('(t = "\\357\\273\\277a\\377")', schema), schema);
       expect(encodeJson(bom)).toBe('{"t":"\ufeffa\ufffd"}');
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(!hasCapnp)("Text JSON input keeps raw bytes and \\u code units like capnp convert json:binary", () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "capnp-json-rawin-"));
+    try {
+      const schemaPath = join(tmpDir, "raw.capnp");
+      writeFileSync(schemaPath, "@0xc4d5e6f7a8b9cad3; struct R { t @0 :Text; l @1 :List(Text); }");
+      const cgr = spawnSync("capnp", ["compile", "-o-", schemaPath]);
+      expect(cgr.status).toBe(0);
+      const schema = SchemaLoader.fromCgr(new Uint8Array(cgr.stdout)).resolveStruct("R");
+      const ascii = (text: string) => Buffer.from(text, "latin1");
+      const str = (...parts: (string | number[])[]) =>
+        Buffer.concat([ascii('{"t": "'), ...parts.map((p) => (typeof p === "string" ? ascii(p) : Buffer.from(p))), ascii('"}')]);
+      const inputs = [
+        str([0xff, 0x80], "a"),
+        str([0xef, 0xbb, 0xbf], "bom"),
+        str([0x02, 0x0a, 0x09, 0x7f, 0x1f]),
+        str("\\ud83d\\ude00"),
+        str("\\udcff"),
+        str("\\ud800x"),
+        str("\\u00e9\\u20AC", [0xc3, 0xa9]),
+        str("\\\"\\\\\\/\\b\\f\\n\\r\\t"),
+        Buffer.concat([ascii('{"l": ["'), Buffer.of(0xc0, 0xaf), ascii('", "\\ud83d"]}')]),
+        str("\\x41"),
+        str("\\U0041"),
+        str("\\u12"),
+        str("a", [0x00], "b"),
+      ];
+      let accepted = 0;
+      for (const input of inputs) {
+        const cpp = spawnSync("capnp", ["convert", "json:binary", schemaPath, "R"], { input });
+        if (cpp.status !== 0) {
+          expect(() => decodeJson(new Uint8Array(input), schema)).toThrow(CapnpError);
+          expect(() => convertStream(new Uint8Array(input), "json", "binary", schema)).toThrow(CapnpError);
+          continue;
+        }
+        accepted++;
+        const want = Buffer.from(cpp.stdout).toString("hex");
+        expect(Buffer.from(convertStream(new Uint8Array(input), "json", "binary", schema)).toString("hex")).toBe(want);
+        expect(canonicalize(decodeJson(new Uint8Array(input), schema))).toEqual(
+          canonicalize(Message.fromFlat(new Uint8Array(cpp.stdout))),
+        );
+      }
+      expect(accepted).toBe(9);
+      const pair = DynamicStruct.fromMessage(decodeJson('{"t": "\\ud83d\\ude00é"}', schema), schema);
+      expect([...pair.get("t").asTextBytes()]).toEqual([0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80, 0xc3, 0xa9]);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }

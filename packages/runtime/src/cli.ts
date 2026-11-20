@@ -63,7 +63,6 @@ export function formatNeedsSchema(fmt: WireFormat): boolean {
 }
 
 const UTF8_ENC = new TextEncoder();
-const UTF8_DEC = new TextDecoder("utf-8", { fatal: false });
 
 function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
   if (chunks.length === 0) return new Uint8Array(0);
@@ -236,8 +235,9 @@ function* iterateMessagesInFormat(
         "ARG",
         "json format requires <schema> and <type>",
       );
-      for (const slice of splitJsonMessages(UTF8_DEC.decode(input))) {
-        yield { message: decodeJson(slice, rootSchema) };
+      const source = Array.from(input, (byte) => String.fromCharCode(byte)).join("");
+      for (const slice of splitJsonMessages(source)) {
+        yield { message: decodeJson(Uint8Array.from(slice, (ch) => ch.charCodeAt(0)), rootSchema) };
       }
       return;
     }

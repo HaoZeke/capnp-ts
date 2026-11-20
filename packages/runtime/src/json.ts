@@ -41,12 +41,26 @@ export const JSON_BASE64_ANNOTATION_ID = 0xd7d879450a253e4bn;
 export const JSON_HEX_ANNOTATION_ID = 0xf061e22f0ae5c7b5n;
 
 const TEXT_DEC = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
+const UTF8_ENC = new TextEncoder();
+
+function bytesToByteString(bytes: Uint8Array): string {
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    out += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return out;
+}
 
 export type JsonAst =
   | { readonly which: "null" }
   | { readonly which: "boolean"; readonly value: boolean }
   | { readonly which: "number"; readonly value: number }
-  | { readonly which: "string"; readonly value: string }
+  | {
+      readonly which: "string";
+      readonly value: string;
+      /** Bytes C++ would store for this string when it was parsed from JSON. */
+      readonly bytes?: Uint8Array;
+    }
   | { readonly which: "array"; readonly value: readonly JsonAst[] }
   | {
       readonly which: "object";
@@ -225,6 +239,24 @@ export function decodeHex(input: string): Uint8Array {
 // Strict JSON parser with depth cap (models Parser in json.c++)
 // ---------------------------------------------------------------------------
 
+const JSON_SIMPLE_ESCAPES: Readonly<Record<string, string>> = {
+  '"': '"',
+  "\\": "\\",
+  "/": "/",
+  b: "\b",
+  f: "\f",
+  n: "\n",
+  r: "\r",
+  t: "\t",
+};
+
+/** UTF-8 bytes of one UTF-16 code unit, as C++ stores a `\uXXXX` escape. */
+function utf8CodeUnit(u: number): number[] {
+  if (u < 0x80) return [u];
+  if (u < 0x800) return [0xc0 | (u >> 6), 0x80 | (u & 0x3f)];
+  return [0xe0 | (u >> 12), 0x80 | ((u >> 6) & 0x3f), 0x80 | (u & 0x3f)];
+}
+
 class RawJsonParser {
   private readonly src: string;
   private readonly maxDepth: number;
@@ -277,7 +309,7 @@ class RawJsonParser {
         this.expectLiteral("true");
         return { which: "boolean", value: true };
       case '"':
-        return { which: "string", value: this.parseQuotedString() };
+        return { which: "string", ...this.parseString() };
       case "[":
         return this.parseArray();
       case "{":
@@ -369,84 +401,74 @@ class RawJsonParser {
   }
 
   private parseQuotedString(): string {
+    return this.parseString().value;
+  }
+
+  /**
+   * `src` holds one UTF-8 byte per code unit. Like C++ `JsonCodec`, raw bytes
+   * are copied unchanged, raw control characters are allowed, and each
+   * `\uXXXX` escape is UTF-8 encoded on its own, so a surrogate pair becomes
+   * two three-byte sequences. `value` decodes the same input as JavaScript
+   * does, joining surrogate pairs.
+   */
+  private parseString(): { value: string; bytes: Uint8Array } {
     this.pos++; // '"'
-    let out = "";
+    const bytes: number[] = [];
+    let value = "";
+    let rawStart = 0;
+    const flushRaw = () => {
+      if (rawStart < bytes.length) {
+        value += TEXT_DEC.decode(Uint8Array.from(bytes.slice(rawStart)));
+      }
+    };
+    const pushEscape = (text: string, encoded: readonly number[]) => {
+      flushRaw();
+      value += text;
+      bytes.push(...encoded);
+      rawStart = bytes.length;
+    };
     while (this.pos < this.src.length) {
-      const ch = this.src[this.pos]!;
-      if (ch === '"') {
+      const code = this.src.charCodeAt(this.pos);
+      if (code === 0x22) {
         this.pos++;
-        return out;
+        flushRaw();
+        return { value, bytes: Uint8Array.from(bytes) };
       }
-      if (ch.charCodeAt(0) < 0x20) {
-        this.fail("unescaped control character in JSON string");
-      }
-      if (ch !== "\\") {
-        out += ch;
+      if (code === 0) break;
+      if (code !== 0x5c) {
+        bytes.push(code);
         this.pos++;
         continue;
       }
       this.pos++;
       if (this.pos >= this.src.length) this.fail("unterminated JSON string escape");
       const esc = this.src[this.pos]!;
-      switch (esc) {
-        case '"':
-          out += '"';
-          this.pos++;
-          break;
-        case "\\":
-          out += "\\";
-          this.pos++;
-          break;
-        case "/":
-          out += "/";
-          this.pos++;
-          break;
-        case "b":
-          out += "\b";
-          this.pos++;
-          break;
-        case "f":
-          out += "\f";
-          this.pos++;
-          break;
-        case "n":
-          out += "\n";
-          this.pos++;
-          break;
-        case "r":
-          out += "\r";
-          this.pos++;
-          break;
-        case "t":
-          out += "\t";
-          this.pos++;
-          break;
-        case "u": {
-          this.pos++;
-          const u1 = this.readHex4();
-          if (u1 >= 0xd800 && u1 <= 0xdbff) {
-            if (
-              this.pos + 5 < this.src.length &&
-              this.src[this.pos] === "\\" &&
-              this.src[this.pos + 1] === "u"
-            ) {
-              const saved = this.pos;
-              this.pos += 2;
-              const u2 = this.readHex4();
-              if (u2 >= 0xdc00 && u2 <= 0xdfff) {
-                const cp = 0x10000 + ((u1 - 0xd800) << 10) + (u2 - 0xdc00);
-                out += String.fromCodePoint(cp);
-                break;
-              }
-              this.pos = saved;
-            }
-          }
-          out += String.fromCharCode(u1);
-          break;
-        }
-        default:
-          this.fail(`invalid escape '\\${esc}' in JSON string`);
+      const simple = JSON_SIMPLE_ESCAPES[esc];
+      if (simple !== undefined) {
+        pushEscape(simple, [simple.charCodeAt(0)]);
+        this.pos++;
+        continue;
       }
+      if (esc !== "u") this.fail(`invalid escape '\\${esc}' in JSON string`);
+      this.pos++;
+      const u1 = this.readHex4();
+      if (
+        u1 >= 0xd800 &&
+        u1 <= 0xdbff &&
+        this.pos + 5 < this.src.length &&
+        this.src[this.pos] === "\\" &&
+        this.src[this.pos + 1] === "u"
+      ) {
+        const saved = this.pos;
+        this.pos += 2;
+        const u2 = this.readHex4();
+        if (u2 >= 0xdc00 && u2 <= 0xdfff) {
+          pushEscape(String.fromCharCode(u1, u2), [...utf8CodeUnit(u1), ...utf8CodeUnit(u2)]);
+          continue;
+        }
+        this.pos = saved;
+      }
+      pushEscape(String.fromCharCode(u1), utf8CodeUnit(u1));
     }
     this.fail("unterminated JSON string");
   }
@@ -1334,8 +1356,10 @@ export class JsonCodec {
     return this.renderAst(value, 0, false).text;
   }
 
-  decodeRaw(input: string): JsonAst {
-    return new RawJsonParser(input, this.maxNestingDepth).parseRoot();
+  /** Parse JSON text, or its UTF-8 bytes; a string is UTF-8 encoded first. */
+  decodeRaw(input: string | Uint8Array): JsonAst {
+    const bytes = typeof input === "string" ? UTF8_ENC.encode(input) : input;
+    return new RawJsonParser(bytesToByteString(bytes), this.maxNestingDepth).parseRoot();
   }
 
   /**
@@ -1362,8 +1386,9 @@ export class JsonCodec {
     }
   }
 
-  decodeStruct(input: string | JsonAst, output: DynamicStructBuilder): void {
-    const ast = typeof input === "string" ? this.decodeRaw(input) : input;
+  decodeStruct(input: string | Uint8Array | JsonAst, output: DynamicStructBuilder): void {
+    const ast =
+      typeof input === "string" || input instanceof Uint8Array ? this.decodeRaw(input) : input;
     const stType = output.getSchema().asType();
     const handler = this.typeHandlers.get(stType.canonicalKey());
     if (handler?.decodeStruct) {
@@ -1677,7 +1702,9 @@ export class JsonCodec {
       }
       case TypeKind.Text:
         assertCapnp(input.which === "string", "JSON", "expected text string");
-        return DynamicValueReader.fromText(input.value);
+        return input.bytes
+          ? DynamicValueReader.fromTextBytes(input.bytes)
+          : DynamicValueReader.fromText(input.value);
       case TypeKind.Data: {
         assertCapnp(input.which === "array", "JSON", "expected byte array for Data");
         const bytes = new Uint8Array(input.value.length);
@@ -1935,11 +1962,12 @@ export function encodeJsonBytes(
 }
 
 /**
- * Decode a JSON object string into a stream-framed `Message` (defaults:
+ * Decode a JSON object, given as a string or as UTF-8 bytes, into a
+ * stream-framed `Message` (defaults:
  * `annotations = true`, `rejectUnknownFields = false`, matching `capnp convert json:binary`).
  */
 export function decodeJson(
-  input: string,
+  input: string | Uint8Array,
   schema: StructSchema,
   opts?: {
     annotations?: boolean;
