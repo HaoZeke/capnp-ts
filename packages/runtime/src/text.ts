@@ -615,14 +615,14 @@ class TextParser {
     if (c === 0x5b /* '[' */) {
       return this.parseList();
     }
-    if (c === 0x22 /* '"' */ || c === 0x27 /* '\'' */ || c === 0x60 /* '`' */) {
+    if (c === 0x22 /* '"' */ || c === 0x60 /* '`' */) {
       return this.parseStringChain(false);
     }
     if (
       c === 0x30 /* '0' */ &&
       this.pos + 2 < this.src.length &&
-      (this.src[this.pos + 1] === "x" || this.src[this.pos + 1] === "X") &&
-      (this.src[this.pos + 2] === '"' || this.src[this.pos + 2] === "'")
+      this.src[this.pos + 1] === "x" &&
+      this.src[this.pos + 2] === '"'
     ) {
       return this.parseHexBlobChain();
     }
@@ -858,7 +858,7 @@ class TextParser {
       this.skipSpaceAndComments();
       if (this.pos >= this.src.length) break;
       const ch = this.src[this.pos];
-      if (ch === '"' || ch === "'") {
+      if (ch === '"') {
         chunks.push(this.readQuotedBytes(ch));
         continue;
       }
@@ -872,46 +872,38 @@ class TextParser {
   }
 
   private parseHexBlobChain(): TextAst {
-    const chunks: Uint8Array[] = [];
-    for (;;) {
-      this.skipSpaceAndComments();
-      if (
-        this.pos + 2 < this.src.length &&
-        this.src[this.pos] === "0" &&
-        (this.src[this.pos + 1] === "x" || this.src[this.pos + 1] === "X") &&
-        (this.src[this.pos + 2] === '"' || this.src[this.pos + 2] === "'")
+    this.pos += 3; // `0x"`
+    const bytes: number[] = [];
+    while (this.pos < this.src.length && this.src[this.pos] !== '"') {
+      while (
+        this.pos < this.src.length &&
+        this.src[this.pos] !== '"' &&
+        /[ \t\n\r\v\f]/.test(this.src[this.pos]!)
       ) {
-        const quote = this.src[this.pos + 2]!;
-        this.pos += 3;
-        const bytes: number[] = [];
-        while (this.pos < this.src.length && this.src[this.pos] !== quote) {
-          const c = this.src.charCodeAt(this.pos);
-          if (c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d) {
-            this.pos++;
-            continue;
-          }
-          if (
-            !isHexDigit(c) ||
-            this.pos + 1 >= this.src.length ||
-            !isHexDigit(this.src.charCodeAt(this.pos + 1))
-          ) {
-            this.fail("hex binary literal requires pairs of hex digits");
-          }
-          const hi = hexVal(c);
-          const lo = hexVal(this.src.charCodeAt(this.pos + 1));
-          bytes.push((hi << 4) | lo);
-          this.pos += 2;
-        }
-        if (this.pos >= this.src.length) {
-          this.fail("unterminated hex binary literal");
-        }
-        this.pos++; // closing quote
-        chunks.push(Uint8Array.from(bytes));
-        continue;
+        this.pos++;
       }
-      break;
+      if (this.pos >= this.src.length || this.src[this.pos] === '"') break;
+      const c = this.src.charCodeAt(this.pos);
+      if (
+        !isHexDigit(c) ||
+        this.pos + 1 >= this.src.length ||
+        !isHexDigit(this.src.charCodeAt(this.pos + 1))
+      ) {
+        this.fail("hex binary literal requires pairs of hex digits");
+      }
+      const hi = hexVal(c);
+      const lo = hexVal(this.src.charCodeAt(this.pos + 1));
+      bytes.push((hi << 4) | lo);
+      this.pos += 2;
     }
-    return { kind: "bytes", bytes: concatChunks(chunks), isHexBlob: true };
+    if (this.pos >= this.src.length) {
+      this.fail("unterminated hex binary literal");
+    }
+    if (bytes.length === 0) {
+      this.fail("hex binary literal requires at least one byte");
+    }
+    this.pos++; // closing quote
+    return { kind: "bytes", bytes: Uint8Array.from(bytes), isHexBlob: true };
   }
 
   private readBacktickLine(): Uint8Array {
@@ -938,7 +930,7 @@ class TextParser {
         this.pos++;
         return Uint8Array.from(out);
       }
-      if (ch === "\n" || ch === "\r") {
+      if (ch === "\n") {
         this.fail("unescaped newline in string literal");
       }
       if (ch !== "\\") {

@@ -251,6 +251,30 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
     expect(mismatches).toEqual([]);
   });
 
+  test("string and hex blob literals follow the capnp 1.4.0 lexer", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const sinkSchema = loader.resolveStruct("KitchenSink");
+    const read = (input: string) =>
+      DynamicStruct.fromMessage(decodeText(input, sinkSchema), sinkSchema);
+    for (const badText of [
+      '(raw = 0x"")',
+      "(raw = 0x'ff')",
+      '(raw = 0X"ff")',
+      '(raw = 0x"f")',
+      '(raw = 0x"f f")',
+      '(raw = 0x"a\vb")',
+      '(raw = 0x"aa" 0x"bb")',
+      "(title = 'single')",
+      '(title = "a\nb")',
+    ]) {
+      expect(() => decodeText(badText, sinkSchema)).toThrow(CapnpError);
+    }
+    expect([...read('(raw = 0x" ab\tcd\nef\r01\v23\f45 ")').get("raw").asData()]).toEqual([
+      0xab, 0xcd, 0xef, 0x01, 0x23, 0x45,
+    ]);
+    expect([...read('(title = "a\rb")').get("title").asTextBytes()]).toEqual([0x61, 0x0d, 0x62]);
+  });
+
   test("formatKjFloat32 tries 6 then 8 significant digits like kj::FloatToBuffer", () => {
     expect(formatKjFloat32(Math.fround(1.0000040531158447))).toBe("1.0000041");
     expect(formatKjFloat32(Math.fround(-9851.2763671875))).toBe("-9851.2764");
