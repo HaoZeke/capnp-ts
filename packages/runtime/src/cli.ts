@@ -24,7 +24,7 @@ import {
 } from "./dynamic.ts";
 import { loadU32 } from "./endian.ts";
 import { CapnpError, MAX_SEGMENTS, WORD_BYTES, assertCapnp } from "./kinds.ts";
-import { decodeJson, encodeJson, splitJsonMessages } from "./json.ts";
+import { decodeJson, encodeJsonBytes, splitJsonMessages } from "./json.ts";
 import { Message } from "./message.ts";
 import { pack, unpack } from "./packed.ts";
 import { SchemaLoader, StructSchema, Type } from "./schema.ts";
@@ -325,12 +325,14 @@ export function writeMessageInFormat(
         depthLimit: 256,
       });
       const reader = DynamicStruct.fromMessage(fresh, rootSchema);
-      return UTF8_ENC.encode(
-        `${encodeJson(reader, {
-          pretty,
-          annotations: opts?.annotations ?? true,
-        })}\n`,
-      );
+      const json = encodeJsonBytes(reader, {
+        pretty,
+        annotations: opts?.annotations ?? true,
+      });
+      const out = new Uint8Array(json.byteLength + 1);
+      out.set(json);
+      out[json.byteLength] = 0x0a;
+      return out;
     }
   }
 }

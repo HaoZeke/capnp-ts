@@ -8,6 +8,7 @@ import {
   CapnpError,
   DynamicEnum,
   DynamicStruct,
+  type DynamicStructReader,
   HasMode,
   JsonCodec,
   Message,
@@ -17,9 +18,12 @@ import {
   canonicalizeFlat,
   decodeJson,
   decodeText,
+  decodeTextBytes,
   encodeJson,
+  encodeJsonBytes,
   splitJsonMessages,
 } from "../src/index.ts";
+import { convertStream } from "../src/cli.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..", "..");
@@ -930,4 +934,95 @@ describe("Cap'n Proto compat JSON codec", () => {
       }
     },
   );
+
+  test.skipIf(!hasCapnp)("Text JSON output keeps raw bytes and a BOM like capnp convert binary:json", () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "capnp-json-rawtext-"));
+    try {
+      const schemaPath = join(tmpDir, "raw.capnp");
+      writeFileSync(schemaPath, "@0xc4d5e6f7a8b9cad1; struct R { t @0 :Text; l @1 :List(Text); }");
+      const cgr = spawnSync("capnp", ["compile", "-o-", schemaPath]);
+      expect(cgr.status).toBe(0);
+      const schema = SchemaLoader.fromCgr(new Uint8Array(cgr.stdout)).resolveStruct("R");
+      const ff20 = "\\377".repeat(20);
+      for (const text of [
+        '(t = "a\\377\\200b")',
+        '(t = "\\357\\273\\277bom")',
+        '(t = "\\300\\257\\355\\240\\200\\364\\220\\200\\200")',
+        '(t = "\\001\\037\\177\\"\\\\/\\303\\251")',
+        `(l = ["${ff20}", "${ff20}"])`,
+        `(t = "x", l = ["\\342\\202", "${ff20}"])`,
+      ]) {
+        const bin = spawnSync("capnp", ["encode", schemaPath, "R"], { input: text });
+        expect(bin.status).toBe(0);
+        const reader = DynamicStruct.fromMessage(Message.fromFlat(new Uint8Array(bin.stdout)), schema);
+        for (const pretty of [true, false]) {
+          const args = ["convert", "binary:json", ...(pretty ? [] : ["--short"]), schemaPath, "R"];
+          const cpp = spawnSync("capnp", args, { input: bin.stdout });
+          expect(cpp.status).toBe(0);
+          const ts = Buffer.concat([encodeJsonBytes(reader, { pretty }), Buffer.from("\n")]);
+          expect(ts.toString("hex")).toBe(Buffer.from(cpp.stdout).toString("hex"));
+          const cli = convertStream(new Uint8Array(bin.stdout), "binary", "json", schema, {
+            short: !pretty,
+          });
+          expect(Buffer.from(cli).toString("hex")).toBe(Buffer.from(cpp.stdout).toString("hex"));
+        }
+      }
+      const bom = DynamicStruct.fromMessage(decodeText('(t = "\\357\\273\\277a\\377")', schema), schema);
+      expect(encodeJson(bom)).toBe('{"t":"\ufeffa\ufffd"}');
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("pretty JSON line breaks on raw Text bytes", () => {
+  const book = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin")).resolveStruct("AddressBook");
+  const dec = new TextDecoder("utf-8", { ignoreBOM: true });
+  const printers = (reader: DynamicStructReader) => {
+    const codec = new JsonCodec({ prettyPrint: true });
+    codec.handleByAnnotation(book);
+    return {
+      encodeJson: encodeJson(reader, { pretty: true }),
+      "JsonCodec.encode": codec.encode(reader),
+      encodeJsonBytes: dec.decode(encodeJsonBytes(reader, { pretty: true })),
+    };
+  };
+
+  test("25 invalid bytes count as 25 bytes in the 50-byte check", () => {
+    const ff = "\\377".repeat(25);
+    const reader = DynamicStruct.fromMessage(
+      decodeTextBytes(`(people = [(id = 1, name = "${ff}")])`, book),
+      book,
+    );
+    // `capnp convert binary:json` writes this on one line.
+    const want = `{"people": [{"id": 1, "name": "${"\ufffd".repeat(25)}", "employment": {"unemployed": null}}]}`;
+    expect(printers(reader)).toEqual({
+      encodeJson: want,
+      "JsonCodec.encode": want,
+      encodeJsonBytes: want,
+    });
+  });
+
+  test.skipIf(!hasCapnp)("string printers match capnp convert binary:json around 50 bytes", () => {
+    const schemaPath = join(repoRoot, "schema/addressbook.capnp");
+    for (const unit of ["\\377", "\\303", "\\303\\251", "x\\200"]) {
+      for (let n = 8; n <= 30; n++) {
+        const name = unit.repeat(n);
+        const text = `(people = [(id = 1, name = "${name}", phones = [(number = "${name}")]), (id = 2, name = "b")])`;
+        const bin = spawnSync("capnp", ["encode", schemaPath, "AddressBook"], { input: text });
+        expect(bin.status).toBe(0);
+        const json = spawnSync("capnp", ["convert", "binary:json", schemaPath, "AddressBook"], {
+          input: bin.stdout,
+        });
+        expect(json.status).toBe(0);
+        const want = dec.decode(json.stdout).replace(/\n$/, "");
+        const reader = DynamicStruct.fromMessage(Message.fromFlat(new Uint8Array(bin.stdout)), book);
+        expect([unit, n, printers(reader)]).toEqual([
+          unit,
+          n,
+          { encodeJson: want, "JsonCodec.encode": want, encodeJsonBytes: want },
+        ]);
+      }
+    }
+  });
 });

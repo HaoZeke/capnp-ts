@@ -32,6 +32,7 @@ import {
   TypeKind,
 } from "./schema.ts";
 import { formatKjFloat64, type PrintableDynamic } from "./text.ts";
+import { rawStringByteLength, rawStringToBytes, rawTextToString } from "./utf8.ts";
 
 export const JSON_NAME_ANNOTATION_ID = 0xfa5b1fd61c2e7c3dn;
 export const JSON_FLATTEN_ANNOTATION_ID = 0x82d3e852af0336bfn;
@@ -39,8 +40,7 @@ export const JSON_DISCRIMINATOR_ANNOTATION_ID = 0xcfa794e8d19a0162n;
 export const JSON_BASE64_ANNOTATION_ID = 0xd7d879450a253e4bn;
 export const JSON_HEX_ANNOTATION_ID = 0xf061e22f0ae5c7b5n;
 
-const UTF8_ENC = new TextEncoder();
-const UTF8_DEC = new TextDecoder("utf-8", { fatal: false });
+const TEXT_DEC = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
 
 export type JsonAst =
   | { readonly which: "null" }
@@ -81,63 +81,53 @@ export interface JsonCodecOptions {
   rejectUnknownFields?: boolean;
 }
 
-function utf8ByteLength(s: string): number {
-  return UTF8_ENC.encode(s).byteLength;
-}
-
 const HEX_CHARS = "0123456789abcdef";
 
-function encodeJsonString(str: string): string {
-  const bytes = UTF8_ENC.encode(str);
+/**
+ * Quote `str` like C++ `JsonCodec::encodeString`. A lone surrogate becomes
+ * U+FFFD, except byte sentinels when `keepByteSentinels` is set.
+ */
+function encodeJsonString(str: string, keepByteSentinels = false): string {
   let out = '"';
-  let i = 0;
-  while (i < bytes.length) {
-    const b = bytes[i]!;
-    switch (b) {
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    switch (c) {
       case 0x22:
         out += '\\"';
-        i++;
         break;
       case 0x5c:
         out += "\\\\";
-        i++;
         break;
       case 0x08:
         out += "\\b";
-        i++;
         break;
       case 0x0c:
         out += "\\f";
-        i++;
         break;
       case 0x0a:
         out += "\\n";
-        i++;
         break;
       case 0x0d:
         out += "\\r";
-        i++;
         break;
       case 0x09:
         out += "\\t";
-        i++;
         break;
       default:
-        if (b < 0x20) {
-          out += `\\u00${HEX_CHARS[b >>> 4]}${HEX_CHARS[b & 0x0f]}`;
-          i++;
-        } else if (b < 0x80) {
-          out += String.fromCharCode(b);
-          i++;
+        if (c < 0x20) {
+          out += `\\u00${HEX_CHARS[c >>> 4]}${HEX_CHARS[c & 0x0f]}`;
+        } else if (c >= 0xd800 && c <= 0xdfff) {
+          if (str.codePointAt(i)! > 0xffff) {
+            out += str.slice(i, i + 2);
+            i++;
+          } else if (keepByteSentinels && c >= 0xdc00 && c <= 0xdcff) {
+            out += str[i];
+          } else {
+            out += "\ufffd";
+          }
         } else {
-          let seqLen = 1;
-          if ((b & 0xe0) === 0xc0) seqLen = 2;
-          else if ((b & 0xf0) === 0xe0) seqLen = 3;
-          else if ((b & 0xf8) === 0xf0) seqLen = 4;
-          out += UTF8_DEC.decode(bytes.subarray(i, i + seqLen));
-          i += seqLen;
+          out += str[i];
         }
-        break;
     }
   }
   out += '"';
@@ -1218,6 +1208,7 @@ export class JsonCodec {
   private hasMode: HasMode;
   private maxNestingDepth: number;
   private rejectUnknownFields: boolean;
+  private rawText = false;
 
   private readonly typeHandlers = new Map<string, JsonCustomHandler>();
   private readonly fieldHandlers = new WeakMap<StructField, JsonCustomHandler>();
@@ -1347,10 +1338,28 @@ export class JsonCodec {
     return new RawJsonParser(input, this.maxNestingDepth).parseRoot();
   }
 
+  /**
+   * The `encodeBytes` output decoded as UTF-8, so invalid bytes in Text
+   * become U+FFFD only after line breaks are chosen on the raw bytes.
+   */
   encode(value: PrintableDynamic, type?: Type): string {
-    const { reader, resolvedType } = coerceInputAndType(value, type);
-    const ast = this._encodeValueAst(reader, resolvedType);
-    return this.encodeRaw(ast);
+    return TEXT_DEC.decode(this.encodeBytes(value, type));
+  }
+
+  /**
+   * Encode to UTF-8 bytes with Text written byte for byte, as C++ does, so
+   * invalid UTF-8 is kept. A lone surrogate U+DC00 + b that a custom
+   * handler puts in a string is written as the byte b.
+   */
+  encodeBytes(value: PrintableDynamic, type?: Type): Uint8Array {
+    const saved = this.rawText;
+    this.rawText = true;
+    try {
+      const { reader, resolvedType } = coerceInputAndType(value, type);
+      return rawStringToBytes(this.encodeRaw(this._encodeValueAst(reader, resolvedType)));
+    } finally {
+      this.rawText = saved;
+    }
   }
 
   decodeStruct(input: string | JsonAst, output: DynamicStructBuilder): void {
@@ -1424,7 +1433,12 @@ export class JsonCodec {
       case TypeKind.UInt64:
         return { which: "string", value: input.asUInt64().toString(10) };
       case TypeKind.Text:
-        return { which: "string", value: input.asText() };
+        return {
+          which: "string",
+          value: this.rawText
+            ? rawTextToString(input.asTextBytes())
+            : TEXT_DEC.decode(input.asTextBytes()),
+        };
       case TypeKind.Data: {
         const bytes = input.asData();
         const items: JsonAst[] = new Array(bytes.length);
@@ -1734,7 +1748,7 @@ export class JsonCodec {
       case "number":
         return { text: formatKjFloat64(value.value), multiline: false };
       case "string":
-        return { text: encodeJsonString(value.value), multiline: false };
+        return { text: encodeJsonString(value.value, this.rawText), multiline: false };
       case "raw":
         return { text: value.value, multiline: value.value.includes("\n") };
       case "array": {
@@ -1795,7 +1809,7 @@ export class JsonCodec {
   ): { text: string; multiline: boolean } {
     let maxChildSize = 0;
     for (const e of elements) {
-      const sz = utf8ByteLength(e);
+      const sz = rawStringByteLength(e);
       if (sz > maxChildSize) maxChildSize = sz;
     }
 
@@ -1896,6 +1910,28 @@ export function encodeJson(
     codec.handleByAnnotation(value.getSchema());
   }
   return codec.encode(value);
+}
+
+/**
+ * Like `encodeJson`, but returns UTF-8 bytes with Text copied byte for byte,
+ * matching `capnp convert binary:json` on Text that is not valid UTF-8.
+ */
+export function encodeJsonBytes(
+  value: DynamicStructReader | DynamicStructBuilder,
+  opts?: {
+    pretty?: boolean;
+    hasMode?: HasMode;
+    annotations?: boolean;
+  },
+): Uint8Array {
+  const codec = new JsonCodec({
+    prettyPrint: opts?.pretty ?? false,
+    hasMode: opts?.hasMode ?? HasMode.NON_NULL,
+  });
+  if (opts?.annotations ?? true) {
+    codec.handleByAnnotation(value.getSchema());
+  }
+  return codec.encodeBytes(value);
 }
 
 /**
