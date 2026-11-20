@@ -848,7 +848,7 @@ export function schemaValueToDynamic(
     case "float64":
       return DynamicValueReader.fromFloat64Bits(sv.rawBits);
     case "text":
-      return DynamicValueReader.fromText(sv.value);
+      return DynamicValueReader.fromTextBytes(readPtrAsTextBytes(sv.ptr));
     case "data":
       return DynamicValueReader.fromData(sv.value);
     case "enum":
@@ -1287,7 +1287,9 @@ export class DynamicStructReader {
       case TypeKind.Text: {
         const p = slotPtr();
         if (p.isNull) {
-          if (dval.which === "text") return DynamicValueReader.fromText(dval.value);
+          if (dval.which === "text") {
+            return DynamicValueReader.fromTextBytes(readPtrAsTextBytes(dval.ptr));
+          }
           if (dval.which === "anyPointer" && !dval.ptr.isNull) {
             return DynamicValueReader.fromTextBytes(readPtrAsTextBytes(dval.ptr));
           }

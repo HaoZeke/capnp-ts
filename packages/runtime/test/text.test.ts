@@ -9,6 +9,7 @@ import {
   DynamicCapability,
   DynamicEnum,
   DynamicStruct,
+  DynamicValue,
   Message,
   MessageBuilder,
   SchemaLoader,
@@ -365,6 +366,44 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
         DynamicStruct.initRoot(copy, person).set("name", name);
         const copied = DynamicStruct.fromMessage(Message.fromFlat(copy.toFlat()), person);
         expect(copied.get("name").asTextBytes()).toEqual(name.asTextBytes());
+      }
+    },
+  );
+
+  test.skipIf(!hasCapnp)(
+    "Text defaults and consts keep raw non-UTF-8 bytes from the schema",
+    () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), "capnp-rawtext-"));
+      try {
+        const schemaPath = join(tmpDir, "raw.capnp");
+        writeFileSync(
+          schemaPath,
+          [
+            "@0x8123456789abcde9;",
+            'const rawConst :Text = "\\377\\200";',
+            'struct RawText { t @0 :Text = "\\377"; }',
+          ].join("\n"),
+        );
+        const cgr = spawnSync("capnp", ["compile", "-o-", schemaPath]);
+        expect(cgr.status).toBe(0);
+        const loader = SchemaLoader.fromCgr(new Uint8Array(cgr.stdout));
+        const rawConst = loader.getConst(
+          loader.findRootSymbol("rawConst", 0x8123456789abcde9n),
+        );
+        expect([...DynamicValue.fromConst(rawConst).asTextBytes()]).toEqual([
+          0xff, 0x80,
+        ]);
+
+        const rawStruct = loader.resolveStruct("RawText");
+        const empty = new MessageBuilder();
+        DynamicStruct.initRoot(empty, rawStruct);
+        const reader = DynamicStruct.fromMessage(
+          Message.fromFlat(empty.toFlat()),
+          rawStruct,
+        );
+        expect([...reader.get("t").asTextBytes()]).toEqual([0xff]);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
       }
     },
   );
