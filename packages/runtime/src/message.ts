@@ -231,7 +231,12 @@ export class Message {
   ): Message {
     assertCapnp(data.length >= 8, "FRAMING", "message shorter than 8 bytes");
     const nsegs = loadU32(data, 0) + 1;
-    assertCapnp(nsegs > 0 && nsegs <= MAX_SEGMENTS, "FRAMING", `bad nsegs ${nsegs}`);
+    // InputStreamMessageReader rejects segmentCount-1 >= 511 (at most 511 segments).
+    assertCapnp(
+      nsegs > 0 && nsegs <= 511,
+      "FRAMING",
+      "Message has too many segments.",
+    );
     let tableBytes = 4 + 4 * nsegs;
     if (tableBytes % 8 !== 0) tableBytes += 4;
     assertCapnp(data.length >= tableBytes, "FRAMING", "truncated segment table");
@@ -243,6 +248,11 @@ export class Message {
       sizes.push(sz);
       totalWords += sz;
     }
+    assertCapnp(
+      totalWords <= (opts?.traversalWords ?? DEFAULT_TRAVERSAL_WORDS),
+      "TRAVERSAL",
+      "Message is too large.",
+    );
     const body = tableBytes + totalWords * WORD_BYTES;
     assertCapnp(body <= data.length, "FRAMING", "truncated segment body");
 
