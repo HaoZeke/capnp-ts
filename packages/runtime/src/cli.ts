@@ -29,12 +29,10 @@ import { Message } from "./message.ts";
 import { pack, unpack } from "./packed.ts";
 import { SchemaLoader, StructSchema, Type } from "./schema.ts";
 import {
+  encodeTextBytes,
+  splitTextMessages,
   TextCodec,
   type TextInputError,
-  encodeText,
-  prettyPrint,
-  splitTextMessages,
-  stringify,
 } from "./text.ts";
 
 export type WireFormat =
@@ -218,11 +216,12 @@ function* iterateMessagesInFormat(
         "ARG",
         "text format requires <schema> and <type>",
       );
-      for (const slice of splitTextMessages(UTF8_DEC.decode(input))) {
+      const source = Array.from(input, (byte) => String.fromCharCode(byte)).join("");
+      for (const slice of splitTextMessages(source)) {
         const builder = new MessageBuilder();
         const root = initDynamicRoot(builder, rootSchema);
         let error: TextInputError | undefined;
-        new TextCodec().decodeStruct(
+        new TextCodec().decodeStructBytes(
           slice,
           root,
           opts?.recover ? (e) => { error ??= e; } : undefined,
@@ -309,7 +308,11 @@ export function writeMessageInFormat(
         depthLimit: 256,
       });
       const reader = DynamicStruct.fromMessage(fresh, rootSchema);
-      return UTF8_ENC.encode(`${encodeText(reader, { pretty })}\n`);
+      const text = encodeTextBytes(reader, { pretty });
+      const out = new Uint8Array(text.byteLength + 1);
+      out.set(text);
+      out[text.byteLength] = 0x0a;
+      return out;
     }
     case "json": {
       assertCapnp(
@@ -612,13 +615,12 @@ export function formatEvaluatedValue(
 ): Uint8Array {
   const pretty = !(opts?.short ?? false);
   if (format === "text") {
-    if (pretty && value.getType() === DynamicValueType.STRUCT) {
-      return UTF8_ENC.encode(`${prettyPrint(value.asStruct())}\n`);
-    }
-    if (pretty && value.getType() === DynamicValueType.LIST) {
-      return UTF8_ENC.encode(`${prettyPrint(value.asList())}\n`);
-    }
-    return UTF8_ENC.encode(`${stringify(value, type)}\n`);
+    const codec = new TextCodec({ prettyPrint: pretty });
+    const text = codec.encodeBytes(value, type);
+    const out = new Uint8Array(text.byteLength + 1);
+    out.set(text);
+    out[text.byteLength] = 0x0a;
+    return out;
   }
 
   assertCapnp(

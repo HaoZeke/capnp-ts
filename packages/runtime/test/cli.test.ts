@@ -283,6 +283,70 @@ describe("capnp-ts CLI (encode, decode, convert, eval)", () => {
   }, 60_000); // `capnp`, `bun`, and `node` exceed Bun's 5000 ms default on a slow CI runner.
 
   test.skipIf(!hasCapnp)(
+    "text stdin preserves valid UTF-8 and raw invalid bytes",
+    async () => {
+      const schema = join(repoRoot, "schema/dynamic-kitchen.capnp");
+      for (const bytes of [Uint8Array.of(0xc3, 0xa9), Uint8Array.of(0xff, 0x80, 0x61)]) {
+        const input = new Uint8Array(12 + bytes.length);
+        input.set(new TextEncoder().encode('(title = "'));
+        input.set(bytes, 10);
+        input.set(new TextEncoder().encode('")'), 10 + bytes.length);
+        const args = ["encode", "--flat", schema, "KitchenSink"];
+        const cpp = execCapnp(args, input);
+        const ts = await execCliInMemory(args, input);
+        expect(cpp.code).toBe(0);
+        expect(ts.code).toBe(0);
+        expect(ts.stdout).toEqual(cpp.stdout);
+      }
+    },
+  );
+
+  test.skipIf(!hasCapnp)("decode, convert and eval write raw Text bytes like capnp", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "capnp-cli-rawtext-"));
+    try {
+      const schema = join(tmpDir, "raw.capnp");
+      writeFileSync(
+        schema,
+        [
+          "@0xb1c2d3e4f5a69788;",
+          "struct R { t @0 :Text; l @1 :List(Text); }",
+          'const c :Text = "\\377\\200a";',
+          'const s :R = (t = "\\377", l = ["\\300\\257", "ok", "\\357\\273\\277"]);',
+        ].join("\n"),
+      );
+      for (const args of [
+        ["eval", schema, "c"],
+        ["eval", schema, "s"],
+        ["eval", "--short", schema, "s"],
+      ]) {
+        const cpp = execCapnp(args);
+        expect(cpp.code).toBe(0);
+        expect(Buffer.from((await execCliInMemory(args)).stdout).toString("hex")).toBe(
+          Buffer.from(cpp.stdout).toString("hex"),
+        );
+      }
+      const bin = execCapnp(
+        ["encode", schema, "R"],
+        new TextEncoder().encode('(t = "a\\377b", l = ["\\355\\240\\200", "\\303\\251"])'),
+      );
+      expect(bin.code).toBe(0);
+      for (const args of [
+        ["decode", schema, "R"],
+        ["decode", "--short", schema, "R"],
+        ["convert", "binary:text", schema, "R"],
+      ]) {
+        const cpp = execCapnp(args, bin.stdout);
+        expect(cpp.code).toBe(0);
+        expect(Buffer.from((await execCliInMemory(args, bin.stdout)).stdout).toString("hex")).toBe(
+          Buffer.from(cpp.stdout).toString("hex"),
+        );
+      }
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(!hasCapnp)(
     "differential parity against official capnp encode, decode, convert, and eval",
     async () => {
       const abSchemaPath = join(repoRoot, "schema/addressbook.capnp");

@@ -29,7 +29,7 @@ import {
   splitTextMessages,
   stringify,
 } from "../src/index.ts";
-import { readMessagesInFormat } from "../src/cli.ts";
+import { convertStream, readMessagesInFormat } from "../src/cli.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..", "..");
@@ -593,6 +593,47 @@ describe("Cap'n Proto text-format encoder and decoder", () => {
           rawStruct,
         );
         expect([...reader.get("t").asTextBytes()]).toEqual([0xff]);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(!hasCapnp)(
+    "1000 raw Text and Data values match capnp encode and decode bytes",
+    () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), "capnp-raw-text-diff-"));
+      try {
+        const schemaPath = join(tmpDir, "raw.capnp");
+        writeFileSync(schemaPath, "@0xa9c4f1e2d3b45679; struct Raw { t @0 :Text; d @1 :Data; }");
+        const cgr = spawnSync("capnp", ["compile", "-o-", schemaPath]);
+        expect(cgr.status).toBe(0);
+        const schema = SchemaLoader.fromCgr(new Uint8Array(cgr.stdout)).resolveStruct("Raw");
+        let state = 0x9e3779b9;
+        const nextByte = (): number => {
+          state ^= state << 13;
+          state ^= state >>> 17;
+          state ^= state << 5;
+          return state & 0xff;
+        };
+        const octal = (bytes: Uint8Array): string =>
+          Array.from(bytes, (byte) => `\\${byte.toString(8).padStart(3, "0")}`).join("");
+        const hex = (bytes: Uint8Array): string =>
+          Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(" ");
+        const rows: string[] = [];
+        for (let i = 0; i < 1000; i++) {
+          const text = Uint8Array.from({ length: 1 + (nextByte() % 31) }, nextByte);
+          const data = Uint8Array.from({ length: 1 + (nextByte() % 31) }, nextByte);
+          rows.push(`(t = "${octal(text)}", d = 0x"${hex(data)}")`);
+        }
+        const input = new TextEncoder().encode(rows.join("\n"));
+        const cppBinary = spawnSync("capnp", ["convert", "text:binary", schemaPath, "Raw"], { input });
+        expect(cppBinary.status).toBe(0);
+        const tsBinary = convertStream(input, "text", "binary", schema);
+        expect(tsBinary).toEqual(new Uint8Array(cppBinary.stdout));
+        const cppText = spawnSync("capnp", ["convert", "binary:text", schemaPath, "Raw"], { input: cppBinary.stdout });
+        expect(cppText.status).toBe(0);
+        expect(convertStream(tsBinary, "binary", "text", schema)).toEqual(new Uint8Array(cppText.stdout));
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
       }
