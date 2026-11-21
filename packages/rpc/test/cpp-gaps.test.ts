@@ -836,3 +836,36 @@ describe("incoming flow limit (rpc.c++ messageLoop, setFlowLimit)", () => {
     expect(seen).toEqual([1, 2]);
   });
 });
+
+describe("a released export of a promise (rpc.c++ handleRelease)", () => {
+  test("lets go of the promise and sends no Resolve once it settles", async () => {
+    let disposed = 0;
+    let settle!: (c: Client) => void;
+    const r = raw(
+      returning(() => Client.fromPromise(new Promise<Client>((res) => (settle = res)))),
+    );
+    r.send(bootstrap(0));
+    r.send(call(1, (t) => toAnswer(t, 0)));
+    expect(capKinds(r.take()[1]!.body)).toEqual([CapDescriptor.senderPromise]);
+    r.send(
+      frame(Message.finish, (m) => {
+        const f = m.initStruct(0, 1, 0);
+        f.setU32(0, 1);
+        f.setBool(32, false, true);
+      }),
+    );
+    r.send(
+      frame(Message.release, (m) => {
+        const rel = m.initStruct(0, 1, 0);
+        rel.setU32(0, 1);
+        rel.setU32(4, 1);
+      }),
+    );
+    expect(r.vat.liveExports()).toEqual([0]);
+    settle(Client.local({ dispatch() {}, dispose: () => void disposed++ }));
+    await nextTurn();
+    await nextTurn();
+    expect(disposed).toBe(1);
+    expect(r.take()).toEqual([]);
+  });
+});
