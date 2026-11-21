@@ -449,11 +449,32 @@ const scenarios: Record<string, () => Promise<void>> = {
     await assert.rejects(Promise.resolve(echo(M.ping, arg(1), 1, 0)), (e: RpcError) => e.type === "disconnected");
     assert.ok(conn.disconnected);
   },
+
+  // Against interop/raw_server.ts only: makeCounter's results name a
+  // capability the cap table cannot give.
+  async returncaps() {
+    const outcome = async (f: () => unknown): Promise<string> => {
+      try {
+        await f();
+        return "ok";
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    };
+    const call = echo(M.makeCounter);
+    const early = outcome(() => inc(call.pipeline(0), 1));
+    const results = await call;
+    console.log(`read: ${await outcome(() => results.getCap(results.content.getP(0)))}`);
+    console.log(`after: ${await outcome(() => inc(call.pipeline(0), 2))}`);
+    console.log(`early: ${await early}`);
+  },
 };
+
+const explicitOnly = new Set(["returncaps"]);
 
 let failed = false;
 for (const [name, run] of Object.entries(scenarios)) {
-  if (only.length > 0 && !only.includes(name)) continue;
+  if (only.length > 0 ? !only.includes(name) : explicitOnly.has(name)) continue;
   try {
     await run();
     console.log(`ok ${name}`);

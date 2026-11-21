@@ -34,6 +34,7 @@ import {
   isNullCap,
   LocalClient,
   newNullCap,
+  NoneEntry,
   Payload,
   QueuedClient,
   RefHook,
@@ -510,7 +511,7 @@ function settledCall(payload: Payload): CallState {
   const call = new CallState();
   call.result.resolve(payload);
   call.pipeline = {
-    getPipelinedCap: (ops) => payload.getPipelinedCap(ops),
+    getPipelinedCap: (ops) => payload.pipelinedCapAt(ops),
   };
   return call;
 }
@@ -965,11 +966,11 @@ export class RpcConnection implements RemoteHost {
   /** Make a hook from one entry of a received cap table. */
   private receiveCap(desc: Ptr): ClientHook {
     if (desc.kind !== PtrKind.Struct) {
-      return newNullCap();
+      return new NoneEntry();
     }
     switch (CapDescriptor_which(desc)) {
       case CapDescriptor.none:
-        return newNullCap();
+        return new NoneEntry();
       case CapDescriptor.senderHosted:
         return this.importCap(CapDescriptor_getSenderHosted(desc), false);
       case CapDescriptor.senderPromise:
@@ -1045,11 +1046,11 @@ export class RpcConnection implements RemoteHost {
 
   private pipelineOf(id: number, q: QuestionState, ops: readonly number[]): ClientHook {
     const r = q.call.result;
-    if (r.state === "ok") return r.value.getPipelinedCap(ops);
+    if (r.state === "ok") return r.value.pipelinedCapAt(ops);
     if (r.state === "err") return new BrokenClient(r.error);
     const eventual = new Settle<ClientHook>();
     r.onSettled((s) => {
-      eventual.resolve(s.state === "ok" ? s.value.getPipelinedCap(ops) : new BrokenClient(s.error));
+      eventual.resolve(s.state === "ok" ? s.value.pipelinedCapAt(ops) : new BrokenClient(s.error));
     });
     return new PromiseClient(
       this,
@@ -1987,7 +1988,7 @@ export class RpcConnection implements RemoteHost {
       getPipelinedCap: (ops) =>
         this.resolutionAtReturnTime(
           live.getPipelinedCap(ops),
-          results.getPipelinedCap(ops),
+          results.pipelinedCapAt(ops),
           atReturn,
         ),
     };

@@ -1298,6 +1298,85 @@ describe("results a method never wrote (rpc.c++ sendReturn, getResults)", () => 
   });
 });
 
+/** A Return for question `q` whose results pointer 0 is filled by `fill`. */
+function returnWith(
+  q: number,
+  fill: (b: MessageBuilder, content: StructBuilder, payload: StructBuilder) => void,
+): Uint8Array {
+  const b = new MessageBuilder();
+  const root = b.initRoot(1, 1);
+  root.setU16(0, Message.return);
+  const ret = root.initStruct(0, 2, 1);
+  ret.setU32(0, q);
+  const payload = ret.initStruct(0, 0, 2);
+  fill(b, payload.initStruct(0, 0, 1), payload);
+  return b.toFlat();
+}
+
+describe("capability pointers a cap table cannot serve (layout.c++ readCapabilityPointer)", () => {
+  const reader: RpcServer = {
+    dispatch(_i, _m, params, _r, ctx) {
+      ctx.getCap(params.getP(0)).release();
+    },
+  };
+  const reasonOf = (r: Raw, answer: number): string => {
+    const ret = r.take().find((m) => m.which === Message.return && Return_getAnswerId(m.body) === answer);
+    expect(Return_which(ret!.body)).toBe(Return.exception);
+    return Exception_getReason(Return_getException(ret!.body));
+  };
+
+  test("a `none` entry read from params fails the call", () => {
+    const r = raw(reader);
+    r.send(bootstrap(0));
+    r.send(callWithCap(1, (t) => toAnswer(t, 0), CapDescriptor.none, 0));
+    expect(reasonOf(r, 1)).toBe("Message contains invalid capability pointer.");
+    expect(r.vat.disconnected).toBeUndefined();
+  });
+
+  test("a `none` entry no pointer reads is harmless", () => {
+    const r = raw(ping);
+    r.send(bootstrap(0));
+    r.send(callWithCap(1, (t) => toAnswer(t, 0), CapDescriptor.none, 0));
+    const ret = r.take().find((m) => m.which === Message.return && Return_getAnswerId(m.body) === 1);
+    expect(Return_which(ret!.body)).toBe(Return.results);
+  });
+
+  test("a struct where params hold a capability is a schema mismatch", () => {
+    const r = raw(reader);
+    r.send(bootstrap(0));
+    r.send(
+      frame(Message.call, (m) => {
+        const c = m.initStruct(0, 3, 3);
+        c.setU32(0, 1);
+        c.setU64(8, IFACE);
+        toAnswer(c.initStruct(0, 1, 1), 0);
+        c.initStruct(1, 0, 2).initStruct(0, 0, 1).initStruct(0, 1, 0);
+      }),
+    );
+    expect(reasonOf(r, 1)).toBe(
+      "Schema mismatch: Message contains non-capability pointer where capability pointer was expected.",
+    );
+  });
+
+  test("results that name a `none` entry fail when read and when pipelined", async () => {
+    const r = raw();
+    const call = r.vat.bootstrap().call(IFACE, 0);
+    r.send(
+      returnWith(1, (b, content, payload) => {
+        content.adopt(0, Orphan.cap(b, 0));
+        payload.initCompositeList(1, 1, 1, 1).setU16(0, CapDescriptor.none);
+      }),
+    );
+    const results = await call;
+    expect(() => results.getCap(results.content.getP(0))).toThrow(
+      "Message contains invalid capability pointer.",
+    );
+    await expect(Promise.resolve(call.pipeline(0).call(IFACE, 0))).rejects.toMatchObject({
+      message: "Message contains invalid capability pointer.",
+    });
+  });
+});
+
 describe("Resolve messages capnp-C++ refuses (rpc.c++ handleResolve)", () => {
   const resolveWhich = (which: number, desc?: (d: StructBuilder) => void): Uint8Array =>
     frame(Message.resolve, (m) => {

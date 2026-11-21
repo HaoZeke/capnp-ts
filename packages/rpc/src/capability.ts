@@ -125,12 +125,21 @@ export class Payload {
     return this.content === nullContent;
   }
 
-  /** The hook a capability pointer inside this payload names. */
+  /**
+   * The hook a capability pointer inside this payload names. As
+   * capnp-C++ `readCapabilityPointer`, a pointer that is not a capability,
+   * or that names a missing or `none` cap table entry, throws.
+   */
   getCap(ptr: Ptr): ClientHook {
-    if (ptr.kind !== PtrKind.Cap) return newNullCap();
+    if (ptr.kind === PtrKind.Null) return newNullCap();
+    if (ptr.kind !== PtrKind.Cap) {
+      throw new RpcError(
+        "Schema mismatch: Message contains non-capability pointer where capability pointer was expected.",
+      );
+    }
     const hook = this.caps[ptr.count];
-    if (hook === undefined) {
-      return new BrokenClient(new RpcError("capability index is outside the cap table"));
+    if (hook === undefined || hook instanceof NoneEntry) {
+      throw new RpcError("Message contains invalid capability pointer.");
     }
     return hook.addRef();
   }
@@ -153,6 +162,26 @@ export class Payload {
   release(): void {
     for (const h of this.caps) h.release();
     this.caps.length = 0;
+  }
+
+  /**
+   * The capability a pipelined call along `ops` reaches, as an owned
+   * reference. As capnp-C++ `AnyPointer::Reader::getPipelinedCap`, a
+   * capability that cannot be read is a broken one.
+   */
+  pipelinedCapAt(ops: readonly number[]): ClientHook {
+    let at = this.content;
+    for (const field of ops) {
+      if (at.kind !== PtrKind.Struct) {
+        return new BrokenClient(new RpcError("pipeline path walks into a non-struct"));
+      }
+      at = at.getP(field);
+    }
+    try {
+      return this.getCap(at);
+    } catch (e) {
+      return new BrokenClient(e instanceof RpcError ? e : new RpcError(String(e)));
+    }
   }
 }
 
@@ -457,6 +486,13 @@ export function newNullCap(): ClientHook {
   return new BrokenClient(new RpcError("Called null capability."), true);
 }
 
+/** A received `CapDescriptor.none`: capnp-C++ leaves its cap table slot empty. */
+export class NoneEntry extends BrokenClient {
+  constructor() {
+    super(new RpcError("Calling invalid capability pointer."));
+  }
+}
+
 export function isNullCap(hook: ClientHook): boolean {
   return hook instanceof BrokenClient && hook.isNull;
 }
@@ -615,7 +651,7 @@ class LocalPipeline implements PipelineHook {
   getPipelinedCap(ops: readonly number[]): ClientHook {
     if (this.delegate !== undefined) return this.delegate.getPipelinedCap(ops);
     const r = this.result;
-    if (r.state === "ok") return r.value.getPipelinedCap(ops);
+    if (r.state === "ok") return r.value.pipelinedCapAt(ops);
     if (r.state === "err") return new BrokenClient(r.error);
     this.retain();
     let held = true;
@@ -631,7 +667,7 @@ class LocalPipeline implements PipelineHook {
       const idx = this.pending.indexOf(entry);
       if (idx !== -1) this.pending.splice(idx, 1);
       if (eventual.state === "pending") {
-        eventual.resolve(s.state === "ok" ? s.value.getPipelinedCap(ops) : new BrokenClient(s.error));
+        eventual.resolve(s.state === "ok" ? s.value.pipelinedCapAt(ops) : new BrokenClient(s.error));
       }
       drop();
     });

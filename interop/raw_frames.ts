@@ -349,6 +349,23 @@ const SCENARIOS: Record<string, Step[]> = {
     W(100),
     call({ q: 2, method: M.callHeld, target: (t) => targetAnswer(t, 0), params: (p) => p.setU32(0, 3) }),
   ],
+  // A capability pointer that names a `none` cap table entry is invalid
+  // once read; an entry no pointer reads is harmless.
+  "none-param-read": [bootstrap(0), capCall(1, M.hold, (t) => targetAnswer(t, 0), [[0, 0]])],
+  "none-param-import-target": [
+    bootstrap(0),
+    W(100),
+    capCall(1, M.echoCap, (t) => targetImport(t, 0), [[0, 0]]),
+  ],
+  // The held capability is first cleared, as the C++ peer shares one Echo.
+  "none-param-second-entry": [
+    bootstrap(0),
+    call({ q: 1, method: M.hold, target: (t) => targetAnswer(t, 0), dwords: 0, pwords: 1 }),
+    capCall(2, M.hold, (t) => targetAnswer(t, 0), [[1, 5], [0, 0]], 1),
+    W(100),
+    call({ q: 3, method: M.callHeld, target: (t) => targetAnswer(t, 0), params: (p) => p.setU32(0, 3) }),
+  ],
+  "none-param-unread": [bootstrap(0), capCall(1, M.ping, (t) => targetAnswer(t, 0), [[0, 0]])],
   // A capability in params that the method never keeps is released after the Return.
   "unused-param-cap": [bootstrap(0), capCall(1, M.ping, (t) => targetAnswer(t, 0), [[1, 5]]), W(100)],
   "unused-param-cap-failed": [bootstrap(0), capCall(1, M.fail, (t) => targetAnswer(t, 0), [[1, 5]]), W(100)],
@@ -488,7 +505,7 @@ function caps(payload: Ptr): string {
   return `[${out.join(",")}]`;
 }
 
-function describe(f: Uint8Array): string {
+export function describe(f: Uint8Array): string {
   const root = CapnpMessage.fromFlat(f, { traversalWords: 1 << 26 }).root();
   const which = Message_which(root);
   const body = root.getP(0);
@@ -539,7 +556,7 @@ function describe(f: Uint8Array): string {
 }
 
 /** Bytes the frame at the head of `buf` needs, or 0 when the table is incomplete. */
-function need(buf: Uint8Array): number {
+export function need(buf: Uint8Array): number {
   if (buf.length < 4) return 0;
   const v = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const n = v.getUint32(0, true) + 1;
@@ -593,7 +610,9 @@ async function run(port: number, steps: Step[]): Promise<string[]> {
   return lines;
 }
 
-if (process.argv[2] === "--list") {
+if (!import.meta.main) {
+  // Imported for `describe` and `need`.
+} else if (process.argv[2] === "--list") {
   console.log(Object.keys(SCENARIOS).join("\n"));
 } else {
   const port = Number(process.argv[2]);

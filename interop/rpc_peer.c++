@@ -242,6 +242,18 @@ template <typename F> bool failsWith(F &&f, const char *text) {
 	return false;
 }
 
+bool named(const std::vector<std::string> &only, const char *name) {
+	for (auto &o : only) if (o == name) return true;
+	return false;
+}
+
+template <typename F> std::string outcome(F &&f) {
+	KJ_IF_MAYBE(e, kj::runCatchingExceptions(kj::fwd<F>(f))) {
+		return e->getDescription().cStr();
+	}
+	return "ok";
+}
+
 bool wants(const std::vector<std::string> &only, const char *name) {
 	if (only.empty()) return true;
 	for (auto &o : only) if (o == name) return true;
@@ -548,6 +560,24 @@ void runClient(const std::string &addr, const std::vector<std::string> &only) {
 		plain.setN(5);
 		KJ_REQUIRE(plain.send().wait(ws).getN() == 6);
 		ok("membrane");
+	}
+
+	// Against interop/raw_server.ts only: makeCounter's results name a
+	// capability the cap table cannot give.
+	if (named(only, "returncaps")) {
+		auto call = echo.makeCounterRequest().send();
+		auto early = call.getCounter().incRequest();
+		early.setN(1);
+		auto earlyP = early.send();
+		auto results = call.wait(ws);
+		std::cout << "read: " << outcome([&]() { results.getCounter(); }) << std::endl;
+		std::cout << "after: " << outcome([&]() {
+			auto inc = call.getCounter().incRequest();
+			inc.setN(2);
+			inc.send().wait(ws);
+		}) << std::endl;
+		std::cout << "early: " << outcome([&]() { earlyP.wait(ws); }) << std::endl;
+		ok("returncaps");
 	}
 
 	if (wants(only, "abort")) {
