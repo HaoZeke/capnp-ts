@@ -37,6 +37,7 @@ import {
   encodeTextBytes,
   splitTextMessages,
   TextCodec,
+  TextFatalError,
   type TextInputError,
 } from "./text.ts";
 
@@ -323,6 +324,13 @@ function guessFormat(prefix: Uint8Array, rootSchema: StructSchema | undefined): 
   return GUESS_ORDER.find((f) => plausibleOrWrongType(isPlausibly(f, prefix, rootSchema))) ?? null;
 }
 
+/** Input `checkPlausibility` rejects. `capnp` reports it as a usage error of the command. */
+export class ImplausibleInputError extends CapnpError {
+  constructor(message: string) {
+    super("ARG", message);
+  }
+}
+
 /**
  * The `capnp` CLI's `checkPlausibility` on the first buffered read: throw
  * when the input cannot be in `format`, and warn when it looks unlikely.
@@ -337,8 +345,7 @@ function checkPlausibility(
   if (verdict === "plausible") return;
   const guess = guessFormat(prefix, rootSchema);
   if (verdict === "impossible") {
-    throw new CapnpError(
-      "ARG",
+    throw new ImplausibleInputError(
       guess === null
         ? `The input is not in "${format}" format.`
         : `The input is not in "${format}" format. It looks like it is in "${guess}" format. Try that instead.`,
@@ -1249,8 +1256,10 @@ export async function runCli(
   const writeErr =
     io?.stderr ?? ((msg: string) => process.stderr.write(`${msg}\n`));
 
+  let command: string | null = null;
   try {
     const flags = parseFlags(argv);
+    command = flags.command;
     if (flags.help) {
       writeOut(UTF8_ENC.encode(HELP_TEXT));
       return 0;
@@ -1359,6 +1368,15 @@ export async function runCli(
   } catch (err) {
     if (err instanceof CliUsageError) {
       writeErr(err.render());
+      return 1;
+    }
+    if (err instanceof ImplausibleInputError) {
+      writeErr(new CliUsageError(`capnp-ts ${command}`, err.message).render());
+      return 1;
+    }
+    // kj prints the exception without a `stack:` line when it has no trace.
+    if (err instanceof TextFatalError) {
+      writeErr(`*** Uncaught exception ***\n${err.message}`);
       return 1;
     }
     const msg = err instanceof Error ? err.message : String(err);

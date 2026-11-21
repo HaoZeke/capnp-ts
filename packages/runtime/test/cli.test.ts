@@ -980,7 +980,7 @@ describe("input plausibility like capnp 1.4.0", () => {
     expect(r.code).toBe(1);
     expect(r.stdout.byteLength).toBe(0);
     expect(r.stderr).toBe(
-      'capnp-ts: The input is not in "binary" format. It looks like it is in "flat" format. Try that instead.',
+      `capnp-ts convert: The input is not in "binary" format. It looks like it is in "flat" format. Try that instead.\nTry 'capnp-ts convert --help' for more information.`,
     );
   });
 
@@ -997,7 +997,7 @@ describe("input plausibility like capnp 1.4.0", () => {
     );
     expect(r.code).toBe(1);
     expect(r.stderr).toBe(
-      'capnp-ts: The input is not in "text" format. It looks like it is in "binary" format. Try that instead.',
+      `capnp-ts convert: The input is not in "text" format. It looks like it is in "binary" format. Try that instead.\nTry 'capnp-ts convert --help' for more information.`,
     );
   });
 
@@ -1008,7 +1008,7 @@ describe("input plausibility like capnp 1.4.0", () => {
     );
     expect(r.code).toBe(1);
     expect(r.stderr).toBe(
-      'capnp-ts: The input is not in "flat-packed" format. It looks like it is in "binary" format. Try that instead.',
+      `capnp-ts convert: The input is not in "flat-packed" format. It looks like it is in "binary" format. Try that instead.\nTry 'capnp-ts convert --help' for more information.`,
     );
   });
 
@@ -1446,6 +1446,65 @@ describe("bit list copies like capnp 1.4.0", () => {
     for (const [to, digest] of cases) {
       const live = execCapnp(["convert", `binary:${to}`, schemaPath, "KitchenSink"], await dirtyFlags());
       expect({ to, code: live.code, digest: sha256(live.stdout) }).toEqual({ to, code: 0, digest });
+    }
+  });
+});
+
+describe("malformed text input like capnp 1.4.0", () => {
+  const cgr = (type: string) => join(goldenDir, type === "Person" ? "addressbook.cgr.bin" : "dynamic-kitchen.cgr.bin");
+  const schemaPath = (type: string) =>
+    join(repoRoot, "schema", type === "Person" ? "addressbook.capnp" : "dynamic-kitchen.capnp");
+  const latin1 = (s: string) => Uint8Array.from(s, (c) => c.charCodeAt(0));
+
+  // stdout, stderr and status from `capnp convert text:json`, with the `stack:` line of an
+  // uncaught exception left out and the program name changed.
+  const cases: [string, string, string, number, string, string][] = [
+    ["empty-value-second", "Person", "(id = 1, name = \"a\")\n(id = 2, name = )", 1, "{\"id\": 1, \"name\": \"a\", \"employment\": {\"unemployed\": null}}\n{\"id\": 2, \"employment\": {\"unemployed\": null}}\n", "*** ERROR CONVERTING PREVIOUS MESSAGE ***\nThe following error occurred while converting the message above.\nThis probably means the input data is invalid/corrupted.\nException description: 9-15: Parse error.\nCode location: (capnp text input):1\n*** END ERROR ***"],
+    ["unterminated", "Person", "(id = 1, name = \"a\"", 1, "", "*** Uncaught exception ***\ncapnp/serialize-text.c++:107: failed: Failed to read input."],
+    ["bad-first-item", "Person", "(id = , name = \"b\")", 1, "{\"id\": 0, \"name\": \"b\", \"employment\": {\"unemployed\": null}}\n", "*** ERROR CONVERTING PREVIOUS MESSAGE ***\nThe following error occurred while converting the message above.\nThis probably means the input data is invalid/corrupted.\nException description: 1-5: Parse error.\nCode location: (capnp text input):1\n*** END ERROR ***"],
+    ["empty-item", "Person", "(id = 1,, name = \"b\")", 1, "{\"id\": 1, \"name\": \"b\", \"employment\": {\"unemployed\": null}}\n", "*** ERROR CONVERTING PREVIOUS MESSAGE ***\nThe following error occurred while converting the message above.\nThis probably means the input data is invalid/corrupted.\nException description: 0-21: Parse error: Empty list item.\nCode location: (capnp text input):1\n*** END ERROR ***"],
+    ["operator-run", "Person", "(id =-1, name = \"c\")", 1, "{\"id\": 0, \"name\": \"c\", \"employment\": {\"unemployed\": null}}\n", "*** ERROR CONVERTING PREVIOUS MESSAGE ***\nThe following error occurred while converting the message above.\nThis probably means the input data is invalid/corrupted.\nException description: 6-7: Parse error.\nCode location: (capnp text input):1\n*** END ERROR ***"],
+    ["two-values", "Person", "(id = 1 2, name = \"d\")", 1, "{\"id\": 0, \"name\": \"d\", \"employment\": {\"unemployed\": null}}\n", "*** ERROR CONVERTING PREVIOUS MESSAGE ***\nThe following error occurred while converting the message above.\nThis probably means the input data is invalid/corrupted.\nException description: 1-9: Parse error.\nCode location: (capnp text input):1\n*** END ERROR ***"],
+    ["bad-list-element", "Person", "(name = \"x\", phones = [(number = \"1\"), (number = ), (number = \"3\")])", 1, "{ \"id\": 0,\n  \"name\": \"x\",\n  \"phones\": [{\"number\": \"1\", \"type\": \"mobile\"}, {\"type\": \"mobile\"}, {\"number\": \"3\", \"type\": \"mobile\"}],\n  \"employment\": {\"unemployed\": null} }\n", "*** ERROR CONVERTING PREVIOUS MESSAGE ***\nThe following error occurred while converting the message above.\nThis probably means the input data is invalid/corrupted.\nException description: 40-48: Parse error.\nCode location: (capnp text input):1\n*** END ERROR ***"],
+    ["empty-list-element", "Person", "(phones = [ , (number = \"2\")])", 1, "{ \"id\": 0,\n  \"phones\": [{\"type\": \"mobile\"}, {\"number\": \"2\", \"type\": \"mobile\"}],\n  \"employment\": {\"unemployed\": null} }\n", "*** ERROR CONVERTING PREVIOUS MESSAGE ***\nThe following error occurred while converting the message above.\nThis probably means the input data is invalid/corrupted.\nException description: 10-29: Parse error: Empty list item.\nCode location: (capnp text input):1\n*** END ERROR ***"],
+    ["float-no-exponent", "KitchenSink", "(f64 = 1e, i8 = 3)", 1, "{ \"nothing\": null,\n  \"flag\": false,\n  \"flagDefaultTrue\": true,\n  \"i8\": 3,\n  \"i16\": -3000,\n  \"i32\": -100000,\n  \"i64\": \"-9007199254740993\",\n  \"u8\": 200,\n  \"u16\": 50000,\n  \"u32\": 3000000000,\n  \"u64\": \"9007199254740995\",\n  \"f32\": 1.5,\n  \"f64\": 0,\n  \"priority\": \"normal\",\n  \"meta\": {\"revision\": 1, \"nested\": {\"ok\": true, \"score\": 0.5}},\n  \"source\": {\"unset\": null},\n  \"none\": null }\n", "*** ERROR CONVERTING PREVIOUS MESSAGE ***\nThe following error occurred while converting the message above.\nThis probably means the input data is invalid/corrupted.\nException description: expected endPtr == s.end() [e == ]; String does not contain valid floating number; s = 1e\nCode location: kj/string.c++:595\n*** END ERROR ***"],
+    ["second-unterminated", "Person", "(id = 1)(id = 2", 1, "{\"id\": 1, \"employment\": {\"unemployed\": null}}\n", "*** Uncaught exception ***\ncapnp/serialize-text.c++:107: failed: Failed to read input."],
+    ["extra-tokens", "Person", "(id = 1) junk", 1, "", "*** Uncaught exception ***\ncapnp/serialize-text.c++:95: failed: expected parserInput.getPosition() == tokens.end() [(can't stringify) == (can't stringify)]; Extra tokens in input."],
+    ["import", "Person", "(id = import \"x\")", 1, "", "*** Uncaught exception ***\ncapnp/serialize-text.c++:69: failed: External constants not allowed."],
+    ["embed", "Person", "(name = embed \"x\")", 1, "", "*** Uncaught exception ***\ncapnp/serialize-text.c++:74: failed: External embeds not allowed."],
+    ["constant", "Person", "(id = foo)", 1, "", "*** Uncaught exception ***\ncapnp/serialize-text.c++:69: failed: External constants not allowed."],
+    ["multiline", "Person", "(id = 1,\n  name = )", 1, "{\"id\": 1, \"employment\": {\"unemployed\": null}}\n", "*** ERROR CONVERTING PREVIOUS MESSAGE ***\nThe following error occurred while converting the message above.\nThis probably means the input data is invalid/corrupted.\nException description: 3-9: Parse error.\nCode location: (capnp text input):2\n*** END ERROR ***"],
+    ["octal-nine", "Person", "(id = 09)", 1, "{\"id\": 0, \"employment\": {\"unemployed\": null}}\n", "*** ERROR CONVERTING PREVIOUS MESSAGE ***\nThe following error occurred while converting the message above.\nThis probably means the input data is invalid/corrupted.\nException description: 1-8: Parse error.\nCode location: (capnp text input):1\n*** END ERROR ***"],
+    ["nested-bad", "Person", "(employment = (employer = ), id = 6)", 1, "{\"id\": 6, \"employment\": {\"unemployed\": null}}\n", "*** ERROR CONVERTING PREVIOUS MESSAGE ***\nThe following error occurred while converting the message above.\nThis probably means the input data is invalid/corrupted.\nException description: 15-25: Parse error.\nCode location: (capnp text input):1\n*** END ERROR ***"],
+    ["leading-comma", "Person", "(, id = 5)", 1, "{\"id\": 5, \"employment\": {\"unemployed\": null}}\n", "*** ERROR CONVERTING PREVIOUS MESSAGE ***\nThe following error occurred while converting the message above.\nThis probably means the input data is invalid/corrupted.\nException description: 0-10: Parse error: Empty list item.\nCode location: (capnp text input):1\n*** END ERROR ***"],
+    ["bad-escape", "Person", "(name = \"a\\q\")", 1, "", "*** Uncaught exception ***\ncapnp/serialize-text.c++:107: failed: Failed to read input."],
+    ["not-a-struct", "Person", "(5)", 1, "{\"id\": 0, \"employment\": {\"unemployed\": null}}\n", "*** ERROR CONVERTING PREVIOUS MESSAGE ***\nThe following error occurred while converting the message above.\nThis probably means the input data is invalid/corrupted.\nException description: expected expression.isTuple(); Input does not contain a struct.\nCode location: capnp/serialize-text.c++:134\n*** END ERROR ***"],
+  ];
+
+  for (const [name, type, input, code, stdout, stderr] of cases) {
+    test(`${name} converts as capnp does`, async () => {
+      const r = await execCliInMemory(["convert", "text:json", cgr(type), type], latin1(input));
+      expect({ code: r.code, stdout: Buffer.from(r.stdout).toString("latin1"), stderr: r.stderr }).toEqual({
+        code,
+        stdout,
+        stderr,
+      });
+    });
+  }
+
+  test.skipIf(!hasCapnp)("expectations match live capnp", () => {
+    for (const [name, type, input, code, stdout, stderr] of cases) {
+      const live = execCapnp(["convert", "text:json", schemaPath(type), type], latin1(input));
+      const liveErr = live.stderr
+        .replace(/^stack: .*\n/m, "")
+        .replace(/capnp convert/g, "capnp-ts convert")
+        .replace(/\n$/, "");
+      expect({ name, code: live.code, stdout: Buffer.from(live.stdout).toString("latin1"), stderr: liveErr }).toEqual({
+        name,
+        code,
+        stdout,
+        stderr,
+      });
     }
   });
 });
