@@ -1109,7 +1109,9 @@ describe("promise chains shorten", () => {
     const late = promise.call(IFACE, 0, arg(2));
     await settle();
     expect((await late).content.getU32(0)).toBe(3);
-    expect(tb.sent.filter((k) => k === "resolve").length).toBe(2);
+    // capnp-C++ hands the export entry to the second promise and sends
+    // one Resolve, for the real target, once the chain has settled.
+    expect(tb.sent.filter((k) => k === "resolve").length).toBe(1);
     expect(ta.sent).not.toContain("abort");
     expect(b.disconnected).toBeUndefined();
   });

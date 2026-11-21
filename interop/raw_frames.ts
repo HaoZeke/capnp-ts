@@ -36,6 +36,8 @@ const M = {
   resolveLater: 3,
   echoCap: 8,
   brokenCap: 10,
+  promiseOfHeld: 13,
+  resolveHeld: 14,
 } as const;
 
 type Step = Uint8Array | { wait: number };
@@ -197,6 +199,13 @@ const SCENARIOS: Record<string, Step[]> = {
   "broken-cap-result": [
     bootstrap(0),
     call({ q: 1, method: M.brokenCap, target: (t) => targetAnswer(t, 0) }),
+  ],
+  // Gap 1: an exported promise that resolves to a null capability.
+  "promise-to-null": [
+    bootstrap(0),
+    call({ q: 1, method: M.promiseOfHeld, target: (t) => targetAnswer(t, 0) }),
+    W(100),
+    call({ q: 2, method: M.resolveHeld, target: (t) => targetAnswer(t, 0) }),
   ],
   // Gap 5: a Call with a null body decodes as a default Call.
   "null-call": [nullBody(Message.call)],

@@ -15,6 +15,7 @@ import {
   servePersistent,
   StreamTransport,
 } from "../packages/rpc/src/index.ts";
+import { newNullCap } from "../packages/rpc/src/capability.ts";
 import {
   COUNTER_INTERFACE_ID,
   Echo_methods,
@@ -56,7 +57,14 @@ export function attach(sock: Socket, bootstrap?: RpcServer | Client): RpcConnect
     }
     drain();
   });
-  const gone = (): void => conn.disconnect(new RpcError("connection closed", "disconnected"));
+  // An abort can also come from a promise callback, outside drain().
+  const watch = setInterval(() => {
+    if (conn.disconnected !== undefined) sock.end();
+  }, 20);
+  const gone = (): void => {
+    clearInterval(watch);
+    conn.disconnect(new RpcError("connection closed", "disconnected"));
+  };
   sock.on("close", gone);
   sock.on("error", gone);
   return conn;
@@ -219,7 +227,7 @@ export class EchoImpl implements RpcServer {
         return;
       }
       case m.resolveHeld.ordinal:
-        this.fulfillHeld?.(this.held!.dup());
+        this.fulfillHeld?.(this.held?.dup() ?? new Client(newNullCap()));
         this.fulfillHeld = undefined;
         return;
       case m.openSink.ordinal:

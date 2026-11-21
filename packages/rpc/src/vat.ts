@@ -711,22 +711,31 @@ export class RpcConnection implements RemoteHost {
         if (this.exportIdByHook.get(slot.hook) === exportId) this.exportIdByHook.delete(slot.hook);
         const old = slot.hook;
         slot.hook = target.addRef();
-        slot.pendingResolve = false;
         old.release();
-        if (isNullCap(target)) {
-          send((resolve) => {
-            resolve.setU16(OFF.resolveUnion, Resolve.exception);
-            this.writeException(
-              resolve.initStruct(0, EXCEPTION_DWORDS, EXCEPTION_PWORDS),
-              target.brokenError,
-            );
-          });
-          return;
+        if (target.brand !== this) {
+          // A local promise not yet exported takes over this entry, and
+          // no Resolve goes out until it settles. A broken capability is
+          // such a promise, already rejected.
+          const more = target.whenMoreResolved();
+          if (more !== undefined && !this.exportIdByHook.has(target)) {
+            this.exportIdByHook.set(target, exportId);
+            this.resolveExportedPromise(exportId, target, more);
+            return;
+          }
         }
+        slot.pendingResolve = false;
         send((resolve) => {
           resolve.setU16(OFF.resolveUnion, Resolve.cap);
           const desc = resolve.initStruct(0, CAP_DESCRIPTOR_DWORDS, CAP_DESCRIPTOR_PWORDS);
-          this.writeDescriptor(target, desc);
+          // capnp-C++ exports a null capability here like any other.
+          if (!isNullCap(target)) {
+            this.writeDescriptor(target, desc);
+            return;
+          }
+          this.exportInner(target, (id) => {
+            desc.setU16(OFF.capDescriptorUnion, CapDescriptor.senderHosted);
+            desc.setU32(OFF.capDescriptorId, id);
+          });
         });
       },
       (error) => {
@@ -1952,11 +1961,8 @@ export class RpcConnection implements RemoteHost {
             finishLoopback(h);
           } catch (e) {
             h.release();
-            this.abort(
-              new RpcError(
-                `Disembargo target failed while resolving: ${e instanceof Error ? e.message : String(e)}`,
-              ),
-            );
+            // capnp-C++ fails the connection with the target's own error.
+            this.abort(toRpcError(e));
           }
         })();
         return;

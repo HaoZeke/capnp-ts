@@ -319,8 +319,16 @@ export class BrokenClient extends RefHook implements ClientHook {
     return undefined;
   }
 
-  whenMoreResolved(): undefined {
-    return undefined;
+  /**
+   * A null capability is resolved. Any other broken capability is a
+   * promise that has already failed, as in capnp-C++, so waiting on it
+   * rejects and exporting it sends `Resolve.exception`.
+   */
+  whenMoreResolved(): Promise<ClientHook> | undefined {
+    if (this.isNull) return undefined;
+    const failed = Promise.reject(this.error);
+    failed.catch(() => {});
+    return failed;
   }
 
   protected dispose(): void {}
