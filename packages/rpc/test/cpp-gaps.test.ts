@@ -1013,6 +1013,59 @@ describe("named Bootstrap (ez-rpc.c++ restore, rpc.c++ handleBootstrap)", () => 
   });
 });
 
+describe("a Return follows the work its call set off (rpc.c++ handleCall, resolveExportedPromise)", () => {
+  /** Call 0 returns a promise; any later call settles it with `settleTo` and returns at once. */
+  const promiser = (settleTo: () => Client): RpcServer => {
+    let settle: ((c: Client) => void) | undefined;
+    return {
+      dispatch(_i, method, _p, _r, ctx) {
+        if (method === 0) {
+          const p = Client.fromPromise(new Promise<Client>((res) => (settle = res)));
+          ctx.setResultCap(ctx.initResults(0, 1), 0, p.hook);
+          return;
+        }
+        settle?.(settleTo());
+        settle = undefined;
+      },
+    };
+  };
+  const callM = (q: number, method: number): Uint8Array =>
+    call(q, (t) => toAnswer(t, 0), (c) => c.setU16(4, method));
+  const kinds = (out: Array<{ which: number; body: Ptr }>): string[] =>
+    out.map((m) =>
+      m.which === Message.return ? `return ${Return_getAnswerId(m.body)}` : m.which === Message.resolve ? "resolve" : `${m.which}`,
+    );
+
+  test("an exported promise the call resolves is announced before the Return", async () => {
+    const r = raw(promiser(() => new Client(newNullCap())));
+    r.send(bootstrap(0));
+    r.send(callM(1, 0));
+    expect(kinds(r.take())).toEqual(["return 0", "return 1"]);
+    r.send(callM(2, 1));
+    await nextTurn();
+    expect(kinds(r.take())).toEqual(["resolve", "return 2"]);
+  });
+
+  test("a later Return keeps its place behind one that waits", async () => {
+    const r = raw(promiser(() => Client.local(ping)));
+    r.send(bootstrap(0));
+    r.send(callM(1, 0));
+    r.take();
+    r.send(callM(2, 1));
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    r.send(callM(3, 1));
+    await nextTurn();
+    expect(kinds(r.take())).toEqual(["resolve", "return 2", "return 3"]);
+  });
+
+  test("with no exported promise outstanding the Return is sent at once", () => {
+    const r = raw(ping);
+    r.send(bootstrap(0));
+    r.send(call(1, (t) => toAnswer(t, 0)));
+    expect(kinds(r.take())).toEqual(["return 0", "return 1"]);
+  });
+});
+
 describe("results a method never wrote (rpc.c++ sendReturn, getResults)", () => {
   const content = (ret: Ptr): Ptr => Payload_getContent(Return_getResults(ret));
 

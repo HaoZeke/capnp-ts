@@ -542,6 +542,8 @@ export class RpcConnection implements RemoteHost {
   /** Words of incoming calls not yet complete, as capnp-C++ `callWordsInFlight`. */
   private callWordsInFlight = 0;
   private flowBlocked = false;
+  /** Returns waiting for queued work, oldest first. */
+  private readonly waitingReturns: Array<() => void> = [];
 
   constructor(
     private readonly transport: Transport,
@@ -1777,8 +1779,38 @@ export class RpcConnection implements RemoteHost {
     this.callWordsInFlight += words;
     state.result.onSettled((s) => {
       this.callWordsInFlight -= words;
-      this.completeAnswer(questionId, answer, s);
+      this.returnInOrder(() => this.completeAnswer(questionId, answer, s));
       this.maybeUnblockFlow();
+    });
+  }
+
+  /**
+   * capnp-C++ sends a call's Return as a continuation of the call, so an
+   * exported promise the call resolved reaches the wire first. Here a
+   * Return waits for queued work while any exported promise is unresolved,
+   * and a later Return never overtakes one that waits.
+   */
+  private returnInOrder(send: () => void): void {
+    if (this.waitingReturns.length === 0) {
+      let pending = false;
+      for (const slot of this.exports.values()) if (slot.pendingResolve) pending = true;
+      if (!pending) {
+        send();
+        return;
+      }
+    }
+    this.waitingReturns.push(send);
+    if (this.waitingReturns.length > 1) return;
+    afterQueuedWork(() => {
+      try {
+        while (this.waitingReturns.length > 0) {
+          this.waitingReturns[0]!();
+          this.waitingReturns.shift();
+        }
+      } catch (e) {
+        this.waitingReturns.length = 0;
+        this.abort(new RpcError(`protocol error: ${e instanceof Error ? e.message : String(e)}`));
+      }
     });
   }
 

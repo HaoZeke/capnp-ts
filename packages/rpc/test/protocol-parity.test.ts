@@ -261,14 +261,15 @@ async function runEarlyCancel(
       }),
     );
     vat.pump();
+    await wait();
+    await wait();
+    // The exported bootstrap is an unresolved promise, so Returns wait a turn.
     let pipelineWhich = -1;
     let f: Uint8Array | null;
     while ((f = pair.b.receive()) !== null) {
       const ret = Message_getReturn(CapnpMessage.fromFlat(f).root());
       if (Return_getAnswerId(ret) === 2) pipelineWhich = Return_which(ret);
     }
-    await wait();
-    await wait();
     boot.release();
     return { calls, pipelineWhich };
   }
