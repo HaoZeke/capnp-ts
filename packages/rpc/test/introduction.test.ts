@@ -42,7 +42,7 @@ import {
   Release_getReferenceCount,
 } from "../src/rpc.capnp.ts";
 import { MemoryTransportPair, type Transport } from "../src/transport.ts";
-import { type Introduction, RpcConnection, type RpcServer } from "../src/vat.ts";
+import { type Introduction, RpcConnection, type RpcServer, Vat } from "../src/vat.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const golden = (name: string): Uint8Array =>
@@ -64,7 +64,7 @@ class Marked implements RpcServer {
 
 function bobWithExport(): { bob: RpcConnection; peer: Transport } {
   const pair = new MemoryTransportPair();
-  const bob = new RpcConnection(pair.b, new Marked());
+  const bob = new RpcConnection(pair.b, new Marked(), new Vat());
   const b = new MessageBuilder();
   const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
   root.setU16(0, Message.bootstrap);
@@ -165,7 +165,7 @@ describe("level 3 introductions", () => {
   // only in a call's params.
   test("an introduction in an answer is recorded", () => {
     const pair = new MemoryTransportPair();
-    const client = new RpcConnection(pair.b);
+    const client = new RpcConnection(pair.b, undefined, new Vat());
     const q = client.sendBootstrap();
     pair.a.receive();
 

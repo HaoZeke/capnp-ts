@@ -121,6 +121,13 @@ function defaultContent(): Ptr {
   return nullContent;
 }
 
+/** A real null pointer, for a pipeline that starts on null content. */
+function rawNullPointer(): Ptr {
+  const b = new MessageBuilder();
+  b.initRoot(0, 1);
+  return CapnpMessage.fromFlat(b.toFlat()).root().getP(0);
+}
+
 /**
  * The content of a message together with the capabilities its pointers
  * name. A capability pointer holds an index; the hook it stands for is
@@ -167,7 +174,10 @@ export class Payload {
    * the final capability read throws on a bad cap.
    */
   getPipelinedCap(ops: readonly number[]): ClientHook {
-    let at = this.content;
+    // capnp-C++ `AnyPointer::getCapability` on a null pointer is `newNullCap()`.
+    // The stored content of a null payload is an empty struct, so the walk
+    // has to start from the raw null or the first step is a schema mismatch.
+    let at = this.contentIsNull ? rawNullPointer() : this.content;
     for (const field of ops) {
       if (at.kind === PtrKind.Null) continue;
       if (at.kind !== PtrKind.Struct) {
@@ -771,7 +781,15 @@ export class LocalClient extends RefHook implements ClientHook {
     const dropInterest = (): void => {
       if (--liveRefs > 0) return;
       ctx.cancelRequested = true;
-      if (ctx.tailState !== undefined) ctx.tailState.release();
+      if (ctx.tailState !== undefined) {
+        const tail = ctx.tailState;
+        tail.release();
+        // A pipeline-only forward never gets a Return. Rejecting it runs
+        // the same settled-result cleanup a Finish uses on the far side.
+        if (opts?.onlyPromisePipeline === true && tail.result.state === "pending") {
+          tail.result.reject(new RpcError("canceled"));
+        }
+      }
       if (!ctx.cancellable) return;
       applyPendingCancel();
     };

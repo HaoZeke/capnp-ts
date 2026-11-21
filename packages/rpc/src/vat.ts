@@ -457,6 +457,8 @@ interface QuestionState {
   skipFinish: boolean;
   /** True when the Call used `sendResultsTo.yourself`; expects `resultsSentElsewhere`. */
   isTailCall: boolean;
+  /** `onlyPromisePipeline`: no Return is coming, so Finish rejects the result. */
+  pipelineOnly: boolean;
   /** Redirected answer claimed by `Return.takeFromOtherQuestion`, canceled if `q` finishes. */
   redirectedCall?: CallState;
 }
@@ -479,6 +481,8 @@ interface AnswerState {
   noPromisePipelining: boolean;
   /** True once this answer was answered via `Return.takeFromOtherQuestion`. */
   tailSent: boolean;
+  /** Param capabilities, kept until `Finish` the way `RpcCallContext` keeps them. */
+  paramCaps?: ClientHook[];
   /** A Call's answer: its pipeline is frozen when the Return carries capabilities. */
   isCall: boolean;
   /** A Bootstrap's answer, a capnp-C++ `SingleCapPipeline`: any transform at all is invalid. */
@@ -717,6 +721,7 @@ export class RpcConnection implements RemoteHost {
     // complete before reading more.
     if (this.callWordsInFlight > this.flowLimit && this.gone === undefined) {
       this.flowBlocked = true;
+      this.transport.setPaused?.(true);
       return false;
     }
     const frame = this.transport.receive();
@@ -972,11 +977,13 @@ export class RpcConnection implements RemoteHost {
           // A local promise not yet exported takes over this entry, and
           // no Resolve goes out until it settles. A broken capability is
           // such a promise, already rejected.
-          const more = target.whenMoreResolved();
-          if (more !== undefined && !this.exportIdByHook.has(target)) {
-            this.exportIdByHook.set(target, exportId);
-            this.resolveExportedPromise(exportId, target, more);
-            return;
+          if (!this.exportIdByHook.has(target)) {
+            const more = target.whenMoreResolved();
+            if (more !== undefined) {
+              this.exportIdByHook.set(target, exportId);
+              this.resolveExportedPromise(exportId, target, more);
+              return;
+            }
           }
         }
         slot.pendingResolve = false;
@@ -1164,8 +1171,11 @@ export class RpcConnection implements RemoteHost {
         const tp = CapDescriptor_getThirdPartyHosted(desc);
         // The vine is an ordinary import through the introducer, which is
         // the fallback the spec gives a receiver that cannot reach the
-        // third party; the introduction is recorded for whoever can.
+        // third party. A host that is not text is a two-party id: keep
+        // the vine and skip the introduction record.
         const vine = this.importCap(ThirdPartyCapDescriptor_getVineId(tp), false, fd);
+        // capnp-C++ imports the vine and does not read `id` on two-party.
+        if (this.twoParty) return vine;
         const nonce = this.noteIntroduction(tp);
         if (nonce !== undefined) {
           this.introductionHooks.get(nonce)?.release();
@@ -1206,6 +1216,7 @@ export class RpcConnection implements RemoteHost {
       finished: false,
       skipFinish: false,
       isTailCall: false,
+      pipelineOnly: false,
     };
     call.pipeline = {
       getPipelinedCap: (ops) => this.pipelineOf(id, q, ops),
@@ -1249,6 +1260,9 @@ export class RpcConnection implements RemoteHost {
     q.finished = true;
     q.redirectedCall?.release();
     q.redirectedCall = undefined;
+    if (q.pipelineOnly && q.call.result.state === "pending") {
+      q.call.result.reject(new RpcError("canceled"));
+    }
     if (q.returned) this.questions.delete(id);
     if (this.gone !== undefined || q.skipFinish) return;
     const { b, root } = newMessage(Message.finish);
@@ -1340,6 +1354,7 @@ export class RpcConnection implements RemoteHost {
       call.setBool(OFF.callOnlyPromisePipeline, true);
       // No Return is coming, so the Finish need not wait for one.
       q.returned = true;
+      q.pipelineOnly = true;
     }
     write(call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS));
     q.paramExports = this.writePayload(
@@ -1551,7 +1566,7 @@ export class RpcConnection implements RemoteHost {
       return;
     }
     if (q.returned) {
-      this.abort(new RpcError("Duplicate Return."));
+      this.abort(new RpcError("expected question->isAwaitingReturn; Duplicate Return."));
       return;
     }
     q.returned = true;
@@ -1569,25 +1584,30 @@ export class RpcConnection implements RemoteHost {
       case Return.results: {
         if (q.isTailCall) {
           this.abort(
-            new RpcError("Tail call `Return` must set `resultsSentElsewhere`, not `results`."),
+            new RpcError(
+              "expected !question->isTailCall; Tail call `Return` must set `resultsSentElsewhere`, not `results`.",
+            ),
           );
           return;
         }
         const payload = Return_getResults(ret);
         // Our Finish already said to drop the results, so nothing is
-        // imported for a question that was abandoned.
+        // imported for a question that was abandoned. The content pointer
+        // stays unread until something touches the results.
         if (q.finished) break;
         q.call.result.resolve(
           payload.kind === PtrKind.Null
             ? emptyPayload()
-            : new Payload(Payload_getContent(payload), this.receiveCaps(payload)),
+            : lazyCallPayload(payload, this.receiveCaps(payload)),
         );
         break;
       }
       case Return.exception:
         if (q.isTailCall) {
           this.abort(
-            new RpcError("Tail call `Return` must set `resultsSentElsewhere`, not `exception`."),
+            new RpcError(
+              "expected !question->isTailCall; Tail call `Return` must set `resultsSentElsewhere`, not `exception`.",
+            ),
           );
           return;
         }
@@ -1605,7 +1625,9 @@ export class RpcConnection implements RemoteHost {
       case Return.resultsSentElsewhere:
         if (!q.isTailCall) {
           this.abort(
-            new RpcError("`Return` had `resultsSentElsewhere` but this was not a tail call."),
+            new RpcError(
+              "expected question->isTailCall; `Return` had `resultsSentElsewhere` but this was not a tail call.",
+            ),
           );
           return;
         }
@@ -1714,6 +1736,10 @@ export class RpcConnection implements RemoteHost {
     if (id.kind !== PtrKind.Struct) return undefined;
     const vat = ThirdPartyCapId_getVat(id);
     if (vat.kind !== PtrKind.Struct) return undefined;
+    // Level 3 stores the host as text. A two-party id puts something else
+    // there, and reading that as text aborts the connection.
+    const host = vat.getP(0);
+    if (host.kind !== PtrKind.List || host.esize !== ElemSize.Byte) return undefined;
     const nonce = ThirdPartyCapId_getNonce(id);
     this.introductions.set(nonce, {
       vineId: ThirdPartyCapDescriptor_getVineId(tp),
@@ -1906,18 +1932,36 @@ export class RpcConnection implements RemoteHost {
   private maybeUnblockFlow(): void {
     if (!this.flowBlocked || this.callWordsInFlight >= this.flowLimit) return;
     this.flowBlocked = false;
+    this.transport.setPaused?.(false);
     afterQueuedWork(() => {
       if (this.gone === undefined) this.pump();
     });
   }
 
-  private sendCanceledReturn(questionId: number): void {
+  /**
+   * The call context is dropped before a Return. `onlyPromisePipeline`
+   * sends nothing. A redirect reports `resultsSentElsewhere`. Anything
+   * else is `canceled`.
+   */
+  private sendCanceledReturn(questionId: number, call?: Ptr): void {
+    const yourself =
+      call !== undefined && Call_sendResultsTo_which(call) === Call_sendResultsTo.yourself;
+    // A redirect still owes `resultsSentElsewhere`. The pipeline-only hint
+    // suppresses the Return only when results stay with the caller.
+    if (call !== undefined && Call_getOnlyPromisePipeline(call) && !yourself) return;
     const { b, root } = newMessage(Message.return);
     const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
     ret.setU32(OFF.returnAnswerId, questionId);
-    ret.setU16(OFF.returnUnion, Return.canceled);
+    ret.setU16(OFF.returnUnion, yourself ? Return.resultsSentElsewhere : Return.canceled);
     ret.setBool(OFF.returnReleaseParamCaps, false, true);
     this.sendFlat(b.toFlat());
+  }
+
+  private releaseParamCaps(answer: AnswerState): void {
+    const caps = answer.paramCaps;
+    if (caps === undefined) return;
+    answer.paramCaps = undefined;
+    for (const c of caps) c.release();
   }
 
   /** A Call, checked in the order of capnp-C++ `handleCall`. */
@@ -1936,7 +1980,7 @@ export class RpcConnection implements RemoteHost {
     if (this.answers.has(questionId)) {
       // capnp-C++ finds the id in use only after it built the call context,
       // and dropping that context cancels it and releases its params.
-      if (this.gone === undefined) this.sendCanceledReturn(questionId);
+      if (this.gone === undefined) this.sendCanceledReturn(questionId, call);
       caps.forEach((c) => c.release());
       target.release();
       this.abort(new RpcError("expected !answer.active; questionId is already in use"));
@@ -1970,9 +2014,10 @@ export class RpcConnection implements RemoteHost {
     // As capnp-C++ passes the call's hints to `startCall`: a forwarded or
     // tail call goes out with `sendForPipeline()`.
     if (answer.onlyPromisePipeline) opts.onlyPromisePipeline = true;
-    // capnp-C++ keeps the params cap table in the call context, so the
-    // capabilities the call was given are released after its Return.
-    const paramCaps = caps.map((c) => c.addRef());
+    // capnp-C++ keeps the params cap table in the call context until the
+    // context is destroyed, which is `Finish` (or the answer leaving with
+    // `noFinishNeeded`).
+    answer.paramCaps = caps.map((c) => c.addRef());
     const state = target.call(Call_getInterfaceId(call), Call_getMethodId(call), callPayload, opts);
     target.release();
     answer.call = state;
@@ -1981,11 +2026,7 @@ export class RpcConnection implements RemoteHost {
     state.result.onSettled((s) => {
       this.callWordsInFlight -= words;
       this.returnInOrder(() => {
-        try {
-          this.completeAnswer(questionId, answer, s);
-        } finally {
-          for (const c of paramCaps) c.release();
-        }
+        this.completeAnswer(questionId, answer, s);
       });
       this.maybeUnblockFlow();
     });
@@ -2009,15 +2050,16 @@ export class RpcConnection implements RemoteHost {
     this.waitingReturns.push(send);
     if (this.waitingReturns.length > 1) return;
     afterQueuedWork(() => {
-      try {
-        while (this.waitingReturns.length > 0) {
-          this.waitingReturns[0]!();
-          this.waitingReturns.shift();
+      let failed: unknown;
+      while (this.waitingReturns.length > 0) {
+        const next = this.waitingReturns.shift()!;
+        try {
+          next();
+        } catch (e) {
+          if (failed === undefined) failed = e;
         }
-      } catch (e) {
-        this.waitingReturns.length = 0;
-        this.abort(new RpcError(e instanceof Error ? e.message : String(e)));
       }
+      if (failed !== undefined) this.abort(toRpcError(failed));
     });
   }
 
@@ -2147,9 +2189,17 @@ export class RpcConnection implements RemoteHost {
         if (this.answers.get(questionId) === answer) this.answers.delete(questionId);
       }
       this.sendFlat(b.toFlat());
-      if (noCaps) answer.call.release();
+      if (noCaps) {
+        // The call context dies with this Return, so the param table goes
+        // after the Return is on the wire.
+        this.releaseParamCaps(answer);
+        answer.call.release();
+      }
     } else {
       this.sendException(questionId, s.error);
+      // An exception Return ends the call context too. Result caps would
+      // have kept it until Finish.
+      this.releaseParamCaps(answer);
     }
   }
 
@@ -2240,6 +2290,7 @@ export class RpcConnection implements RemoteHost {
     const answer = this.answers.get(questionId);
     if (answer === undefined || answer.finished) return;
     answer.finished = true;
+    this.releaseParamCaps(answer);
     if (Finish_getReleaseResultCaps(finish)) {
       for (const id of answer.resultExports) this.releaseExport(id, 1);
       answer.resultExports = [];
@@ -2265,7 +2316,12 @@ export class RpcConnection implements RemoteHost {
     }
     const releaseCall = (): void => {
       // Releasing the call is what cancels it, if it is still running.
+      // A pipeline-only forward never settles on its own: rejecting the
+      // result runs the bookkeeping that a Return would have run.
       answer.call.release();
+      if (answer.onlyPromisePipeline && answer.call.result.state === "pending") {
+        answer.call.result.reject(new RpcError("canceled"));
+      }
       if (answer.returned && this.answers.get(questionId) === answer) {
         this.answers.delete(questionId);
       }
@@ -2779,6 +2835,7 @@ export class RpcConnection implements RemoteHost {
 
     for (const answer of this.answers.values()) {
       answer.finished = true;
+      this.releaseParamCaps(answer);
       answer.call?.release();
     }
     this.answers.clear();
