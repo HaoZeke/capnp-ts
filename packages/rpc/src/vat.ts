@@ -34,6 +34,7 @@ import {
   LocalClient,
   newNullCap,
   Payload,
+  QueuedClient,
   RefHook,
   RpcError,
   type RpcServer,
@@ -340,6 +341,8 @@ interface AnswerState {
   onlyPromisePipeline: boolean;
   /** True once this answer was answered via `Return.takeFromOtherQuestion`. */
   tailSent: boolean;
+  /** A Call's answer: its pipeline is frozen when the Return carries capabilities. */
+  isCall: boolean;
   returned: boolean;
   finished: boolean;
 }
@@ -1552,6 +1555,7 @@ export class RpcConnection implements RemoteHost {
       throw e;
     }
     const answer = this.newAnswer(questionId);
+    answer.isCall = true;
     answer.resultsElsewhere = sendTo === Call_sendResultsTo.yourself;
     // Redirected results ignore onlyPromisePipeline: the peer is waiting
     // on resultsSentElsewhere, not on a pipeline-only hint.
@@ -1623,6 +1627,7 @@ export class RpcConnection implements RemoteHost {
       redirectClaimed: false,
       onlyPromisePipeline: false,
       tailSent: false,
+      isCall: false,
       returned: false,
       finished: false,
     };
@@ -1695,10 +1700,93 @@ export class RpcConnection implements RemoteHost {
         s.value,
         false,
       );
+      if (answer.isCall && s.value.caps.length > 0) this.freezePipeline(answer, s.value);
       this.transport.send(b.toFlat());
     } else {
       this.sendException(questionId, s.error);
     }
+  }
+
+  /**
+   * `PostReturnRpcPipeline`: once the Return has named the result
+   * capabilities, pipelined calls and Disembargos on this answer reach
+   * what the Return described, even if a promise among them later
+   * resolves elsewhere. That is the Tribble 4-way race in rpc.capnp.
+   */
+  private freezePipeline(answer: AnswerState, results: Payload): void {
+    const atReturn = new Map<ClientHook, ClientHook>();
+    for (const cap of results.caps) {
+      if (atReturn.has(cap)) continue;
+      const inner = this.innermostForExport(cap);
+      if (inner !== cap) atReturn.set(cap, inner.addRef());
+    }
+    const live = answer.call.pipeline;
+    answer.call.pipeline = {
+      getPipelinedCap: (ops) =>
+        this.resolutionAtReturnTime(
+          live.getPipelinedCap(ops),
+          results.getPipelinedCap(ops),
+          atReturn,
+        ),
+    };
+    const onRelease = answer.call.onRelease;
+    answer.call.onRelease = () => {
+      onRelease?.();
+      for (const h of atReturn.values()) h.release();
+      atReturn.clear();
+    };
+  }
+
+  /** Follow `original` to `returned` and answer what `returned` was at Return time. Takes both references. */
+  private resolutionAtReturnTime(
+    original: ClientHook,
+    returned: ClientHook,
+    atReturn: Map<ClientHook, ClientHook>,
+  ): ClientHook {
+    let ptr = original;
+    for (;;) {
+      if (ptr === returned) {
+        const unwrapped = (atReturn.get(returned) ?? returned).addRef();
+        original.release();
+        returned.release();
+        return unwrapped;
+      }
+      const r = ptr.getResolved();
+      if (r === undefined) break;
+      ptr = r;
+    }
+    const more = ptr.whenMoreResolved();
+    if (more !== undefined) {
+      const eventual = new Settle<ClientHook>();
+      more.then(
+        (next) => {
+          eventual.resolve(this.resolutionAtReturnTime(next.addRef(), returned, atReturn));
+          original.release();
+        },
+        (e) => {
+          eventual.reject(e);
+          original.release();
+          returned.release();
+        },
+      );
+      return new QueuedClient(eventual);
+    }
+    if (ptr.brokenError !== undefined) {
+      const broken = ptr.addRef();
+      original.release();
+      returned.release();
+      return broken;
+    }
+    original.release();
+    returned.release();
+    return new BrokenClient(
+      new RpcError(
+        "An RPC call's capnp::PipelineHook object resolved a pipelined capability to a " +
+          "different final object than what was returned in the actual response. This could " +
+          "be a bug in Cap'n Proto, or could be due to a use of context.setPipeline() that " +
+          "was inconsistent with the later results.",
+      ),
+    );
   }
 
   private handleFinish(finish: Ptr): void {

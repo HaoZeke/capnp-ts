@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 import {
   Message as CapnpMessage,
   MessageBuilder,
+  Orphan,
   type Ptr,
   PtrKind,
   type StructBuilder,
@@ -122,6 +123,91 @@ function returning(make: () => Client): RpcServer {
     },
   };
 }
+
+/** A Call whose params hold one capability, described by `kind` and `id`. */
+function callWithCap(
+  q: number,
+  target: (t: StructBuilder) => void,
+  kind: number,
+  id: number,
+): Uint8Array {
+  const b = new MessageBuilder();
+  const root = b.initRoot(1, 1);
+  root.setU16(0, Message.call);
+  const c = root.initStruct(0, 3, 3);
+  c.setU32(0, q);
+  c.setU64(8, IFACE);
+  target(c.initStruct(0, 1, 1));
+  const payload = c.initStruct(1, 0, 2);
+  payload.initStruct(0, 0, 1).adopt(0, Orphan.cap(b, 0));
+  const table = payload.initCompositeList(1, 1, 1, 1);
+  table.setU16(0, kind);
+  table.setU32(4, id);
+  return b.toFlat();
+}
+
+function resolveTo(promiseId: number, kind: number, id: number): Uint8Array {
+  return frame(Message.resolve, (m) => {
+    const r = m.initStruct(0, 1, 1);
+    r.setU32(0, promiseId);
+    r.setU16(4, Resolve.cap);
+    const d = r.initStruct(0, 1, 1);
+    d.setU16(0, kind);
+    d.setU32(4, id);
+  });
+}
+
+function loopback(target: (t: StructBuilder) => void, id: number): Uint8Array {
+  return frame(Message.disembargo, (m) => {
+    const d = m.initStruct(0, 1, 1);
+    target(d.initStruct(0, 1, 1));
+    d.setU16(4, 0);
+    d.setU32(0, id);
+  });
+}
+
+/** Echoes the capability in params pointer 0 back in results pointer 0. */
+const echoCap: RpcServer = {
+  dispatch(_i, _m, params, _r, ctx) {
+    ctx.setResultCap(ctx.initResults(0, 1), 0, ctx.getCap(params.getP(0)));
+  },
+};
+
+describe("pipelines freeze at Return time (rpc.c++ PostReturnRpcPipeline)", () => {
+  test("a pipelined call after the Return goes to the import the Return named", async () => {
+    const r = raw(echoCap);
+    r.send(bootstrap(0));
+    r.send(callWithCap(1, (t) => toAnswer(t, 0), CapDescriptor.senderPromise, 5));
+    await nextTurn();
+    r.take();
+    // The promise the peer passed in resolves to another of its exports.
+    r.send(resolveTo(5, CapDescriptor.senderHosted, 6));
+    r.send(call(2, (t) => toAnswer(t, 1, [0])));
+    const out = r.take().filter((m) => m.which === Message.call);
+    expect(out.length).toBe(1);
+    const target = out[0]!.body.getP(0);
+    expect(target.getU16(4)).toBe(0);
+    expect(target.getU32(0)).toBe(5);
+  });
+
+  test("a Disembargo after the Return reflects on the import the Return named", async () => {
+    const r = raw(echoCap);
+    r.send(bootstrap(0));
+    r.send(callWithCap(1, (t) => toAnswer(t, 0), CapDescriptor.senderPromise, 5));
+    await nextTurn();
+    r.take();
+    r.send(resolveTo(5, CapDescriptor.senderHosted, 6));
+    r.send(loopback((t) => toAnswer(t, 1, [0]), 9));
+    await nextTurn();
+    await nextTurn();
+    const out = r.take().filter((m) => m.which === Message.disembargo);
+    expect(out.length).toBe(1);
+    const target = out[0]!.body.getP(0);
+    expect(target.getU16(4)).toBe(0);
+    expect(target.getU32(0)).toBe(5);
+    expect(r.vat.disconnected).toBeUndefined();
+  });
+});
 
 describe("broken capabilities are failed promises (capability.c++ BrokenClient)", () => {
   test("whenResolved rejects on a broken capability and resolves on a null one", async () => {
