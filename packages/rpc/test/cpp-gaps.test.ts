@@ -16,15 +16,25 @@ import {
 import { newNullCap } from "../src/capability.ts";
 import { Client, RpcError, type RpcServer } from "../src/index.ts";
 import {
+  Call_getNoPromisePipelining,
+  Call_getOnlyPromisePipeline,
+  Call_getQuestionId,
+  Call_getTarget,
   Call_sendResultsTo,
   Call_sendResultsTo_which,
   CapDescriptor,
   CapDescriptor_which,
   Exception_getReason,
+  Finish_getQuestionId,
+  Finish_getReleaseResultCaps,
   Message,
+  MessageTarget,
+  MessageTarget_getPromisedAnswer,
+  MessageTarget_which,
   Message_which,
   Payload_getCapTable,
   Payload_getContent,
+  PromisedAnswer_getQuestionId,
   Resolve,
   Resolve_getCap,
   Resolve_getException,
@@ -548,5 +558,84 @@ describe("tail calls (rpc.c++ directTailCall)", () => {
     const out = tailFrames((c) => c.setBool(129, true));
     expect(out.map((m) => m.which)).toEqual([Message.call]);
     expect(Call_sendResultsTo_which(out[0]!.body)).toBe(Call_sendResultsTo.caller);
+  });
+});
+
+/** A bootstrap Return for question `q`: the content is the peer's export `id`. */
+function returnCap(q: number, id: number): Uint8Array {
+  const b = new MessageBuilder();
+  const root = b.initRoot(1, 1);
+  root.setU16(0, Message.return);
+  const ret = root.initStruct(0, 2, 1);
+  ret.setU32(0, q >>> 0);
+  const payload = ret.initStruct(0, 0, 2);
+  payload.adopt(0, Orphan.cap(b, 0));
+  const table = payload.initCompositeList(1, 1, 1, 1);
+  table.setU16(0, CapDescriptor.senderHosted);
+  table.setU32(4, id);
+  return b.toFlat();
+}
+
+describe("outgoing call hints (rpc.c++ RpcRequest::send, sendForPipeline)", () => {
+  const connected = async (): Promise<{ r: Raw; cap: Client }> => {
+    const r = raw();
+    const cap = r.vat.bootstrap();
+    r.send(returnCap(0, 0));
+    await cap.whenResolved();
+    r.take();
+    return { r, cap };
+  };
+  const callBody = (m: { which: number; body: Ptr }): Ptr => {
+    expect(m.which).toBe(Message.call);
+    return m.body;
+  };
+
+  test("noPromisePipelining is sent and disables the pipeline", async () => {
+    const { r, cap } = await connected();
+    const p = cap.call(IFACE, 0, undefined, 1, 0, { noPromisePipelining: true });
+    const sent = callBody(r.take()[0]!);
+    expect(Call_getNoPromisePipelining(sent)).toBe(true);
+    const piped = p.pipeline(0);
+    expect(piped.isBroken).toBe(true);
+    await expect(Promise.resolve(piped.call(IFACE, 0))).rejects.toThrow(
+      "caller specified noPromisePipelining hint, but then tried to pipeline",
+    );
+  });
+
+  test("onlyPromisePipeline uses a high question id and expects no Return", async () => {
+    const { r, cap } = await connected();
+    const p = cap.call(IFACE, 0, undefined, 1, 0, { onlyPromisePipeline: true });
+    const sent = callBody(r.take()[0]!);
+    expect(Call_getOnlyPromisePipeline(sent)).toBe(true);
+    const q = Call_getQuestionId(sent);
+    expect(q).toBe(0x80000000);
+    const pipelined = p.pipeline(0);
+    const inner = pipelined.call(IFACE, 1);
+    const piped = callBody(r.take()[0]!);
+    expect(MessageTarget_which(Call_getTarget(piped))).toBe(MessageTarget.promisedAnswer);
+    expect(PromisedAnswer_getQuestionId(MessageTarget_getPromisedAnswer(Call_getTarget(piped)))).toBe(q);
+    inner.release();
+    pipelined.release();
+    p.release();
+    const fin = r
+      .take()
+      .filter((m) => m.which === Message.finish)
+      .map((m) => m.body)
+      .find((f) => Finish_getQuestionId(f) === q)!;
+    expect(Finish_getQuestionId(fin)).toBe(q);
+    expect(Finish_getReleaseResultCaps(fin)).toBe(false);
+  });
+
+  test("a Return for a high question id turns the hint off", async () => {
+    const { r, cap } = await connected();
+    cap.call(IFACE, 0, undefined, 1, 0, { onlyPromisePipeline: true });
+    const first = Call_getQuestionId(callBody(r.take()[0]!));
+    expect(first).toBe(0x80000000);
+    r.send(frame(Message.return, (m) => m.initStruct(0, 2, 1).setU32(0, first)));
+    expect(r.vat.disconnected).toBeUndefined();
+    cap.call(IFACE, 0, undefined, 1, 0, { onlyPromisePipeline: true });
+    const second = callBody(r.take()[0]!);
+    expect(Call_getOnlyPromisePipeline(second)).toBe(false);
+    expect(Call_getQuestionId(second)).toBeLessThan(0x80000000);
   });
 });

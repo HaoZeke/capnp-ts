@@ -26,6 +26,7 @@ import {
   CallBuilder,
   callStreaming,
   CallState,
+  disabledPipeline,
   Client,
   type CallOptions,
   type ClientHook,
@@ -205,6 +206,8 @@ const OFF = {
   callInterfaceId: 8,
   callMethodId: 4,
   callSendResultsTo: 6,
+  callNoPromisePipelining: 129,
+  callOnlyPromisePipeline: 130,
   returnAnswerId: 0,
   returnUnion: 6,
   returnTakeFromOtherQuestion: 8,
@@ -520,6 +523,9 @@ export class RpcConnection implements RemoteHost {
   private readonly bootstrapHook: ClientHook | undefined;
   private nextExportId = 0;
   private nextQuestionId = 0;
+  private nextHighQuestionId = 0;
+  /** The peer answered a pipeline-only question, so it ignores the hint. */
+  private gotReturnForHighQuestionId = false;
   private nextEmbargoId = 0;
   private gone: RpcError | undefined;
 
@@ -978,8 +984,7 @@ export class RpcConnection implements RemoteHost {
   // outstanding from the moment it is sent until its Return arrives, so
   // the caller can pipeline against it in the meantime.
 
-  private newQuestion(): { id: number; q: QuestionState } {
-    const id = this.nextQuestionId++;
+  private newQuestion(id = this.nextQuestionId++): { id: number; q: QuestionState } {
     const call = new CallState();
     const q: QuestionState = {
       call,
@@ -1067,6 +1072,14 @@ export class RpcConnection implements RemoteHost {
     q.call.result.reject(error);
   }
 
+  /** A question id with the top bit set, as capnp-C++ `ExportTable::nextHigh` picks one. */
+  private highQuestionId(): number {
+    for (;;) {
+      const id = (0x80000000 | (this.nextHighQuestionId++ & 0x7fffffff)) >>> 0;
+      if (!this.questions.has(id)) return id;
+    }
+  }
+
   sendCallTo(
     write: TargetWriter,
     interfaceId: bigint,
@@ -1074,7 +1087,13 @@ export class RpcConnection implements RemoteHost {
     params: Payload,
     opts?: CallOptions,
   ): CallState {
-    const { id, q } = this.newQuestion();
+    // A peer that answered one pipeline-only call gets plain calls after.
+    const pipelineOnly =
+      opts?.onlyPromisePipeline === true &&
+      !opts.sendResultsToYourself &&
+      !this.gotReturnForHighQuestionId;
+    const { id, q } = pipelineOnly ? this.newQuestion(this.highQuestionId()) : this.newQuestion();
+    if (opts?.noPromisePipelining) q.call.pipeline = disabledPipeline;
     if (this.gone !== undefined) {
       params.release();
       this.failQuestion(q, this.gone);
@@ -1088,6 +1107,12 @@ export class RpcConnection implements RemoteHost {
     if (opts?.sendResultsToYourself) {
       call.setU16(OFF.callSendResultsTo, Call_sendResultsTo.yourself);
       q.isTailCall = true;
+    }
+    if (opts?.noPromisePipelining) call.setBool(OFF.callNoPromisePipelining, true);
+    if (pipelineOnly) {
+      call.setBool(OFF.callOnlyPromisePipeline, true);
+      // No Return is coming, so the Finish need not wait for one.
+      q.returned = true;
     }
     write(call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS));
     q.paramExports = this.writePayload(
@@ -1289,7 +1314,10 @@ export class RpcConnection implements RemoteHost {
     const answerId = Return_getAnswerId(ret);
     // A pipeline-only question id has the high bit set. C++ ignores a
     // Return for those, because the id may already have been reused.
-    if (answerId >= 0x80000000) return;
+    if (answerId >= 0x80000000) {
+      this.gotReturnForHighQuestionId = true;
+      return;
+    }
     const q = this.questions.get(answerId);
     if (q === undefined) {
       this.abort(new RpcError("Invalid question ID in Return message."));

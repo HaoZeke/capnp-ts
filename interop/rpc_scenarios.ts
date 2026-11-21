@@ -65,6 +65,21 @@ const scenarios: Record<string, () => Promise<void>> = {
     counter.release();
   },
 
+  async hints() {
+    // capnp-C++ keeps a pipeline-only answer without sending its Return.
+    const only = boot.call(ECHO_INTERFACE_ID, M.makeCounter.ordinal, undefined, 0, 0, {
+      onlyPromisePipeline: true,
+    });
+    const counter = only.pipeline(0);
+    assert.equal(await u32(inc(counter, 1)), 2);
+    counter.release();
+    only.release();
+    assert.equal((conn as unknown as { gotReturnForHighQuestionId: boolean }).gotReturnForHighQuestionId, false);
+    const plain = boot.call(ECHO_INTERFACE_ID, M.ping.ordinal, arg(1), 1, 0, { noPromisePipelining: true });
+    assert.equal(await u32(plain), 2);
+    assert.ok(plain.pipeline(0).isBroken);
+  },
+
   async nullpipeline() {
     // Pipelining onto a null capability must fail cleanly without sending a
     // Disembargo that would make capnp-C++ abort the connection.

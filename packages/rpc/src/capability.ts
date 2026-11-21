@@ -192,7 +192,22 @@ export interface CallOptions {
   sendResultsToYourself?: boolean;
   /** Server-side failure handler propagated across queued and membrane wrappers. */
   onError?: (error: unknown) => void;
+  /** `Call.noPromisePipelining`: the caller will not pipeline, so the pipeline is disabled. */
+  noPromisePipelining?: boolean;
+  /**
+   * `Call.onlyPromisePipeline`, as capnp-C++ `sendForPipeline()` sends: the
+   * caller only pipelines, and a remote call's results never arrive.
+   */
+  onlyPromisePipeline?: boolean;
 }
+
+/** What capnp-C++ `getDisabledPipeline()` returns. */
+export const disabledPipeline: PipelineHook = {
+  getPipelinedCap: () =>
+    new BrokenClient(
+      new RpcError("caller specified noPromisePipelining hint, but then tried to pipeline"),
+    ),
+};
 
 /**
  * One call in flight. `result` settles with the results; `pipeline`
@@ -924,7 +939,9 @@ export class Client {
   ): RpcPromise {
     const params = new CallBuilder(paramsDwords, paramsPwords);
     fill?.(params.root, params);
-    return new RpcPromise(this.hook.call(interfaceId, methodId, params.toPayload(), opts));
+    const state = this.hook.call(interfaceId, methodId, params.toPayload(), opts);
+    if (opts?.noPromisePipelining) state.pipeline = disabledPipeline;
+    return new RpcPromise(state);
   }
 
   /**
