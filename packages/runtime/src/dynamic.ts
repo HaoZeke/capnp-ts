@@ -1180,10 +1180,8 @@ export class DynamicStructReader {
           mode === HasMode.NON_NULL ||
           this.ptr.getU64(field.offset * 8, 0n) !== 0n
         );
-      default: {
-        if (this.ptr.kind !== PtrKind.Struct) return false;
-        return !this.ptr.getP(field.offset).isNull;
-      }
+      default:
+        return !this.ptr.isNullP(field.offset);
     }
   }
 

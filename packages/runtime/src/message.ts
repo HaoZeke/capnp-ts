@@ -621,6 +621,15 @@ export class Ptr {
     );
   }
 
+  /**
+   * Whether pointer slot `ptrIndex` is a zero word, like C++
+   * `PointerReader::isNull`. The target is not resolved or bounds-checked.
+   */
+  isNullP(ptrIndex: number): boolean {
+    if (this.kind !== PtrKind.Struct || ptrIndex >= this.pwords) return true;
+    return this.msg.readWord(this.seg, this.word + this.dwords + ptrIndex) === 0n;
+  }
+
   /** Alias for getP (canonical / C-style naming). */
   getp(ptrIndex: number): Ptr {
     return this.getP(ptrIndex);

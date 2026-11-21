@@ -1047,6 +1047,37 @@ describe("input plausibility like capnp 1.4.0", () => {
   });
 });
 
+describe("text output of corrupt AnyPointer fields", () => {
+  const ksCgr = join(goldenDir, "dynamic-kitchen.cgr.bin");
+  // `Envelope.payload` points 320 words past the segment and the second
+  // `items` entry claims 768 pointers.
+  const input = Uint8Array.from([
+    0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0,
+    1, 0, 0, 0, 0x17, 0, 0, 0, 8, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3,
+  ]);
+  const expected =
+    "( payload = <opaque pointer>,\n" +
+    "  items = [\n" +
+    "    (),\n" +
+    "    (value = <opaque pointer>) ] )\n";
+
+  test("prints <opaque pointer> without following the pointer", async () => {
+    const r = await execCliInMemory(["decode", ksCgr, "Envelope"], input);
+    expect(r.stderr).toBe("");
+    expect(r.code).toBe(0);
+    expect(new TextDecoder().decode(r.stdout)).toBe(expected);
+  });
+
+  test.skipIf(!hasCapnp)("matches live capnp", () => {
+    const live = execCapnp(
+      ["decode", join(repoRoot, "schema", "dynamic-kitchen.capnp"), "Envelope"],
+      input,
+    );
+    expect(live.code).toBe(0);
+    expect(new TextDecoder().decode(live.stdout)).toBe(expected);
+  });
+});
+
 describe("eval of an unset struct field", () => {
   const unionCgr = join(goldenDir, "eval-unions.cgr.bin");
   const expected: [string, number[]][] = [

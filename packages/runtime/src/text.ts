@@ -319,7 +319,9 @@ function printDynamicValue(
       const elements: string[] = [];
       for (let i = 0; i < list.size(); i++) {
         elements.push(
-          printDynamicValue(list.get(i), elemCode, nextIndent, "bare"),
+          elemCode === TypeKind.AnyPointer
+            ? OPAQUE_POINTER
+            : printDynamicValue(list.get(i), elemCode, nextIndent, "bare"),
         );
       }
       return `[${indent.delimit(elements, mode, "list")}]`;
@@ -340,12 +342,7 @@ function printDynamicValue(
       let unionRendered = "";
       if (activeUnion) {
         if (activeUnion.discriminantValue !== 0 || st.has(activeUnion)) {
-          unionRendered = `${activeUnion.name} = ${printDynamicValue(
-            st.get(activeUnion),
-            whichFieldTypeCode(activeUnion),
-            indent.next(),
-            "prefixed",
-          )}`;
+          unionRendered = `${activeUnion.name} = ${printField(st, activeUnion, indent)}`;
         } else {
           activeUnion = null;
         }
@@ -357,14 +354,7 @@ function printDynamicValue(
           activeUnion = null;
         }
         if (st.has(field)) {
-          printed.push(
-            `${field.name} = ${printDynamicValue(
-              st.get(field),
-              whichFieldTypeCode(field),
-              indent.next(),
-              "prefixed",
-            )}`,
-          );
+          printed.push(`${field.name} = ${printField(st, field, indent)}`);
         }
       }
       if (activeUnion) {
@@ -379,8 +369,20 @@ function printDynamicValue(
     case DynamicValueType.CAPABILITY:
       return "<external capability>";
     case DynamicValueType.ANY_POINTER:
-      return "<opaque pointer>";
+      return OPAQUE_POINTER;
   }
+}
+
+const OPAQUE_POINTER = "<opaque pointer>";
+
+/**
+ * C++ reads an `AnyPointer` field without following it, so the printer
+ * never touches the target of a corrupt pointer there.
+ */
+function printField(st: DynamicStructReader, field: StructField, indent: Indent): string {
+  const typeCode = whichFieldTypeCode(field);
+  if (typeCode === TypeKind.AnyPointer) return OPAQUE_POINTER;
+  return printDynamicValue(st.get(field), typeCode, indent.next(), "prefixed");
 }
 
 export type PrintableDynamic =
