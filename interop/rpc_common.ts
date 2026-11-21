@@ -268,7 +268,10 @@ export class EchoImpl implements RpcServer {
         setImmediate(this.onDie);
         return;
       default:
-        throw new RpcError(`Echo: no method ${methodId}`, "unimplemented");
+        throw new RpcError(
+          `Method not implemented.; interfaceName = interop.capnp:Echo; typeId = ${ECHO_INTERFACE_ID}; methodId = ${methodId}`,
+          "unimplemented",
+        );
     }
   }
 }

@@ -1411,7 +1411,11 @@ function emitInterface(
   }
   lines.push(
     `        default:`,
-    "          throw new Error(`" + typeName + ": no method ${methodId}`);",
+    "          throw Object.assign(new Error(`Method not implemented.; interfaceName = " +
+      node.displayName +
+      "; typeId = " +
+      node.id.toString() +
+      "; methodId = ${methodId}`), { type: \"unimplemented\" });",
     `      }`,
     `    }`,
   );
@@ -1435,13 +1439,19 @@ function emitInterface(
       }
       lines.push(
         `        default:`,
-        "          throw new Error(`" + ownerName + ": no method ${methodId}`);",
+        "          throw Object.assign(new Error(`Method not implemented.; interfaceName = " +
+          iface.displayName +
+          "; typeId = " +
+          iface.id.toString() +
+          "; methodId = ${methodId}`), { type: \"unimplemented\" });",
         `      }`,
         `    }`,
       );
     }
     lines.push(
-      "    throw new Error(`" + typeName + ": wrong interface ${interfaceId}`);",
+      "    throw Object.assign(new Error(`Requested interface not implemented.; actualInterfaceName = " +
+        node.displayName +
+        "; requestedTypeId = ${interfaceId}`), { type: \"unimplemented\" });",
     );
   }
   lines.push(`  }`, `}`, ``);

@@ -41,9 +41,23 @@ export class RpcError extends Error {
   }
 }
 
+const EXCEPTION_TYPE_NAMES: ReadonlySet<string> = new Set([
+  "failed",
+  "overloaded",
+  "disconnected",
+  "unimplemented",
+]);
+
 export function toRpcError(e: unknown): RpcError {
   if (e instanceof RpcError) return e;
-  return new RpcError(e instanceof Error ? e.message : String(e));
+  if (e instanceof Error) {
+    const named = (e as { type?: unknown }).type;
+    if (typeof named === "string" && EXCEPTION_TYPE_NAMES.has(named)) {
+      return new RpcError(e.message, named as ExceptionType);
+    }
+    return new RpcError(e.message);
+  }
+  return new RpcError(String(e));
 }
 
 /**
