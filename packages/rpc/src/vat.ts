@@ -982,7 +982,7 @@ export class RpcConnection implements RemoteHost {
       case CapDescriptor.receiverHosted: {
         const slot = this.exports.get(CapDescriptor_getReceiverHosted(desc));
         if (slot === undefined) {
-          return new BrokenClient(new RpcError("descriptor names an export that does not exist"));
+          return new BrokenClient(new RpcError("invalid 'receiverHosted' export ID"));
         }
         const hook = slot.hook.addRef();
         return hook.brand === this ? new TribbleRaceBlocker(hook) : hook;
@@ -990,7 +990,7 @@ export class RpcConnection implements RemoteHost {
       case CapDescriptor.receiverAnswer: {
         const hook = this.pipelinedCap(CapDescriptor_getReceiverAnswer(desc), "descriptor");
         if (hook === undefined) {
-          return new BrokenClient(new RpcError("descriptor names an unknown answer"));
+          return new BrokenClient(new RpcError("invalid 'receiverAnswer'"));
         }
         return hook.brand === this ? new TribbleRaceBlocker(hook) : hook;
       }

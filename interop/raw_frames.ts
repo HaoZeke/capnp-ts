@@ -207,6 +207,29 @@ function callSendingTo(q: number, which: number, target = (t: StructBuilder) => 
   });
 }
 
+/**
+ * `Echo.hold` with a `receiverAnswer` descriptor for question `answer`;
+ * an `opKind` other than 1 adds one op of that kind.
+ */
+function holdReceiverAnswer(q: number, answer: number, opKind = 1): Uint8Array {
+  const b = new MessageBuilder();
+  const root = b.initRoot(1, 1);
+  root.setU16(0, Message.call);
+  const c = root.initStruct(0, 3, 3);
+  c.setU32(0, q);
+  c.setU64(8, ECHO);
+  c.setU16(4, M.hold);
+  targetAnswer(c.initStruct(0, 1, 1), 0);
+  const payload = c.initStruct(1, 0, 2);
+  payload.initStruct(0, 0, 1).adopt(0, Orphan.cap(b, 0));
+  const table = payload.initCompositeList(1, 1, 1, 1);
+  table.setU16(0, 4);
+  const pa = table.initStruct(0, 1, 1);
+  pa.setU32(0, answer);
+  if (opKind !== 1) pa.initCompositeList(0, 1, 1, 0).setU16(0, opKind);
+  return b.toFlat();
+}
+
 function finish(q: number, releaseResultCaps = true): Uint8Array {
   return frame(Message.finish, (m) => {
     const f = m.initStruct(0, 1, 0);
@@ -468,6 +491,26 @@ const SCENARIOS: Record<string, Step[]> = {
       inner.setU16(0, Message.bootstrap);
       inner.initStruct(0, 1, 1).setU32(0, 4);
     }),
+  ],
+  // Descriptors naming an export or answer this side does not have.
+  "receiver-hosted-unknown": [
+    bootstrap(0),
+    hold(1, 99, 3),
+    W(100),
+    call({ q: 2, method: M.callHeld, target: (t) => targetAnswer(t, 0), params: (p) => p.setU32(0, 3) }),
+  ],
+  "receiver-answer-unknown": [
+    bootstrap(0),
+    holdReceiverAnswer(1, 99),
+    W(100),
+    call({ q: 2, method: M.callHeld, target: (t) => targetAnswer(t, 0), params: (p) => p.setU32(0, 3) }),
+  ],
+  "receiver-answer-bad-op": [
+    bootstrap(0),
+    W(100),
+    holdReceiverAnswer(1, 0, 2),
+    W(100),
+    call({ q: 2, method: M.callHeld, target: (t) => targetAnswer(t, 0), params: (p) => p.setU32(0, 3) }),
   ],
   "disembargo-provide": [bootstrap(0), W(100), disembargoProvide(1)],
   "disembargo-accept": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0, [0, 2]), 2)],

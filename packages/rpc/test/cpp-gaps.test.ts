@@ -1541,3 +1541,39 @@ describe("aborts that print a KJ parameter (rpc.c++ getMessageTarget, toPipeline
     expect(abortReasonOf(n)).toBe("Peer did not implement required RPC message type.; (uint)message.which() = 0");
   });
 });
+
+describe("descriptors naming what this side lacks (rpc.c++ receiveCap)", () => {
+  const callOnResult = async (kind: number, desc: (d: StructBuilder) => void): Promise<string> => {
+    const b = new MessageBuilder();
+    const root = b.initRoot(1, 1);
+    root.setU16(0, Message.call);
+    const c = root.initStruct(0, 3, 3);
+    c.setU32(0, 1);
+    c.setU64(8, IFACE);
+    toAnswer(c.initStruct(0, 1, 1), 0);
+    const payload = c.initStruct(1, 0, 2);
+    payload.initStruct(0, 0, 1).adopt(0, Orphan.cap(b, 0));
+    const entry = payload.initCompositeList(1, 1, 1, 1);
+    entry.setU16(0, kind);
+    desc(entry);
+    const r = raw(echoCap);
+    r.send(bootstrap(0));
+    r.send(b.toFlat());
+    r.send(call(2, (t) => toAnswer(t, 1, [0])));
+    await nextTurn();
+    const ret = r.take().find((m) => m.which === Message.return && Return_getAnswerId(m.body) === 2);
+    return Exception_getReason(Return_getException(ret!.body));
+  };
+
+  test("an unknown `receiverHosted` export", async () => {
+    expect(await callOnResult(CapDescriptor.receiverHosted, (d) => d.setU32(4, 99))).toBe(
+      "invalid 'receiverHosted' export ID",
+    );
+  });
+
+  test("an unknown `receiverAnswer` question", async () => {
+    expect(
+      await callOnResult(CapDescriptor.receiverAnswer, (d) => d.initStruct(0, 1, 1).setU32(0, 99)),
+    ).toBe("invalid 'receiverAnswer'");
+  });
+});
