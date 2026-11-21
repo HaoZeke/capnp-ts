@@ -469,3 +469,35 @@ describe("two-party connections refuse level 3 and 4 (rpc.c++ handleMessage)", (
     );
   });
 });
+
+describe("provisions end with their connection", () => {
+  const counted = (): { server: RpcServer; disposed: () => number } => {
+    let n = 0;
+    return {
+      server: { dispatch() {}, dispose: () => void n++ },
+      disposed: () => n,
+    };
+  };
+
+  test("an unclaimed provision is released on disconnect", () => {
+    const { server, disposed } = counted();
+    const vat = new Vat();
+    const r = raw(server, vat);
+    r.send(bootstrap(0));
+    r.send(provide(1, 7n));
+    expect(r.vat.pendingProvisions()).toEqual([7n]);
+    r.vat.disconnect(new RpcError("bye"));
+    expect(vat.provisions.size).toBe(0);
+    expect(disposed()).toBe(1);
+  });
+
+  test("a provision replaced under the same nonce is released", () => {
+    const { server, disposed } = counted();
+    const r = raw(server, new Vat());
+    r.send(bootstrap(0));
+    r.send(provide(1, 7n));
+    r.send(provide(2, 7n));
+    r.vat.disconnect(new RpcError("bye"));
+    expect(disposed()).toBe(1);
+  });
+});

@@ -307,6 +307,8 @@ function structOrDefault(p: Ptr): Ptr {
 interface Provision {
   hook: ClientHook;
   questionId: number;
+  /** The connection the `Provide` came in on; the arrangement ends with it. */
+  owner: RpcConnection;
 }
 
 /**
@@ -1510,7 +1512,8 @@ export class RpcConnection implements RemoteHost {
     // The arrangement holds the capability, not this connection's id for
     // it: the recipient may well arrive on another connection. The
     // question id is how a later Disembargo names this arrangement.
-    this.vat.provisions.set(nonce, { hook, questionId });
+    this.vat.provisions.get(nonce)?.hook.release();
+    this.vat.provisions.set(nonce, { hook, questionId, owner: this });
     this.answerNow(questionId, emptyPayload());
   }
 
@@ -2400,6 +2403,11 @@ export class RpcConnection implements RemoteHost {
     this.introductionHooks.clear();
     for (const held of this.heldAccepts.values()) held.hook.release();
     this.heldAccepts.clear();
+    for (const [nonce, provision] of this.vat.provisions) {
+      if (provision.owner !== this) continue;
+      provision.hook.release();
+      this.vat.provisions.delete(nonce);
+    }
     for (const join of this.joins.values()) {
       for (const part of join.parts) part?.hook?.release();
     }
