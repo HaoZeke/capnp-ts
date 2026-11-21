@@ -57,6 +57,7 @@ import {
   CALL_PWORDS,
   Call_getInterfaceId,
   Call_getMethodId,
+  Call_getNoPromisePipelining,
   Call_getOnlyPromisePipeline,
   Call_getParams,
   Call_getQuestionId,
@@ -396,6 +397,8 @@ interface AnswerState {
    * but do not send `Return` or export the result capabilities.
    */
   onlyPromisePipeline: boolean;
+  /** `Call.noPromisePipelining`: the caller will not pipeline on this answer. */
+  noPromisePipelining: boolean;
   /** True once this answer was answered via `Return.takeFromOtherQuestion`. */
   tailSent: boolean;
   /** A Call's answer: its pipeline is frozen when the Return carries capabilities. */
@@ -1654,6 +1657,7 @@ export class RpcConnection implements RemoteHost {
     // on resultsSentElsewhere, not on a pipeline-only hint.
     answer.onlyPromisePipeline =
       !answer.resultsElsewhere && Call_getOnlyPromisePipeline(call);
+    answer.noPromisePipelining = Call_getNoPromisePipelining(call);
     const tailHandler: TailHandler | undefined = answer.resultsElsewhere
       ? undefined
       : {
@@ -1690,6 +1694,8 @@ export class RpcConnection implements RemoteHost {
     params: Payload,
   ): CallState | undefined {
     if (this.gone !== undefined || answer.returned || answer.finished) return undefined;
+    // The caller ignores this Return, so skipping the round trip gains nothing.
+    if (answer.noPromisePipelining) return undefined;
     const inner = innermost(target);
     if (inner.brand !== this) return undefined;
     const tail = this.sendCallTo(
@@ -1719,6 +1725,7 @@ export class RpcConnection implements RemoteHost {
       resultsElsewhere: false,
       redirectClaimed: false,
       onlyPromisePipeline: false,
+      noPromisePipelining: false,
       tailSent: false,
       isCall: false,
       returned: false,

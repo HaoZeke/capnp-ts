@@ -16,6 +16,8 @@ import {
 import { newNullCap } from "../src/capability.ts";
 import { Client, RpcError, type RpcServer } from "../src/index.ts";
 import {
+  Call_sendResultsTo,
+  Call_sendResultsTo_which,
   CapDescriptor,
   CapDescriptor_which,
   Exception_getReason,
@@ -135,6 +137,7 @@ function callWithCap(
   target: (t: StructBuilder) => void,
   kind: number,
   id: number,
+  fill?: (c: StructBuilder) => void,
 ): Uint8Array {
   const b = new MessageBuilder();
   const root = b.initRoot(1, 1);
@@ -148,6 +151,7 @@ function callWithCap(
   const table = payload.initCompositeList(1, 1, 1, 1);
   table.setU16(0, kind);
   table.setU32(4, id);
+  fill?.(c);
   return b.toFlat();
 }
 
@@ -499,5 +503,50 @@ describe("provisions end with their connection", () => {
     r.send(provide(2, 7n));
     r.vat.disconnect(new RpcError("bye"));
     expect(disposed()).toBe(1);
+  });
+});
+
+describe("tail calls (rpc.c++ directTailCall)", () => {
+  test("tailCall() after initResults() fails the call", () => {
+    const r = raw({
+      dispatch(_i, _m, _p, _r, ctx) {
+        ctx.initResults(1, 0);
+        return ctx.tailCall(Client.local(ping), IFACE, 0);
+      },
+    });
+    r.send(bootstrap(0));
+    r.send(call(1, (t) => toAnswer(t, 0)));
+    const ret = r.take()[1]!.body;
+    expect(Return_which(ret)).toBe(Return.exception);
+    expect(Exception_getReason(Return_getException(ret))).toBe(
+      "Can't call tailCall() after initializing the results struct.",
+    );
+  });
+
+  const forwarder: RpcServer = {
+    dispatch(_i, _m, params, _r, ctx) {
+      return ctx.tailCall(new Client(ctx.getCap(params.getP(0))), IFACE, 0);
+    },
+  };
+
+  const tailFrames = (fill?: (c: StructBuilder) => void): Array<{ which: number; body: Ptr }> => {
+    const r = raw(forwarder);
+    r.send(bootstrap(0));
+    r.take();
+    r.send(callWithCap(1, (t) => toAnswer(t, 0), CapDescriptor.senderHosted, 5, fill));
+    return r.take();
+  };
+
+  test("a tail call back to the caller skips the round trip", () => {
+    const out = tailFrames();
+    expect(out.map((m) => m.which)).toEqual([Message.call, Message.return]);
+    expect(Call_sendResultsTo_which(out[0]!.body)).toBe(Call_sendResultsTo.yourself);
+    expect(Return_which(out[1]!.body)).toBe(Return.takeFromOtherQuestion);
+  });
+
+  test("noPromisePipelining keeps the tail call's results coming back", () => {
+    const out = tailFrames((c) => c.setBool(129, true));
+    expect(out.map((m) => m.which)).toEqual([Message.call]);
+    expect(Call_sendResultsTo_which(out[0]!.body)).toBe(Call_sendResultsTo.caller);
   });
 });

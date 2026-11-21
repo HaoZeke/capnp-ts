@@ -415,6 +415,8 @@ class LocalCallContext implements CallContext {
   cancelRequested = false;
   cancellable = false;
   tailCalled = false;
+  /** `initResults()` or `setResultCap()` ran, so the results are this call's own. */
+  resultsInitialized = false;
   tailState: CallState | undefined;
   /** Abort a cancel that arrived before `allowCancellation()`. */
   applyPendingCancel: (() => void) | undefined;
@@ -445,11 +447,13 @@ class LocalCallContext implements CallContext {
   }
 
   initResults(dwords: number, pwords: number): StructBuilder {
+    this.resultsInitialized = true;
     this.results = new CallBuilder(dwords, pwords);
     return this.results.root;
   }
 
   setResultCap(struct: StructBuilder, ptrIndex: number, hook: ClientHook): void {
+    this.resultsInitialized = true;
     this.results.setCap(struct, ptrIndex, hook);
   }
 
@@ -463,6 +467,9 @@ class LocalCallContext implements CallContext {
   ): Promise<void> {
     if (this.tailCalled) {
       return Promise.reject(new RpcError("tailCall() may only be called once per call"));
+    }
+    if (this.resultsInitialized) {
+      throw new RpcError("Can't call tailCall() after initializing the results struct.");
     }
     this.tailCalled = true;
     const params = new CallBuilder(paramsDwords, paramsPwords);
