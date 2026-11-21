@@ -16,7 +16,9 @@ int capnp_send_fds(int sock, const void *buf, int len, const int *fds, int nfds)
   msg.msg_iovlen = 1;
   if (nfds > 0) {
     struct cmsghdr *cmsg;
-    if (nfds > 253) nfds = 253;
+    /* The vat refuses this before it writes attachedFd indices. Truncating
+       here would send a short list and leave those indices out of range. */
+    if (nfds > 253) return -1;
     msg.msg_control = control;
     msg.msg_controllen = CMSG_SPACE(sizeof(int) * (size_t)nfds);
     cmsg = CMSG_FIRSTHDR(&msg);

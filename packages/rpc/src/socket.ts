@@ -60,6 +60,11 @@ export class StreamTransport implements Transport {
     return this.sendBufferSize?.();
   }
 
+  /** Bytes of a frame `feed` has not finished yet. */
+  protected incompleteBytes(): number {
+    return this.buffer.length;
+  }
+
   /** Take bytes off the stream; complete frames become receivable. */
   feed(chunk: Uint8Array): void {
     const merged = new Uint8Array(this.buffer.length + chunk.length);

@@ -47,6 +47,8 @@ jobs:
           prefix="${{ runner.tool_cache }}/capnproto-1.4.0"
           bash scripts/install-capnproto.sh "$prefix"
           echo "$prefix/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
           "$prefix/bin/capnp" --version
 
       # packages/runtime/test/pycapnp-interop.test.ts asserts this venv is
@@ -212,3 +214,7 @@ jobs:
         run: pixi run -- bash interop/build-peer.sh
       - name: Call it from this vat, and let it call this vat
         run: pixi run -- bash interop/run_rpc_interop.sh build-interop/rpc_peer_server interop/rpc_client.ts build-interop/rpc_peer
+      - name: Raw frames match the capnp-C++ peer
+        run: pixi run -- bash interop/run_raw_frames.sh build-interop/rpc_peer
+      - name: Raw server matches the capnp-C++ peer
+        run: pixi run -- bash interop/run_raw_server.sh build-interop/rpc_peer

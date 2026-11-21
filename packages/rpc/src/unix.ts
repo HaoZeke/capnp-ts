@@ -7,6 +7,8 @@
  * a plain byte read drops the attached descriptors.
  */
 import { dlopen, FFIType, ptr } from "bun:ffi";
+import { closeSync } from "node:fs";
+
 import { frameLength, StreamTransport } from "./socket.ts";
 
 const MAX_FDS = 253;
@@ -94,18 +96,50 @@ export class UnixFdTransport extends StreamTransport {
     }
     const chunk = this.recvBuf.slice(0, n);
     const fds = Array.from(this.fdBuf.subarray(0, this.nfdBuf[0] ?? 0));
+    return this.ingest(chunk, fds);
+  }
+
+  /**
+   * Split `chunk` into frames and attach `fds` the way
+   * `serialize-async.c++` does. Descriptors from one read belong to the
+   * message that contains that read's last byte. Bytes left over after
+   * the last complete frame carry the descriptors to a later read.
+   */
+  ingest(chunk: Uint8Array, fds: readonly number[]): number {
     const before = this.pending;
     this.feed(chunk);
     const gained = this.pending - before;
-    if (gained <= 0) {
-      this.carriedFds.push(...fds);
-      return 0;
+    const incoming = [...this.carriedFds, ...fds];
+    this.carriedFds = [];
+    const tail = this.incompleteBytes() > 0;
+    if (gained <= 0 || tail) {
+      for (let i = 0; i < gained; i++) this.inboxFds.push([]);
+      this.carriedFds = incoming;
+      return gained;
     }
     for (let i = 0; i < gained; i++) {
-      this.inboxFds.push(i === 0 ? [...this.carriedFds, ...fds] : []);
+      this.inboxFds.push(i === gained - 1 ? incoming : []);
     }
-    this.carriedFds = [];
     return gained;
+  }
+
+  /** Close one OS descriptor received on this socket. */
+  closeFd(fd: number): void {
+    try {
+      closeSync(fd);
+    } catch {
+      // The descriptor may already be closed.
+    }
+  }
+
+  override close(): void {
+    for (const group of this.inboxFds) {
+      for (const fd of group) this.closeFd(fd);
+    }
+    for (const fd of this.carriedFds) this.closeFd(fd);
+    this.inboxFds.length = 0;
+    this.carriedFds = [];
+    super.close();
   }
 
   override receive(): Uint8Array | null {

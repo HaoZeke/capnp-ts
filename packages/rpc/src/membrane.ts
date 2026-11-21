@@ -118,6 +118,14 @@ export abstract class MembranePolicy {
   }
 
   /**
+   * When true, `getFd` returns the descriptor of the capability inside.
+   * The default refuses, as capnp-C++ `MembranePolicy::allowFdPassthrough`.
+   */
+  allowFdPassthrough(): boolean {
+    return false;
+  }
+
+  /**
    * When a call would be redirected but its target is still a promise,
    * wait for the promise to resolve further and try again. Needed by
    * policies that must not intercept calls the promise will turn out to
@@ -319,6 +327,7 @@ class MembraneHook extends RefHook implements ClientHook {
   }
 
   getFd(): number | undefined {
+    if (!this.policy.allowFdPassthrough()) return undefined;
     return this.inner.getFd?.();
   }
 

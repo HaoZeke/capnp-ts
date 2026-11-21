@@ -13,7 +13,6 @@
  * the second half; both need a vat that spans connections, which is
  * `Vat`.
  */
-import { closeSync } from "node:fs";
 import {
   ElemSize,
   Message as CapnpMessage,
@@ -721,23 +720,36 @@ export class RpcConnection implements RemoteHost {
       return false;
     }
     const frame = this.transport.receive();
-    this.messageFds = [...(this.transport.receivedFds?.() ?? [])];
-    this.ownsMessageFds = this.transport.ownsReceivedFds?.() ?? false;
-    if (frame === null) {
-      if (this.transport.closed) this.disconnect(new RpcError("transport closed", "disconnected"));
-      return false;
-    }
-    if (this.gone !== undefined) return true;
-
-    // The peer chooses what a frame contains, so one that cannot be read
-    // or makes a handler throw is a protocol error: abort, rather than
-    // let it escape the message loop and leave the tables half-updated.
+    const messageFds = [...(this.transport.receivedFds?.() ?? [])];
+    const ownsMessageFds = this.transport.ownsReceivedFds?.() ?? false;
+    this.messageFds = messageFds;
+    this.ownsMessageFds = ownsMessageFds;
     try {
-      this.dispatchFrame(frame);
-    } catch (e) {
-      this.abort(new RpcError(e instanceof Error ? e.message : String(e)));
+      if (frame === null) {
+        if (this.transport.closed) this.disconnect(new RpcError("transport closed", "disconnected"));
+        return false;
+      }
+      if (this.gone !== undefined) return true;
+
+      // The peer chooses what a frame contains, so one that cannot be read
+      // or makes a handler throw is a protocol error: abort, rather than
+      // let it escape the message loop and leave the tables half-updated.
+      try {
+        this.dispatchFrame(frame);
+      } catch (e) {
+        this.abort(new RpcError(e instanceof Error ? e.message : String(e)));
+      }
+      return true;
+    } finally {
+      // Descriptors claim an index by clearing it. Anything still set was
+      // never adopted, so the transport closes it when this side owns it.
+      if (ownsMessageFds) {
+        for (const fd of messageFds) {
+          if (fd !== undefined) this.transport.closeFd?.(fd);
+        }
+      }
+      this.messageFds = [];
     }
-    return true;
   }
 
   private dispatchFrame(frame: Uint8Array): void {
@@ -887,6 +899,14 @@ export class RpcConnection implements RemoteHost {
     const inner = innermost(hook);
     const fd = inner.getFd?.();
     if (fd !== undefined) {
+      // rpc.capnp: attachedFd is a UInt8 whose default 0xff is never a
+      // real index. Linux accepts at most 253 descriptors in one send.
+      // Refuse before writing the index. A later truncate would leave an
+      // index that points past the list that was actually sent.
+      if (this.outFds.length >= 253) {
+        this.outFds = [];
+        throw new RpcError("expected nfds <= 253; too many attached file descriptors");
+      }
       // Schema default is 0xff, so the wire byte is the index XOR 255.
       desc.setU8(2, this.outFds.length, 255);
       this.outFds.push(fd);
@@ -1052,11 +1072,15 @@ export class RpcConnection implements RemoteHost {
       this.imports.set(importId, imp);
     }
     imp.remoteRefs++;
+    const existing = imp.importClient;
     const importClient =
-      imp.importClient === undefined
+      existing === undefined
         ? (imp.importClient = new ImportClient(this, importId, fd, this.ownsMessageFds))
-        : imp.importClient.addRef();
-    if (fd !== undefined && imp.importClient !== undefined) imp.importClient.adoptFd(fd);
+        : existing.addRef();
+    const fresh = existing === undefined;
+    // The constructor already owns a first fd. A later one is adopted,
+    // which keeps it when none is stored and closes it when one is.
+    if (!fresh && fd !== undefined) importClient.adoptFd(fd);
 
     if (!isPromise) {
       imp.appClient ??= importClient;
@@ -1088,11 +1112,12 @@ export class RpcConnection implements RemoteHost {
 
   private dropFd(fd: number | undefined): void {
     if (fd === undefined || !this.ownsMessageFds) return;
-    try {
-      closeSync(fd);
-    } catch {
-      // The descriptor may already be closed.
-    }
+    this.transport.closeFd?.(fd);
+  }
+
+  /** Close an OS descriptor the transport handed this connection. */
+  closeFd(fd: number): void {
+    this.transport.closeFd?.(fd);
   }
 
   /** FD named by this descriptor, taken so a second use sees none. */
@@ -2475,34 +2500,40 @@ export class RpcConnection implements RemoteHost {
           (inner as RpcClientHook).writeTarget(
             out.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS),
           );
-          resolved.release();
           // `context` is a group, so it shares Disembargo's own data section
           // rather than living behind a pointer.
           out.setU16(OFF.disembargoContextUnion, Disembargo_context.receiverLoopback);
           out.setU32(OFF.disembargoContextValue, id);
           this.sendFlat(b.toFlat());
+          resolved.release();
         };
         // As capnp-C++ does: wait for the target to settle (for example
         // behind an embargo on a middle hop), then let calls already queued
-        // towards it go first, then echo.
+        // towards it go first, then echo. `finishLoopback` releases on
+        // every path that returns. A throw from `sendFlat` leaves `h`
+        // owned, so the catch releases it once.
         void (async () => {
-          let h = hook;
+          let h: ClientHook | undefined = hook;
           try {
             for (;;) {
-              const more = innermost(h).whenMoreResolved();
+              const current: ClientHook | undefined = h;
+              if (current === undefined) break;
+              const more: Promise<ClientHook> | undefined = innermost(current).whenMoreResolved();
               if (more === undefined) break;
-              const next = (await more).addRef();
-              h.release();
+              const next: ClientHook = (await more).addRef();
+              current.release();
               h = next;
             }
             await new Promise<void>((res) => afterQueuedWork(res));
+            if (h !== undefined) {
+              finishLoopback(h);
+              h = undefined;
+            }
           } catch (e) {
-            h.release();
+            h?.release();
             // capnp-C++ fails the connection with the target's own error.
             this.abort(toRpcError(e));
-            return;
           }
-          finishLoopback(h);
         })();
         return;
       }

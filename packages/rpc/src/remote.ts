@@ -11,7 +11,6 @@
  * knowledge of the wire beyond which message to ask for.
  */
 import type { StructBuilder } from "@haozeke/capnp";
-import { closeSync } from "node:fs";
 
 import { WindowFlowController } from "./flow.ts";
 
@@ -51,6 +50,8 @@ export interface RemoteHost {
   promiseDropped(importId: number, client: ClientHook): void;
   /** Send a Disembargo on `target`; settles when it comes back. */
   startEmbargo(target: RpcClientHook): Settle<void>;
+  /** Close an OS descriptor this host owns. The transport implements it. */
+  closeFd?(fd: number): void;
 }
 
 /** A hook that knows how to name itself in a message. */
@@ -152,9 +153,17 @@ export class ImportClient extends RefHook implements RpcClientHook {
     this.ownsFd = ownsFd && fd !== undefined;
   }
 
-  /** Keep the first FD. A later descriptor that names the same import adds none. */
+  /**
+   * Take ownership of `fd`. The first one is stored. Another is closed,
+   * because this import already has a descriptor.
+   */
   adoptFd(fd: number): void {
-    if (this.attachedFd === undefined) this.attachedFd = fd;
+    if (this.attachedFd === undefined) {
+      this.attachedFd = fd;
+      this.ownsFd = true;
+      return;
+    }
+    this.host.closeFd?.(fd);
   }
 
   getFd(): number | undefined {
@@ -230,11 +239,7 @@ export class ImportClient extends RefHook implements RpcClientHook {
 
   protected dispose(): void {
     if (this.ownsFd && this.attachedFd !== undefined) {
-      try {
-        closeSync(this.attachedFd);
-      } catch {
-        // The descriptor may already be closed.
-      }
+      this.host.closeFd?.(this.attachedFd);
     }
     this.attachedFd = undefined;
     this.host.importDropped(this.importId, this);

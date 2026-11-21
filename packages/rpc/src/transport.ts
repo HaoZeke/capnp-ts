@@ -22,6 +22,11 @@ export interface Transport {
   readonly closed: boolean;
   /** Optional dynamic send-buffer window in bytes, as capnp-C++'s `getSendBufferSize()`. */
   getSendBufferSize?(): number | undefined;
+  /**
+   * Close one OS file descriptor this transport handed out.
+   * The portable core never imports a host filesystem; the transport does.
+   */
+  closeFd?(fd: number): void;
 }
 
 /**

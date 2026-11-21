@@ -23,12 +23,15 @@ export function tap(inner: Transport): Tapped {
   return {
     sent,
     frames,
-    send(frame) {
+    send(frame, fds) {
       frames.push(frame.slice());
       sent.push(NAMES[Message_which(CapnpMessage.fromFlat(frame).root())] ?? "?");
-      inner.send(frame);
+      inner.send(frame, fds);
     },
     receive: () => inner.receive(),
+    receivedFds: inner.receivedFds ? () => inner.receivedFds!() : undefined,
+    ownsReceivedFds: inner.ownsReceivedFds ? () => inner.ownsReceivedFds!() : undefined,
+    closeFd: inner.closeFd ? (fd: number) => inner.closeFd!(fd) : undefined,
     get pending() {
       return inner.pending;
     },
