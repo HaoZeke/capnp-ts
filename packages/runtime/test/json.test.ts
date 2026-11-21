@@ -21,6 +21,7 @@ import {
   decodeTextBytes,
   encodeJson,
   encodeJsonBytes,
+  messageFromRawSegment,
   splitJsonMessages,
 } from "../src/index.ts";
 import { convertStream } from "../src/cli.ts";
@@ -1074,5 +1075,89 @@ describe("pretty JSON line breaks on raw Text bytes", () => {
         ]);
       }
     }
+  });
+});
+
+describe("JSON enum ordinals", () => {
+  const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+  const sinkSchema = loader.resolveStruct("KitchenSink");
+  const prioSchema = loader.resolve("Priority").asEnum();
+  const kitchenFile = join(repoRoot, "schema/dynamic-kitchen.capnp");
+
+  // JSON number and the ordinal `capnp convert json:binary` 1.4.0 stores for it.
+  const numbers: [string, number][] = [
+    ["7", 7],
+    ["1e3", 1000],
+    ["2.5", 2],
+    ["-0.5", 0],
+    ["-1", 65535],
+    ["65535.9", 65535],
+    ["65536", 0],
+    ["70000", 4464],
+    ["-65535.9", 1],
+    ["2147483647", 65535],
+    ["2147483648", 0],
+    ["-2147483648", 0],
+    ["-2147483649", 0],
+    ["5e9", 0],
+    ["1e-300", 0],
+    ["1.8e308", 0],
+    ["-1e20", 0],
+  ];
+
+  test("annotated decode stores a numeric ordinal like capnp", () => {
+    for (const [text, raw] of numbers) {
+      const msg = decodeJson(`{"priority": ${text}, "priorities": [${text}]}`, sinkSchema);
+      const root = DynamicStruct.fromMessage(msg, sinkSchema);
+      expect(root.get("priority").asEnum().getRaw(), text).toBe(raw);
+      expect(root.get("priorities").asList().get(0).asEnum().getRaw(), text).toBe(raw);
+    }
+  });
+
+  test("an unknown ordinal round-trips through encodeJson and decodeJson", () => {
+    const b = new MessageBuilder();
+    const root = DynamicStruct.initRoot(b, sinkSchema);
+    root.set("priority", new DynamicEnum(prioSchema, 7));
+    const list = root.init("priorities", 2).asList();
+    list.set(0, new DynamicEnum(prioSchema, 4464));
+    list.set(1, new DynamicEnum(prioSchema, 3));
+    const json = encodeJson(root);
+    expect(json).toContain('"priority":7');
+    expect(json).toContain('"priorities":[4464,"CRITICAL"]');
+    const back = decodeJson(json, sinkSchema);
+    expect(canonicalize(back)).toEqual(canonicalizeFlat(b.toFlat()));
+    expect(encodeJson(DynamicStruct.fromMessage(back, sinkSchema))).toBe(json);
+  });
+
+  test("the plain codec encodes a number it then rejects, as capnp JsonCodec does", () => {
+    const codec = new JsonCodec();
+    const b = new MessageBuilder();
+    DynamicStruct.initRoot(b, sinkSchema).set("priority", new DynamicEnum(prioSchema, 7));
+    const json = codec.encode(DynamicStruct.fromMessage(Message.fromFlat(b.toFlat()), sinkSchema));
+    expect(json).toContain('"priority":7');
+    expect(() => codec.decode(json, sinkSchema)).toThrow(CapnpError);
+  });
+
+  test.skipIf(!hasCapnp)("numeric ordinals convert like capnp convert json", () => {
+    const mismatches: string[] = [];
+    for (const [text] of numbers) {
+      const input = `{"priority": ${text}, "priorities": [${text}, 3]}`;
+      const cppBin = spawnSync("capnp", ["convert", "json:canonical", kitchenFile, "KitchenSink"], {
+        input,
+      });
+      expect(cppBin.status, text).toBe(0);
+      const ts = canonicalize(decodeJson(input, sinkSchema));
+      if (!Buffer.from(ts).equals(cppBin.stdout)) mismatches.push(`json:canonical ${text}`);
+      const cppJson = spawnSync("capnp", ["convert", "canonical:json", kitchenFile, "KitchenSink"], {
+        input: cppBin.stdout,
+      });
+      expect(cppJson.status, text).toBe(0);
+      const tsJson = encodeJson(
+        DynamicStruct.fromMessage(messageFromRawSegment(new Uint8Array(cppBin.stdout)), sinkSchema),
+        { pretty: true },
+      );
+      if (`${tsJson}\n` !== cppJson.stdout.toString()) mismatches.push(`canonical:json ${text}`);
+    }
+    expect(mismatches).toEqual([]);
   });
 });

@@ -804,16 +804,12 @@ class AnnotatedEnumHandler implements JsonCustomHandler {
 
   decode(_codec: JsonCodec, input: JsonAst): DynamicValueReader {
     if (input.which === "number") {
-      assertCapnp(
-        Number.isInteger(input.value) &&
-          input.value >= 0 &&
-          input.value <= 0xffff,
-        "JSON",
-        `invalid enum number ${input.value}`,
-      );
-      return DynamicValueReader.fromEnum(
-        new DynamicEnum(this.schema, input.value),
-      );
+      // C++ `static_cast<uint16_t>(input.getNumber())`. The x86-64 capnp
+      // 1.4.0 build truncates through a 32-bit integer, so 2.5 reads as 2,
+      // -1 as 65535, 70000 as 4464, and anything outside Int32 range as 0.
+      const t = Math.trunc(input.value);
+      const raw = t >= -0x80000000 && t <= 0x7fffffff ? t & 0xffff : 0;
+      return DynamicValueReader.fromEnum(new DynamicEnum(this.schema, raw));
     }
     assertCapnp(input.which === "string", "JSON", "expected string or number for enum");
     const ord = this.nameToOrdinal.get(input.value);
