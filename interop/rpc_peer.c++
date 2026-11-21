@@ -604,8 +604,8 @@ void runClient(const std::string &addr, const std::vector<std::string> &only) {
 }
 
 // `EzRpcServer` offers no `setFlowLimit()`, so a limited server builds
-// each connection's `RpcSystem` itself. Its restorer is the one
-// `EzRpcServer` uses, so named Bootstraps fail as under `serve`.
+// each connection's `RpcSystem` itself. One restorer, the one
+// `EzRpcServer` uses, serves one Echo to every connection.
 struct EzRestorer final : public capnp::SturdyRefRestorer<capnp::AnyPointer> {
 	capnp::Capability::Client main = kj::heap<EchoImpl>();
 
@@ -622,10 +622,9 @@ struct EzRestorer final : public capnp::SturdyRefRestorer<capnp::AnyPointer> {
 struct FlowConnection {
 	kj::Own<kj::AsyncIoStream> stream;
 	capnp::TwoPartyVatNetwork network;
-	EzRestorer restorer;
 	capnp::RpcSystem<capnp::rpc::twoparty::VatId> rpc;
 
-	FlowConnection(kj::Own<kj::AsyncIoStream> s, size_t limit)
+	FlowConnection(kj::Own<kj::AsyncIoStream> s, EzRestorer &restorer, size_t limit)
 	    : stream(kj::mv(s)), network(*stream, capnp::rpc::twoparty::Side::SERVER),
 	      rpc(capnp::makeRpcServer(network, restorer)) {
 		rpc.setFlowLimit(limit);
@@ -633,12 +632,12 @@ struct FlowConnection {
 };
 #pragma GCC diagnostic pop
 
-kj::Promise<void> acceptFlow(kj::ConnectionReceiver &listener, size_t limit) {
-	return listener.accept().then([&listener, limit](kj::Own<kj::AsyncIoStream> stream) {
-		auto conn = kj::heap<FlowConnection>(kj::mv(stream), limit);
+kj::Promise<void> acceptFlow(kj::ConnectionReceiver &listener, EzRestorer &restorer, size_t limit) {
+	return listener.accept().then([&listener, &restorer, limit](kj::Own<kj::AsyncIoStream> stream) {
+		auto conn = kj::heap<FlowConnection>(kj::mv(stream), restorer, limit);
 		auto &network = conn->network;
 		network.onDisconnect().attach(kj::mv(conn)).detach([](kj::Exception &&) {});
-		return acceptFlow(listener, limit);
+		return acceptFlow(listener, restorer, limit);
 	});
 }
 
@@ -657,7 +656,8 @@ int main(int argc, char **argv) {
 		auto io = kj::setupAsyncIo();
 		auto addr = io.provider->getNetwork().parseAddress("127.0.0.1", std::stoi(port)).wait(io.waitScope);
 		auto listener = addr->listen();
-		acceptFlow(*listener, limit).wait(io.waitScope);
+		EzRestorer restorer;
+		acceptFlow(*listener, restorer, limit).wait(io.waitScope);
 	}
 	std::vector<std::string> only;
 	for (int i = 3; i < argc; i++) only.push_back(argv[i]);
