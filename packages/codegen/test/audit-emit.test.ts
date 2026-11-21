@@ -190,4 +190,87 @@ describe.skipIf(!hasCapnp())("audit emit", () => {
     const results = new MessageBuilder().initRoot(0, 0);
     expect(() => new Impl().dispatch(1n, 0, params, results)).toThrow(/audit\.capnp:GrandChild/);
   });
+
+  test("an interface extending another file imports that file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "capnp-audit-import-"));
+    writeFileSync(join(dir, "base.capnp"), "@0xa1b2c3d4e5f60718;\ninterface Base { ping @0 () -> (); }\n");
+    writeFileSync(
+      join(dir, "child.capnp"),
+      '@0xb1b2c3d4e5f60718;\nusing Base = import "base.capnp".Base;\ninterface Child extends(Base) { pong @0 () -> (); }\n',
+    );
+    const include = capnpInclude();
+    const cgr = spawnSync("capnp", [
+      "compile",
+      "-o-",
+      "-I",
+      include,
+      "-I",
+      dir,
+      join(dir, "base.capnp"),
+      join(dir, "child.capnp"),
+    ]);
+    expect(cgr.status).toBe(0);
+    const ast = await walkCgr(new Uint8Array(cgr.stdout as Uint8Array));
+    const child = ast.requestedFiles.find((f) => f.filename.endsWith("child.capnp"));
+    expect(child).toBeDefined();
+    const src = emitModuleSource(ast, child!.filename, child!.id);
+    expect(src).toMatch(/import \* as __capnp_[0-9a-f]+ from "\.\/base\.ts"/);
+    expect(src).toMatch(/__capnp_[0-9a-f]+\.BaseServer/);
+    expect(src).toMatch(/__capnp_[0-9a-f]+\.BASE_INTERFACE_ID/);
+    expect(src).toMatch(/__capnp_[0-9a-f]+\.Base_methods/);
+  });
+
+  test("a child compiled alone loads the superclass module", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "capnp-audit-child-"));
+    writeFileSync(
+      join(dir, "base.capnp"),
+      "@0xa1b2c3d4e5f60718;\ninterface Base { ping @0 () -> (); }\n",
+    );
+    writeFileSync(
+      join(dir, "child.capnp"),
+      '@0xb1b2c3d4e5f60718;\nusing Base = import "base.capnp".Base;\ninterface Child extends(Base) { pong @0 () -> (); }\n',
+    );
+    const include = capnpInclude();
+    const cgr = spawnSync("capnp", [
+      "compile",
+      "-o-",
+      "-I",
+      include,
+      "-I",
+      dir,
+      join(dir, "child.capnp"),
+    ]);
+    expect(cgr.status).toBe(0);
+    const ast = await walkCgr(new Uint8Array(cgr.stdout as Uint8Array));
+    expect(ast.requestedFiles.length).toBe(1);
+    const child = ast.requestedFiles[0]!;
+    expect(child.filename.endsWith("child.capnp")).toBe(true);
+    const baseImport = (child.imports ?? []).find((imp) => imp.name.endsWith("base.capnp"));
+    expect(baseImport).toBeDefined();
+    const childSrc = emitModuleSource(ast, child.filename, child.id);
+    expect(childSrc).toMatch(/import \* as __capnp_[0-9a-f]+ from "\.\/base\.ts"/);
+    expect(childSrc).not.toMatch(/import type \* as __capnp_/);
+    expect(childSrc).toMatch(/__capnp_[0-9a-f]+\.BaseServer/);
+    expect(childSrc).toMatch(/__capnp_[0-9a-f]+\.BASE_INTERFACE_ID/);
+    expect(childSrc).toMatch(/__capnp_[0-9a-f]+\.Base_methods/);
+    const baseSrc = emitModuleSource(ast, baseImport!.name, baseImport!.id);
+    const outDir = mkdtempSync(join(tmpdir(), "capnp-audit-load-"));
+    writeFileSync(join(outDir, "base.ts"), baseSrc);
+    writeFileSync(join(outDir, "child.ts"), childSrc);
+    const mod = (await import(join(outDir, "child.ts"))) as {
+      ChildServer: new () => {
+        ping(): void;
+        pong(): void;
+        dispatch(interfaceId: bigint, methodId: number, params: unknown, results: unknown): void;
+      };
+    };
+    class Impl extends mod.ChildServer {
+      ping(): void {}
+      pong(): void {}
+    }
+    const { MessageBuilder } = await import("@haozeke/capnp");
+    const params = new MessageBuilder().initRoot(0, 0);
+    const results = new MessageBuilder().initRoot(0, 0);
+    expect(() => new Impl().dispatch(1n, 0, params, results)).toThrow(/child\.capnp:Child/);
+  });
 });

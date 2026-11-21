@@ -33,6 +33,8 @@
  *
  * RequestedFile: 1 data word (id u64), 2+ pointers
  *   ptr0 filename : Text
+ *   ptr1 imports : List(Import)
+ * Import: 1 data word (id u64), ptr0 name : Text
  */
 
 import {
@@ -352,9 +354,17 @@ export type SuperclassAst = {
   brand?: BrandAst;
 };
 
+/** One `RequestedFile.imports` entry: the file id and the name this file used. */
+export type RequestedFileImportAst = {
+  id: bigint;
+  name: string;
+};
+
 export type RequestedFileAst = {
   id: bigint;
   filename: string;
+  /** Imports named by this requested file. Absent on hand-built graphs. */
+  imports?: RequestedFileImportAst[];
 };
 
 /** Full decoded CodeGeneratorRequest graph (nodes + requested files). */
@@ -432,12 +442,22 @@ export async function walkCgr(bytes: Uint8Array): Promise<CgrAst> {
     for (let i = 0; i < reqFiles.listLen(); i++) {
       const rf = reqFiles.listGetp(i);
       if (rf.kind !== PtrKind.Struct) {
-        requestedFiles.push({ id: 0n, filename: "" });
+        requestedFiles.push({ id: 0n, filename: "", imports: [] });
         continue;
+      }
+      const imports: RequestedFileImportAst[] = [];
+      const impList = rf.getp(1);
+      if (impList.kind === PtrKind.List) {
+        for (let j = 0; j < impList.listLen(); j++) {
+          const imp = impList.listGetp(j);
+          if (imp.kind !== PtrKind.Struct) continue;
+          imports.push({ id: imp.getU64(0), name: imp.getText(0) });
+        }
       }
       requestedFiles.push({
         id: rf.getU64(0),
         filename: rf.getText(0),
+        imports,
       });
     }
   }

@@ -274,7 +274,11 @@ function collectReferencedTypeIds(t: TypeAst, out: Set<bigint>): void {
   }
 }
 
-function collectNodeTypeRefs(node: NodeAst, out: Set<bigint>): void {
+function collectNodeTypeRefs(
+  node: NodeAst,
+  out: Set<bigint>,
+  byId: Map<bigint, NodeAst>,
+): void {
   if (node.struct) {
     for (const f of node.struct.fields) {
       if (f.slot) collectReferencedTypeIds(f.slot.type, out);
@@ -294,6 +298,20 @@ function collectNodeTypeRefs(node: NodeAst, out: Set<bigint>): void {
       }
     }
   }
+  const seen = new Set<bigint>();
+  const walk = (id: bigint): void => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    out.add(id);
+    const n = byId.get(id);
+    if (!n) return;
+    for (const m of n.methods ?? []) {
+      out.add(m.paramStructType);
+      out.add(m.resultStructType);
+    }
+    for (const s of n.superclasses ?? []) walk(s.id);
+  };
+  for (const s of node.superclasses ?? []) walk(s.id);
 }
 
 function typeMentionsBrand(t: TypeAst): boolean {
@@ -1262,6 +1280,14 @@ function ancestorInterfaces(node: NodeAst, ctx: ModuleEmitContext): NodeAst[] {
   return out;
 }
 
+/** A name from `node`'s module, qualified when that module is imported. */
+function importedName(node: NodeAst, local: string, ctx: ModuleEmitContext): string {
+  const fileId = ctx.ownerFileByNodeId.get(node.id);
+  if (fileId === undefined || fileId === ctx.currentFileId) return local;
+  const alias = ctx.importAliases.get(fileId);
+  return alias ? `${alias}.${local}` : local;
+}
+
 function emitInterface(
   node: NodeAst,
   ctx: ModuleEmitContext,
@@ -1350,16 +1376,17 @@ function emitInterface(
   }
   const emitCall = (
     ownerName: string,
-    ifaceUpper: string,
+    methodsRef: string,
+    idRef: string,
     methodName: string,
   ): void => {
     lines.push(
       `  /** Send ${ownerName}.${methodName}; returns the questionId. */`,
       `  ${methodName}(fillParams?: (params: StructBuilder) => void): number {`,
-      `    const m = ${ownerName}_methods.${methodName};`,
+      `    const m = ${methodsRef}.${methodName};`,
       `    return this.conn.sendCall(`,
       `      this.importedCapId,`,
-      `      ${ifaceUpper}_INTERFACE_ID,`,
+      `      ${idRef},`,
       `      m.ordinal,`,
       `      fillParams,`,
       `      m.paramsDwords,`,
@@ -1369,10 +1396,17 @@ function emitInterface(
       ``,
     );
   };
-  for (const m of methods) emitCall(typeName, upper, m.name);
+  for (const m of methods) {
+    emitCall(typeName, `${typeName}_methods`, `${upper}_INTERFACE_ID`, m.name);
+  }
   for (const { iface, method } of inherited) {
     const ownerName = shortTypeName(iface.displayName);
-    emitCall(ownerName, upperSnake(ownerName), method.name);
+    emitCall(
+      ownerName,
+      importedName(iface, `${ownerName}_methods`, ctx),
+      importedName(iface, `${upperSnake(ownerName)}_INTERFACE_ID`, ctx),
+      method.name,
+    );
   }
   lines.push(`}`, ``);
 
@@ -1380,8 +1414,9 @@ function emitInterface(
     .map((s) => ctx.byId.get(s.id))
     .filter((n): n is NodeAst => n !== undefined);
   const singleNode = directSupers.length === 1 ? directSupers[0] : undefined;
-  const singleSuper = singleNode ? shortTypeName(singleNode.displayName) : "";
-  const extendsClause = singleSuper ? ` extends ${singleSuper}Server` : "";
+  const extendsClause = singleNode
+    ? ` extends ${importedName(singleNode, `${shortTypeName(singleNode.displayName)}Server`, ctx)}`
+    : "";
 
   // Server: dispatch an incoming Call to a named method.
   lines.push(
@@ -1396,7 +1431,7 @@ function emitInterface(
     );
   };
   for (const m of methods) declareMethod(m, node);
-  if (!singleSuper) {
+  if (!singleNode) {
     for (const { iface, method } of inherited) declareMethod(method, iface);
   }
   lines.push(
@@ -1428,7 +1463,8 @@ function emitInterface(
     const checks = ancestors
       .map((iface) => {
         const ownerName = shortTypeName(iface.displayName);
-        return `interfaceId === ${upperSnake(ownerName)}_INTERFACE_ID`;
+        const idRef = importedName(iface, `${upperSnake(ownerName)}_INTERFACE_ID`, ctx);
+        return `interfaceId === ${idRef}`;
       })
       .join(" || ");
     if (checks.length > 0) {
@@ -1451,10 +1487,10 @@ function emitInterface(
   } else {
     for (const iface of ancestors) {
       const ownerName = shortTypeName(iface.displayName);
-      const ifaceUpper = upperSnake(ownerName);
+      const idRef = importedName(iface, `${upperSnake(ownerName)}_INTERFACE_ID`, ctx);
       const mine = iface.methods ?? [];
       lines.push(
-        `    if (interfaceId === ${ifaceUpper}_INTERFACE_ID) {`,
+        `    if (interfaceId === ${idRef}) {`,
         `      switch (methodId) {`,
       );
       for (const m of mine) {
@@ -1664,6 +1700,33 @@ function emitStruct(
 }
 
 /**
+ * Files that own a superclass of an emitted interface, including ancestors.
+ * Those modules export the server class, method table, and interface id.
+ */
+function superclassOwnerFiles(
+  nodes: NodeAst[],
+  byId: Map<bigint, NodeAst>,
+  ownerFileByNodeId: Map<bigint, bigint>,
+  currentFileId: bigint,
+): Set<bigint> {
+  const owners = new Set<bigint>();
+  const seen = new Set<bigint>();
+  const walk = (id: bigint): void => {
+    if (seen.has(id)) return;
+    seen.add(id);
+    const owner = ownerFileByNodeId.get(id);
+    if (owner !== undefined && owner !== 0n && owner !== currentFileId) owners.add(owner);
+    const iface = byId.get(id);
+    if (!iface) return;
+    for (const s of iface.superclasses ?? []) walk(s.id);
+  };
+  for (const n of nodes) {
+    for (const s of n.superclasses ?? []) walk(s.id);
+  }
+  return owners;
+}
+
+/**
  * Emit one TypeScript module source for a requested schema file.
  */
 export function emitModuleSource(
@@ -1686,21 +1749,45 @@ export function emitModuleSource(
   const byId = new Map(ast.nodes.map((n) => [n.id, n]));
   const ownerFileByNodeId = buildOwnerFileMap(ast, byId);
   const requestedById = new Map(ast.requestedFiles.map((rf) => [rf.id, rf.filename]));
+  const currentRequest = ast.requestedFiles.find((rf) => rf.id === resolvedId);
+  const importNameById = new Map<bigint, string>();
+  for (const imp of currentRequest?.imports ?? []) {
+    if (!importNameById.has(imp.id)) importNameById.set(imp.id, imp.name);
+  }
+  const fileNameById = new Map<bigint, string>();
+  for (const n of ast.nodes) {
+    if (n.which === "file" && n.displayName) fileNameById.set(n.id, n.displayName);
+  }
+  const superclassOwners = superclassOwnerFiles(nodes, byId, ownerFileByNodeId, resolvedId);
 
   const referencedTypeIds = new Set<bigint>();
-  for (const n of nodes) collectNodeTypeRefs(n, referencedTypeIds);
+  for (const n of nodes) collectNodeTypeRefs(n, referencedTypeIds, byId);
 
-  const externalImports: Array<{ schemaPath: string; alias: string }> = [];
+  const valueImportOwners = new Set<bigint>();
+  for (const typeId of referencedTypeIds) {
+    const n = byId.get(typeId);
+    if (n?.which !== "interface") continue;
+    const owner = ownerFileByNodeId.get(typeId);
+    if (owner !== undefined && owner !== resolvedId) valueImportOwners.add(owner);
+  }
+
+  const externalImports: Array<{ schemaPath: string; alias: string; fileId: bigint }> = [];
   const importAliases = new Map<bigint, string>();
   for (const typeId of referencedTypeIds) {
     const owner = ownerFileByNodeId.get(typeId);
     if (!owner || owner === 0n || owner === resolvedId) continue;
     if (importAliases.has(owner)) continue;
-    const importSchema = requestedById.get(owner);
+    let importSchema = requestedById.get(owner);
+    if (importSchema === undefined && superclassOwners.has(owner)) {
+      // capnpc-c++ includes RequestedFile.imports whose id was used.
+      // An ancestor file that this file did not import still has a
+      // display name, and the generated server names that file's bindings.
+      importSchema = importNameById.get(owner) ?? fileNameById.get(owner);
+    }
     if (!importSchema) continue;
     const alias = `__capnp_${owner.toString(16)}`;
     importAliases.set(owner, alias);
-    externalImports.push({ schemaPath: importSchema, alias });
+    externalImports.push({ schemaPath: importSchema, alias, fileId: owner });
   }
 
   // A type from a file that was not requested has no module to import.
@@ -1815,8 +1902,9 @@ export function emitModuleSource(
     );
   }
   for (const imp of externalImports) {
+    const kind = valueImportOwners.has(imp.fileId) ? "import" : "import type";
     lines.push(
-      `import type * as ${imp.alias} from ${JSON.stringify(`./${outputNameForSchema(imp.schemaPath)}`)};`,
+      `${kind} * as ${imp.alias} from ${JSON.stringify(`./${outputNameForSchema(imp.schemaPath)}`)};`,
     );
   }
   lines.push(``);
