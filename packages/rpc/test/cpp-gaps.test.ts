@@ -1297,3 +1297,11 @@ describe("results a method never wrote (rpc.c++ sendReturn, getResults)", () => 
     expect(content(ret).kind).toBe(PtrKind.Null);
   });
 });
+
+describe("the null capability (capability.c++ newNullCap)", () => {
+  test("calls on it fail with the capnp-C++ text", async () => {
+    await expect(Promise.resolve(new Client(newNullCap()).call(IFACE, 0))).rejects.toMatchObject({
+      message: "Called null capability.",
+    });
+  });
+});

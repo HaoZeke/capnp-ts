@@ -454,7 +454,7 @@ export function newBrokenCap(error: unknown): ClientHook {
 
 /** The capability a null pointer stands for: every call fails. */
 export function newNullCap(): ClientHook {
-  return new BrokenClient(new RpcError("called null capability"), true);
+  return new BrokenClient(new RpcError("Called null capability."), true);
 }
 
 export function isNullCap(hook: ClientHook): boolean {
