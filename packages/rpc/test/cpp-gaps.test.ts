@@ -1298,6 +1298,37 @@ describe("results a method never wrote (rpc.c++ sendReturn, getResults)", () => 
   });
 });
 
+describe("Resolve messages capnp-C++ refuses (rpc.c++ handleResolve)", () => {
+  const resolveWhich = (which: number, desc?: (d: StructBuilder) => void): Uint8Array =>
+    frame(Message.resolve, (m) => {
+      const r = m.initStruct(0, 1, 1);
+      r.setU32(0, 5);
+      r.setU16(4, which);
+      if (desc !== undefined) desc(r.initStruct(0, 1, 1));
+    });
+  const abortReason = async (f: Uint8Array): Promise<string> => {
+    const r = raw(echoCap);
+    r.send(bootstrap(0));
+    r.send(callWithCap(1, (t) => toAnswer(t, 0), CapDescriptor.senderPromise, 5));
+    await nextTurn();
+    r.take();
+    r.send(f);
+    const abort = r.take().find((m) => m.which === Message.abort);
+    return Exception_getReason(abort!.body);
+  };
+
+  test("a Resolve to `CapDescriptor.none` aborts", async () => {
+    expect(await abortReason(resolveWhich(Resolve.cap, (d) => d.setU16(0, CapDescriptor.none)))).toBe(
+      "'Resolve' contained 'CapDescriptor.none'.",
+    );
+    expect(await abortReason(resolveWhich(Resolve.cap))).toBe("'Resolve' contained 'CapDescriptor.none'.");
+  });
+
+  test("a Resolve of an unknown type aborts", async () => {
+    expect(await abortReason(resolveWhich(7))).toBe("Unknown 'Resolve' type.");
+  });
+});
+
 describe("the null capability (capability.c++ newNullCap)", () => {
   test("calls on it fail with the capnp-C++ text", async () => {
     await expect(Promise.resolve(new Client(newNullCap()).call(IFACE, 0))).rejects.toMatchObject({

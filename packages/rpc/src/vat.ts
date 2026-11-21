@@ -2195,7 +2195,7 @@ export class RpcConnection implements RemoteHost {
     if (Resolve_which(resolve) === Resolve.cap) {
       const desc = Resolve_getCap(resolve);
       if (desc.kind !== PtrKind.Struct || CapDescriptor_which(desc) === CapDescriptor.none) {
-        this.abort(new RpcError("Resolve contained CapDescriptor.none"));
+        this.abort(new RpcError("'Resolve' contained 'CapDescriptor.none'."));
         return;
       }
       const hook = this.receiveCap(desc);
@@ -2205,7 +2205,7 @@ export class RpcConnection implements RemoteHost {
     } else if (Resolve_which(resolve) === Resolve.exception) {
       resolver?.reject(readException(Resolve_getException(resolve)));
     } else {
-      this.abort(new RpcError("Unknown Resolve type"));
+      this.abort(new RpcError("Unknown 'Resolve' type."));
     }
   }
 

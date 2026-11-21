@@ -133,6 +133,19 @@ function hold(q: number, id: number, kind = 1): Uint8Array {
   return b.toFlat();
 }
 
+/** A `Resolve.cap` of descriptor `kind`, or with a null descriptor when `kind` is null. */
+function resolveCap(promiseId: number, kind: number | null, id = 0): Uint8Array {
+  return frame(Message.resolve, (m) => {
+    const r = m.initStruct(0, 1, 1);
+    r.setU32(0, promiseId);
+    r.setU16(4, 0);
+    if (kind === null) return;
+    const d = r.initStruct(0, 1, 1);
+    d.setU16(0, kind);
+    d.setU32(4, id);
+  });
+}
+
 function resolveException(promiseId: number, reason: string): Uint8Array {
   return frame(Message.resolve, (m) => {
     const r = m.initStruct(0, 1, 1);
@@ -304,6 +317,19 @@ const SCENARIOS: Record<string, Step[]> = {
     resolveException(5, "gone"),
     W(100),
     call({ q: 2, method: M.callHeld, target: (t) => targetAnswer(t, 0), params: (p) => p.setU32(0, 3) }),
+  ],
+  // A Resolve to `CapDescriptor.none`, written out and as a null descriptor.
+  "resolve-none": [bootstrap(0), hold(1, 5, 2), W(100), resolveCap(5, 0)],
+  "resolve-null-descriptor": [bootstrap(0), hold(1, 5, 2), W(100), resolveCap(5, null)],
+  "resolve-unknown-type": [
+    bootstrap(0),
+    hold(1, 5, 2),
+    W(100),
+    frame(Message.resolve, (m) => {
+      const r = m.initStruct(0, 1, 1);
+      r.setU32(0, 5);
+      r.setU16(4, 7);
+    }),
   ],
   "disembargo-provide": [bootstrap(0), W(100), disembargoProvide(1)],
   "disembargo-accept": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0, [0, 2]), 2)],
