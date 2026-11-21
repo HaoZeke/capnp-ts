@@ -700,6 +700,14 @@ function annotationValueLiteral(v: ValueAst): string | undefined {
       return `new Uint8Array([${Array.from(v.value).join(", ")}])`;
     case "enum":
       return String(v.value);
+    case "list":
+    case "struct":
+    case "interface":
+    case "anyPointer": {
+      const bytes = v.pointerBytes;
+      if (!bytes || bytes.length === 0) return undefined;
+      return `new Uint8Array([${bytes.join(", ")}])`;
+    }
     default:
       return undefined;
   }
@@ -779,6 +787,7 @@ function emitConst(node: NodeAst, lines: string[]): void {
         `export const ${name} = new Uint8Array([${Array.from(v.value).join(", ")}]);`,
         ``,
       );
+      emitApplied(upperSnake(name), node.appliedAnnotations, lines);
       return;
     case "list":
     case "struct":

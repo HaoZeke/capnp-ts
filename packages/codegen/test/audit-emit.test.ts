@@ -5,7 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { walkCgr } from "../src/cgr-walk.ts";
@@ -27,10 +27,24 @@ const SCHEMA = `
 
 annotation myTag(file, struct, field, interface, method, const, enum, enumerant) :Text;
 
+struct Tag {
+  n @0 :Int32;
+}
+
+annotation nums(struct) :List(Int32);
+annotation tagged(struct) :Tag;
+annotation extra(struct) :AnyPointer;
+
 $myTag("file-tag");
 
 const negInf :Float64 = -inf;
 const missing :Void = void;
+const blob :Data = 0x"ab" $myTag("on-data");
+const tagConst :Tag = (n = 5);
+
+struct AnnHolder $nums([7, 8, 9]) $tagged(n = 5) $extra(.tagConst) $myTag("holder") {
+  x @0 :Void;
+}
 
 struct Box(T) {
   inner :group {
@@ -116,6 +130,9 @@ describe.skipIf(!hasCapnp())("audit emit", () => {
     expect(src).toMatch(/TAGGED_APPLIED_ANNOTATIONS = \[\{ id: 0x[0-9a-f]+n, value: "hi" \}\]/);
     expect(src).toMatch(/HUE_RED_APPLIED_ANNOTATIONS = \[\{ id: 0x[0-9a-f]+n, value: "r" \}\]/);
     expect(src).toMatch(/FILE_APPLIED_ANNOTATIONS = \[\{ id: 0x[0-9a-f]+n, value: "file-tag" \}\]/);
+    expect(src).toMatch(/BLOB_APPLIED_ANNOTATIONS = \[\{ id: 0x[0-9a-f]+n, value: "on-data" \}\]/);
+    expect(src).toMatch(/ANN_HOLDER_APPLIED_ANNOTATIONS = \[[\s\S]*value: new Uint8Array\(\[/);
+    expect(src).toMatch(/ANN_HOLDER_APPLIED_ANNOTATIONS = \[[\s\S]*value: "holder"/);
     expect(src).toContain("export class GrandChildClient");
     expect(src).toContain("export class MultiClient");
     const grandStart = src.indexOf("export class GrandChildClient");
@@ -130,9 +147,20 @@ describe.skipIf(!hasCapnp())("audit emit", () => {
     expect(multi).toContain("EXTRA_INTERFACE_ID");
     expect(src).toContain("ptr.setU16(");
 
-    const out = join(dir, "audit.ts");
+    const out = join(import.meta.dir, `.audit-emit-${process.pid}.ts`);
     writeFileSync(out, src);
-    const mod = await import(out);
+    let mod: {
+      Choice_dataWordCount: number;
+      Choice_pointerCount: number;
+      Choice_ug_nested_discriminantOffset: number;
+      Choice_initUg: (root: unknown) => void;
+      Choice_ug_nested_which: (root: unknown) => number;
+    };
+    try {
+      mod = await import(out);
+    } finally {
+      unlinkSync(out);
+    }
     const { Message, MessageBuilder } = await import("@haozeke/capnp");
     const b = new MessageBuilder();
     const root = b.initRoot(mod.Choice_dataWordCount, mod.Choice_pointerCount);
