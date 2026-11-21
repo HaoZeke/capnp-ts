@@ -18,6 +18,7 @@ import {
 import { newNullCap } from "../packages/rpc/src/capability.ts";
 import {
   COUNTER_INTERFACE_ID,
+  Counter_methods,
   Echo_methods,
   ECHO_INTERFACE_ID,
   Sink_methods,
@@ -27,6 +28,7 @@ import {
 
 export {
   COUNTER_INTERFACE_ID,
+  Counter_methods,
   Echo_methods,
   ECHO_INTERFACE_ID,
   Sink_methods,
@@ -86,7 +88,16 @@ export class CounterImpl implements RpcServer {
   static released = 0;
   seen: number[] = [];
   constructor(private readonly onCall?: (n: number) => void) {}
-  dispatch(_i: bigint, _m: number, params: Ptr, results: StructBuilder): void {
+  dispatch(interfaceId: bigint, methodId: number, params: Ptr, results: StructBuilder): void {
+    if (interfaceId !== COUNTER_INTERFACE_ID) {
+      throw new RpcError(
+        `Requested interface not implemented.; actualInterfaceName = interop.capnp:Counter; requestedTypeId = ${interfaceId}`,
+        "unimplemented",
+      );
+    }
+    if (methodId !== Counter_methods.inc.ordinal) {
+      throw new RpcError("Method not implemented.", "unimplemented");
+    }
     const n = params.getU32(0);
     this.seen.push(n);
     this.onCall?.(n);
