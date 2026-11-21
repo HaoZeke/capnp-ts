@@ -1330,7 +1330,8 @@ describe("results a method never wrote (rpc.c++ sendReturn, getResults)", () => 
     r.send(returnCap(0, 0));
     await cap.whenResolved();
     const p = cap.call(IFACE, 0);
-    r.send(frame(Message.return, (m) => m.initStruct(0, 2, 1).setU32(0, 1)));
+    const sent = r.take().find((m) => m.which === Message.call)!;
+    r.send(frame(Message.return, (m) => m.initStruct(0, 2, 1).setU32(0, sent.body.getU32(0))));
     const out = await p;
     expect(out.content.getU32(0)).toBe(0);
     expect(out.content.getP(0).kind).toBe(PtrKind.Null);

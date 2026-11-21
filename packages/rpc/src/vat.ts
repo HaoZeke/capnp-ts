@@ -602,6 +602,48 @@ function settledCall(payload: Payload): CallState {
   return call;
 }
 
+/** Locally chosen ids, as capnp-C++ `ExportTable`: the lowest freed id goes first. */
+class IdAllocator {
+  private next = 0;
+  /** Min-heap of freed ids. */
+  private readonly free: number[] = [];
+
+  take(): number {
+    const free = this.free;
+    if (free.length === 0) return this.next++;
+    const top = free[0]!;
+    const last = free.pop()!;
+    if (free.length > 0) {
+      let i = 0;
+      for (;;) {
+        const l = 2 * i + 1;
+        const r = l + 1;
+        let m = i;
+        if (l < free.length && free[l]! < (m === i ? last : free[m]!)) m = l;
+        if (r < free.length && free[r]! < (m === i ? last : free[m]!)) m = r;
+        if (m === i) break;
+        free[i] = free[m]!;
+        i = m;
+      }
+      free[i] = last;
+    }
+    return top;
+  }
+
+  release(id: number): void {
+    const free = this.free;
+    let i = free.length;
+    free.push(id);
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (free[p]! <= id) break;
+      free[i] = free[p]!;
+      i = p;
+    }
+    free[i] = id;
+  }
+}
+
 export class RpcConnection implements RemoteHost {
   private readonly exports = new Map<number, ExportSlot>();
   private readonly exportIdByHook = new Map<ClientHook, number>();
@@ -627,12 +669,12 @@ export class RpcConnection implements RemoteHost {
   private readonly introductions = new Map<bigint, Introduction>();
   private readonly introductionHooks = new Map<bigint, ClientHook>();
   private readonly bootstrapHook: ClientHook | undefined;
-  private nextExportId = 0;
-  private nextQuestionId = 0;
+  private readonly exportIds = new IdAllocator();
+  private readonly questionIds = new IdAllocator();
   private nextHighQuestionId = 0;
   /** The peer answered a pipeline-only question, so it ignores the hint. */
   private gotReturnForHighQuestionId = false;
-  private nextEmbargoId = 0;
+  private readonly embargoIds = new IdAllocator();
   private gone: RpcError | undefined;
   /** FDs to send with the message currently being built. */
   private outFds: number[] = [];
@@ -883,7 +925,7 @@ export class RpcConnection implements RemoteHost {
       describe(existing, slot.pendingResolve);
       return existing;
     }
-    const id = this.nextExportId++;
+    const id = this.exportIds.take();
     const eventual = inner.whenMoreResolved();
     this.exports.set(id, {
       hook: inner.addRef(),
@@ -964,10 +1006,13 @@ export class RpcConnection implements RemoteHost {
       fill(resolve);
       this.sendFlat(b.toFlat());
     };
+    // A released id can be reused by a new export; only the slot this
+    // promise was exported in may send its Resolve.
+    const owner = this.exports.get(exportId);
     eventual.then(
       (resolution) => {
         const slot = this.exports.get(exportId);
-        if (slot === undefined || slot.hook !== promiseHook) return;
+        if (slot === undefined || slot !== owner || slot.hook !== promiseHook) return;
         const target = this.innermostForExport(resolution);
         if (this.exportIdByHook.get(slot.hook) === exportId) this.exportIdByHook.delete(slot.hook);
         const old = slot.hook;
@@ -1003,7 +1048,7 @@ export class RpcConnection implements RemoteHost {
       },
       (error) => {
         const slot = this.exports.get(exportId);
-        if (slot === undefined || slot.hook !== promiseHook) return;
+        if (slot === undefined || slot !== owner || slot.hook !== promiseHook) return;
         slot.pendingResolve = false;
         send((resolve) => {
           resolve.setU16(OFF.resolveUnion, Resolve.exception);
@@ -1031,6 +1076,7 @@ export class RpcConnection implements RemoteHost {
     slot.refcount -= count;
     if (slot.refcount > 0) return;
     this.exports.delete(id);
+    this.exportIds.release(id);
     if (this.exportIdByHook.get(slot.hook) === id) this.exportIdByHook.delete(slot.hook);
     slot.hook.release();
   }
@@ -1205,11 +1251,11 @@ export class RpcConnection implements RemoteHost {
   // outstanding from the moment it is sent until its Return arrives, so
   // the caller can pipeline against it in the meantime.
 
-  private newQuestion(id = this.nextQuestionId++): { id: number; q: QuestionState } {
+  private newQuestion(id = this.questionIds.take()): { id: number; q: QuestionState } {
     const call = new CallState();
     const q: QuestionState = {
       call,
-      ref: new QuestionRef(() => this.finishQuestion(id)),
+      ref: new QuestionRef(() => this.finishQuestion(id, q)),
       paramExports: [],
       failed: false,
       returned: false,
@@ -1254,16 +1300,16 @@ export class RpcConnection implements RemoteHost {
   }
 
   /** The last interest in a question is gone: tell the peer. */
-  private finishQuestion(id: number): void {
-    const q = this.questions.get(id);
-    if (q === undefined) return;
+  private finishQuestion(id: number, q: QuestionState): void {
+    // A reused id may name a newer question by now.
+    if (this.questions.get(id) !== q) return;
     q.finished = true;
     q.redirectedCall?.release();
     q.redirectedCall = undefined;
     if (q.pipelineOnly && q.call.result.state === "pending") {
       q.call.result.reject(new RpcError("canceled"));
     }
-    if (q.returned) this.questions.delete(id);
+    if (q.returned) this.dropQuestion(id, q);
     if (this.gone !== undefined || q.skipFinish) return;
     const { b, root } = newMessage(Message.finish);
     const finish = root.initStruct(0, FINISH_DWORDS, FINISH_PWORDS);
@@ -1273,6 +1319,13 @@ export class RpcConnection implements RemoteHost {
     finish.setBool(OFF.finishReleaseResultCaps, !q.returned, true);
     finish.setBool(OFF.finishRequireEarly, false, true);
     this.sendFlat(b.toFlat());
+  }
+
+  /** Frees the id once, however many paths reach the end of `q`. */
+  private dropQuestion(id: number, q: QuestionState): void {
+    if (this.questions.get(id) !== q) return;
+    this.questions.delete(id);
+    if (id < 0x80000000) this.questionIds.release(id);
   }
 
   /** Ask for the peer's bootstrap capability. Returns the questionId. */
@@ -1655,7 +1708,7 @@ export class RpcConnection implements RemoteHost {
     if (q.finished && q.call.result.state === "pending") {
       q.call.result.resolve(emptyPayload());
     }
-    if (q.finished) this.questions.delete(answerId);
+    if (q.finished) this.dropQuestion(answerId, q);
   }
 
   /**
@@ -2493,7 +2546,7 @@ export class RpcConnection implements RemoteHost {
   }
 
   startEmbargo(target: RpcClientHook): Settle<void> {
-    const id = this.nextEmbargoId++;
+    const id = this.embargoIds.take();
     const settle = new Settle<void>();
     this.embargoes.set(id, settle);
     const { b, root } = newMessage(Message.disembargo);
@@ -2534,6 +2587,7 @@ export class RpcConnection implements RemoteHost {
           return;
         }
         this.embargoes.delete(id);
+        this.embargoIds.release(id);
         embargo.resolve();
         return;
       }

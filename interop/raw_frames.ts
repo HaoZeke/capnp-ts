@@ -646,6 +646,20 @@ const SCENARIOS: Record<string, Step[]> = {
     bootstrap(0),
     call({ q: 1, method: M.ping, target: (t) => targetAnswer(t, 0, [-1]), params: (p) => p.setU32(0, 1) }),
   ],
+  // A freed export id is the next one handed out, as in `ExportTable::next`.
+  "export-reuse-after-finish": [bootstrap(0), W(100), finish(0), W(100), bootstrap(1)],
+  "export-reuse-after-release": [
+    bootstrap(0),
+    W(100),
+    finish(0, false),
+    release(0, 1),
+    W(100),
+    bootstrap(1),
+    W(100),
+    finish(1),
+    W(100),
+    bootstrap(2),
+  ],
   // Gap 15 and 16: a deprecated named bootstrap.
   "named-bootstrap": [
     frame(Message.bootstrap, (m) => {

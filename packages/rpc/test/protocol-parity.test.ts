@@ -58,6 +58,8 @@ import {
   PAYLOAD_PWORDS,
   PROVIDE_DWORDS,
   PROVIDE_PWORDS,
+  RELEASE_DWORDS,
+  RELEASE_PWORDS,
   RESOLVE_DWORDS,
   RESOLVE_PWORDS,
   Resolve,
@@ -1487,4 +1489,111 @@ describe("refcount cases", () => {
     expect(after).toBe(1);
     expect(a.disconnected).toBeUndefined();
   });
+});
+
+describe("ids are reused lowest first (rpc.c++ ExportTable)", () => {
+  const toImport0 = (t: StructBuilder) => {
+    t.setU16(4, MessageTarget.importedCap);
+    t.setU32(0, 0);
+  };
+  const body = (f: Uint8Array | null): Ptr => CapnpMessage.fromFlat(f!).root().getP(0);
+  const release = (id: number, count: number) =>
+    frame((root) => {
+      root.setU16(0, Message.release);
+      const r = root.initStruct(0, RELEASE_DWORDS, RELEASE_PWORDS);
+      r.setU32(0, id);
+      r.setU32(4, count);
+    });
+
+  test("a question id is free once its Return and Finish are both done", () => {
+    const pair = new MemoryTransportPair();
+    const a = new RpcConnection(pair.a);
+    const ask = () => {
+      const call = a.sendCallTo(toImport0, IFACE, 0, new CallBuilder(0, 0).toPayload());
+      return { call, id: body(pair.b.receive()).getU32(0) };
+    };
+    const first = [ask(), ask(), ask()];
+    expect(first.map((q) => q.id)).toEqual([0, 1, 2]);
+    for (const q of [first[2]!, first[0]!]) {
+      sendReturn(pair.b, q.id, Return.results);
+      a.pump();
+      q.call.release();
+      pair.b.receive();
+    }
+    expect([ask().id, ask().id, ask().id]).toEqual([0, 2, 3]);
+    expect(a.disconnected).toBeUndefined();
+  });
+
+  test("an export id is free once its last reference is released", () => {
+    const pair = new MemoryTransportPair();
+    const a = new RpcConnection(pair.a);
+    const send = (n: number) => {
+      const params = new CallBuilder(0, n);
+      for (let i = 0; i < n; i++) params.setCap(params.root, i, Client.local(new Counter()).hook);
+      a.sendCallTo(toImport0, IFACE, 0, params.toPayload());
+      pair.b.receive();
+    };
+    send(3);
+    expect(a.liveExports()).toEqual([0, 1, 2]);
+    pair.b.send(release(1, 1));
+    pair.b.send(release(0, 1));
+    a.pump();
+    send(1);
+    expect(a.liveExports()).toEqual([0, 2]);
+    send(1);
+    expect(a.liveExports()).toEqual([0, 1, 2]);
+    expect(a.disconnected).toBeUndefined();
+  });
+
+  test("an embargo id is free once its Disembargo comes back", () => {
+    const pair = new MemoryTransportPair();
+    const a = new RpcConnection(pair.a);
+    const embargo = () => {
+      (a as unknown as { startEmbargo(t: unknown): unknown }).startEmbargo({ writeTarget: toImport0 });
+      return body(pair.b.receive()).getU32(0);
+    };
+    expect([embargo(), embargo()]).toEqual([0, 1]);
+    pair.b.send(
+      frame((root) => {
+        root.setU16(0, Message.disembargo);
+        const d = root.initStruct(0, DISEMBARGO_DWORDS, DISEMBARGO_PWORDS);
+        toImport0(d.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS));
+        d.setU16(4, Disembargo_context.receiverLoopback);
+        d.setU32(0, 0);
+      }),
+    );
+    a.pump();
+    expect([embargo(), embargo()]).toEqual([0, 2]);
+    expect(a.disconnected).toBeUndefined();
+  });
+
+  for (const outcome of ["rejects", "resolves"] as const) {
+    test(`a promise exported again on its reused id ${outcome} with one Resolve`, async () => {
+      const pair = new MemoryTransportPair();
+      const a = new RpcConnection(pair.a);
+      const settle = new Settle<ClientHook>();
+      const promised = new Client(new QueuedClient(settle));
+      const send = () => {
+        const params = new CallBuilder(0, 1);
+        params.setCap(params.root, 0, promised.hook.addRef());
+        a.sendCallTo(toImport0, IFACE, 0, params.toPayload());
+        pair.b.receive();
+      };
+      send();
+      pair.b.send(release(0, 1));
+      a.pump();
+      send();
+      expect(a.liveExports()).toEqual([0]);
+      if (outcome === "rejects") settle.reject(new RpcError("boom"));
+      else settle.resolve(Client.local(new Counter()).hook);
+      await new Promise((r) => setTimeout(r, 10));
+      const resolves: number[] = [];
+      for (let f = pair.b.receive(); f !== null; f = pair.b.receive()) {
+        const root = CapnpMessage.fromFlat(f).root();
+        if (Message_which(root) === Message.resolve) resolves.push(root.getP(0).getU32(0));
+      }
+      expect(resolves).toEqual([0]);
+      expect(a.disconnected).toBeUndefined();
+    });
+  }
 });
