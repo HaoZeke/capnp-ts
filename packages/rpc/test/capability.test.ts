@@ -417,6 +417,7 @@ describe("payloads", () => {
     expect(payload.getCap(ptr).brokenError?.message).toBe("x");
     const bare = new Payload(payload.content, []);
     expect(() => bare.getCap(ptr)).toThrow("Message contains invalid capability pointer.");
+    expect(() => bare.getPipelinedCap([0])).toThrow("Message contains invalid capability pointer.");
     expect(bare.pipelinedCapAt([0]).brokenError?.message).toBe(
       "Message contains invalid capability pointer.",
     );

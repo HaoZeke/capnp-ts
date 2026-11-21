@@ -32,6 +32,8 @@ export class RpcError extends Error {
     readonly type: ExceptionType = "failed",
     /** `Exception.trace` from the peer, as capnp-C++ `setRemoteTrace` keeps it. */
     readonly remoteTrace?: string,
+    /** Wire `Exception.type` when the peer sent a value outside the four names. */
+    readonly wireType?: number,
   ) {
     super(message);
     this.name = "RpcError";

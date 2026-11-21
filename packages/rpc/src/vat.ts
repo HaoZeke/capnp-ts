@@ -14,8 +14,10 @@
  * `Vat`.
  */
 import {
+  ElemSize,
   Message as CapnpMessage,
   MessageBuilder,
+  nonStructPointerMessage,
   Ptr,
   PtrKind,
   type StructBuilder,
@@ -64,7 +66,6 @@ import {
   Call_getOnlyPromisePipeline,
   Call_getParams,
   Call_getQuestionId,
-  Call_getTarget,
   Call_sendResultsTo,
   Call_sendResultsTo_which,
   CAP_DESCRIPTOR_DWORDS,
@@ -87,7 +88,6 @@ import {
   Accept_getEmbargo,
   Accept_getProvision,
   Accept_getQuestionId,
-  Bootstrap_getDeprecatedObjectId,
   Bootstrap_getQuestionId,
   PROVIDE_DWORDS,
   PROVIDE_PWORDS,
@@ -116,7 +116,6 @@ import {
   Disembargo_context_getReceiverLoopback,
   Disembargo_context_which,
   Disembargo_getContext,
-  Disembargo_getTarget,
   Finish_getQuestionId,
   Finish_getReleaseResultCaps,
   Finish_getRequireEarlyCancellationWorkaround,
@@ -128,18 +127,10 @@ import {
   MESSAGE_TARGET_DWORDS,
   MESSAGE_TARGET_PWORDS,
   Message,
-  Message_getAbort,
-  Message_getBootstrap,
-  Message_getCall,
   Message_getAccept,
-  Message_getDisembargo,
   Message_getProvide,
-  Message_getFinish,
   Message_getResolve,
-  Message_getReturn,
   Message_getJoin,
-  Message_getRelease,
-  Message_getUnimplemented,
   Message_which,
   MessageTarget,
   MessageTarget_getImportedCap,
@@ -265,7 +256,8 @@ function readException(exc: Ptr): RpcError {
   const trace = e.getP(1).kind === PtrKind.Null ? undefined : Exception_getTrace(e);
   const reason = Exception_getReason(e);
   const message = reason.startsWith(REMOTE_PREFIX) ? reason : REMOTE_PREFIX + reason;
-  return new RpcError(message, exceptionTypeFromWire(Exception_getType(e)), trace);
+  const wireType = Exception_getType(e);
+  return new RpcError(message, exceptionTypeFromWire(wireType), trace, wireType);
 }
 
 /**
@@ -314,8 +306,53 @@ const RPC_FRAME = { maxSegments: Number.MAX_SAFE_INTEGER };
 
 let emptyStruct: Ptr | undefined;
 
+/**
+ * True when `p` or a pointer it reaches is a capability.
+ * The walk matches `WireHelpers::totalSize`: a capability is only counted,
+ * and a later structural error still throws. `setUnimplemented` calls
+ * `totalSize` before the copy, so that error is the one the peer reports.
+ */
+function messageHasCapability(p: Ptr): boolean {
+  if (p.kind === PtrKind.Cap) return true;
+  if (p.kind === PtrKind.Null) return false;
+  if (p.kind === PtrKind.Struct) {
+    let found = false;
+    for (let i = 0; i < p.pwords; i++) {
+      if (messageHasCapability(p.getP(i, "copy"))) found = true;
+    }
+    return found;
+  }
+  if (p.kind === PtrKind.List) {
+    let found = false;
+    if (p.esize === ElemSize.Pointer) {
+      for (let i = 0; i < p.listLen(); i++) {
+        if (messageHasCapability(p.listGetP(i, "copy"))) found = true;
+      }
+    } else if (p.esize === ElemSize.Composite && p.pwords > 0) {
+      for (let i = 0; i < p.listLen(); i++) {
+        const el = p.listGetStruct(i);
+        for (let j = 0; j < el.pwords; j++) {
+          if (messageHasCapability(el.getP(j, "copy"))) found = true;
+        }
+      }
+    }
+    return found;
+  }
+  return false;
+}
+
+/** Wire kind of a pointer that has already been followed, for a `KJ_REQUIRE` value. */
+function wireKindOf(p: Ptr): number {
+  if (p.kind === PtrKind.List) return 1;
+  if (p.kind === PtrKind.Cap) return 3;
+  return 0;
+}
+
 /** `p`, or a struct with no fields when `p` is null: every field reads as its default. */
 function structOrDefault(p: Ptr): Ptr {
+  if (p.kind !== PtrKind.Null && p.kind !== PtrKind.Struct) {
+    throw new RpcError(nonStructPointerMessage(wireKindOf(p)));
+  }
   if (p.kind !== PtrKind.Null) return p;
   if (emptyStruct === undefined) {
     const b = new MessageBuilder();
@@ -644,58 +681,58 @@ export class RpcConnection implements RemoteHost {
     try {
       this.dispatchFrame(frame);
     } catch (e) {
-      this.abort(new RpcError(`protocol error: ${e instanceof Error ? e.message : String(e)}`));
+      this.abort(new RpcError(e instanceof Error ? e.message : String(e)));
     }
     return true;
   }
 
   private dispatchFrame(frame: Uint8Array): void {
     const msg = CapnpMessage.fromFlat(frame, RPC_FRAME);
-    const root = msg.root();
+    const root = structOrDefault(msg.root("struct"));
     const which = Message_which(root);
     // Every body is the union's one pointer. A null one reads as the
     // default struct, as capnp-C++'s generated getters return.
-    const body = (get: (p: Ptr) => Ptr): Ptr => structOrDefault(get(root));
+    const body = (): Ptr => structOrDefault(root.getP(0, "struct"));
 
     switch (which) {
       case Message.bootstrap:
-        this.handleBootstrap(body(Message_getBootstrap));
+        this.handleBootstrap(body());
         break;
       case Message.call:
-        this.handleCall(body(Message_getCall), segmentWords(frame));
+        this.handleCall(body(), segmentWords(frame));
         break;
       case Message.finish:
-        this.handleFinish(body(Message_getFinish));
+        this.handleFinish(body());
         break;
       case Message.release:
-        this.handleRelease(body(Message_getRelease));
+        this.handleRelease(body());
         break;
       case Message.resolve:
-        this.handleResolve(body(Message_getResolve));
+        this.handleResolve(body());
         break;
       case Message.join:
         if (this.twoParty) this.sendUnimplemented(frame);
-        else this.handleJoin(body(Message_getJoin));
+        else this.handleJoin(body());
         break;
       case Message.disembargo:
-        this.handleDisembargo(body(Message_getDisembargo));
+        this.handleDisembargo(body());
         break;
       case Message.return:
-        this.handleReturn(body(Message_getReturn), frame);
+        this.handleReturn(body(), frame);
         break;
       case Message.provide:
         if (this.twoParty) this.sendUnimplemented(frame);
-        else this.handleProvide(body(Message_getProvide));
+        else this.handleProvide(body());
         break;
       case Message.accept:
         if (this.twoParty) this.sendUnimplemented(frame);
-        else this.handleAccept(body(Message_getAccept));
+        else this.handleAccept(body());
         break;
       case Message.abort:
-        this.abort(readException(body(Message_getAbort)));
+        this.abort(readException(body()));
         break;
       case Message.unimplemented:
-        this.handleUnimplemented(Message_getUnimplemented(root));
+        this.handleUnimplemented(body());
         break;
       default:
         // The obsolete save/delete messages.
@@ -1663,9 +1700,9 @@ export class RpcConnection implements RemoteHost {
     let pipelineCap: ClientHook;
     let cap: ClientHook | RpcError;
     try {
-      cap = this.bootstrapCap(Bootstrap_getDeprecatedObjectId(bootstrap));
+      cap = this.bootstrapCap(bootstrap.getP(0, "text"));
     } catch (e) {
-      cap = e instanceof RpcError ? e : new RpcError(String(e));
+      cap = e instanceof RpcError ? e : new RpcError(e instanceof Error ? e.message : String(e));
     }
     if (cap instanceof RpcError) {
       const error = cap;
@@ -1745,7 +1782,7 @@ export class RpcConnection implements RemoteHost {
   /** A Call, checked in the order of capnp-C++ `handleCall`. */
   private handleCall(call: Ptr, words: number): void {
     const questionId = Call_getQuestionId(call);
-    const target = this.targetHook(Call_getTarget(call), true);
+    const target = this.targetHook(call.getP(0, "struct"), true);
     if (target === undefined) return;
     const sendTo = Call_sendResultsTo_which(call);
     if (sendTo !== Call_sendResultsTo.caller && sendTo !== Call_sendResultsTo.yourself) {
@@ -1844,7 +1881,7 @@ export class RpcConnection implements RemoteHost {
         }
       } catch (e) {
         this.waitingReturns.length = 0;
-        this.abort(new RpcError(`protocol error: ${e instanceof Error ? e.message : String(e)}`));
+        this.abort(new RpcError(e instanceof Error ? e.message : String(e)));
       }
     });
   }
@@ -2107,7 +2144,7 @@ export class RpcConnection implements RemoteHost {
         try {
           releaseCall();
         } catch (e) {
-          this.abort(new RpcError(`protocol error: ${e instanceof Error ? e.message : String(e)}`));
+          this.abort(new RpcError(e instanceof Error ? e.message : String(e)));
         }
       });
     } else {
@@ -2128,6 +2165,9 @@ export class RpcConnection implements RemoteHost {
    * into that answer's results.
    */
   private targetHook(target: Ptr, abortOnInvalid = false): ClientHook | undefined {
+    if (target.kind !== PtrKind.Null && target.kind !== PtrKind.Struct) {
+      throw new RpcError(nonStructPointerMessage(wireKindOf(target)));
+    }
     switch (MessageTarget_which(target)) {
       case MessageTarget.importedCap: {
         const slot = this.exports.get(MessageTarget_getImportedCap(target));
@@ -2210,7 +2250,10 @@ export class RpcConnection implements RemoteHost {
     let hook: ClientHook | undefined;
     let error: RpcError | undefined;
     if (Resolve_which(resolve) === Resolve.cap) {
-      const desc = Resolve_getCap(resolve);
+      const desc = resolve.getP(0, "struct");
+      if (desc.kind !== PtrKind.Null && desc.kind !== PtrKind.Struct) {
+        throw new RpcError(nonStructPointerMessage(wireKindOf(desc)));
+      }
       if (desc.kind !== PtrKind.Struct || CapDescriptor_which(desc) === CapDescriptor.none) {
         this.abort(new RpcError("'Resolve' contained 'CapDescriptor.none'."));
         return;
@@ -2295,7 +2338,7 @@ export class RpcConnection implements RemoteHost {
       }
       case Disembargo_context.senderLoopback: {
         const id = Disembargo_context_getSenderLoopback(context);
-        const hook = this.targetHook(Disembargo_getTarget(disembargo), true);
+        const hook = this.targetHook(disembargo.getP(0, "struct"), true);
         if (hook === undefined) return;
         const finishLoopback = (resolved: ClientHook): void => {
           if (this.gone !== undefined) {
@@ -2352,6 +2395,10 @@ export class RpcConnection implements RemoteHost {
       }
       default:
         break;
+    }
+    const target = disembargo.getP(0, "struct");
+    if (target.kind !== PtrKind.Null && target.kind !== PtrKind.Struct) {
+      throw new RpcError(nonStructPointerMessage(wireKindOf(target)));
     }
     this.abort(
       new RpcError(`Unimplemented Disembargo type.; disembargo = ${disembargoText(disembargo)}`),
@@ -2455,7 +2502,7 @@ export class RpcConnection implements RemoteHost {
 
   private writeException(exc: StructBuilder, error: unknown): void {
     const e = toRpcError(error);
-    exc.setU16(OFF.exceptionType, EXCEPTION_TYPES[e.type]);
+    exc.setU16(OFF.exceptionType, e.wireType !== undefined ? e.wireType : EXCEPTION_TYPES[e.type]);
     exc.setText(0, e.message);
     if (this.traceEncoder !== undefined) exc.setText(1, this.traceEncoder(e));
   }
@@ -2473,6 +2520,12 @@ export class RpcConnection implements RemoteHost {
   /** Echo a message we did not understand, per the spec. */
   private sendUnimplemented(frame: Uint8Array): void {
     const incoming = CapnpMessage.fromFlat(frame, RPC_FRAME).root();
+    // capnp-C++ `setUnimplemented` copies through an empty cap table, so any
+    // capability pointer aborts with the copy-path sentence.
+    if (messageHasCapability(incoming)) {
+      this.abort(new RpcError("Message contained invalid capability pointer."));
+      return;
+    }
     const { b, root } = newMessage(Message.unimplemented);
     root.setP(0, incoming);
     this.transport.send(b.toFlat());

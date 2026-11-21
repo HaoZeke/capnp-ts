@@ -26,7 +26,9 @@ side() {
   shift
   "$@" "$P" returncaps 2>&1 | grep -E '^(read|after|early): '
   wait "$SERVER"
-  sed 's/^/sent /' "$OUT"
+  # Question 0's Finish is queued by the C++ client's destructor and
+  # sometimes never reaches the socket. Drop that one line on both sides.
+  grep -v '^finish q=0$' "$OUT" | sed 's/^/sent /'
   rm -f "$OUT" "$ERR"
 }
 

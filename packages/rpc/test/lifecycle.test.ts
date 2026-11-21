@@ -1069,7 +1069,7 @@ describe("malformed input", () => {
     const vat = new RpcConnection(pair.b, new Counter());
     pair.a.send(new Uint8Array([1, 2, 3]));
     expect(() => vat.pump()).not.toThrow();
-    expect(vat.disconnected?.message).toContain("protocol error");
+    expect(vat.disconnected?.message).toBe("message shorter than 8 bytes");
     expect(Message_which(CapnpMessage.fromFlat(pair.a.receive()!).root())).toBe(Message.abort);
   });
 });

@@ -11,6 +11,9 @@ import {
   type Ptr,
   PtrKind,
   type StructBuilder,
+  wpMakeCap,
+  wpMakeFar,
+  wpMakeStruct,
 } from "@haozeke/capnp";
 
 import { LocalClient, newNullCap } from "../src/capability.ts";
@@ -33,6 +36,7 @@ import {
   CapDescriptor_which,
   Exception_getReason,
   Exception_getTrace,
+  Exception_getType,
   Finish_getQuestionId,
   Finish_getReleaseResultCaps,
   Message,
@@ -1672,5 +1676,110 @@ describe("Resolve reads its replacement first (rpc.c++ handleResolve)", () => {
       }),
     );
     expect(abortReasonOf(r)).toBe("Unknown 'Resolve' type.");
+  });
+});
+
+const NON_STRUCT =
+  "expected ref->kind() == WirePointer::STRUCT [1 == 0]; Schema mismatch: Message contains non-struct pointer where struct pointerwas expected.";
+
+/** One segment whose words are `words`, with no builder involved. */
+function flatWords(words: bigint[]): Uint8Array {
+  const buf = new Uint8Array(8 + words.length * 8);
+  const view = new DataView(buf.buffer);
+  view.setUint32(0, 0, true);
+  view.setUint32(4, words.length, true);
+  words.forEach((w, i) => view.setBigUint64(8 + i * 8, w, true));
+  return buf;
+}
+
+describe("reader errors capnp-C++ aborts with (layout.c++ followFars, readStructPointer)", () => {
+  test("a far pointer to an unknown segment", () => {
+    const r = raw(ping);
+    r.send(flatWords([wpMakeFar(false, 0, 99)]));
+    expect(abortReasonOf(r)).toBe(
+      "expected segment != nullptr [0 != nullptr]; Message contains far pointer to unknown segment.",
+    );
+  });
+
+  test("a Call whose target is a list", () => {
+    const r = raw(ping);
+    r.send(
+      frame(Message.call, (m) => {
+        const c = m.initStruct(0, 3, 3);
+        c.setU32(0, 1);
+        c.setU64(8, IFACE);
+        c.initPointerList(0, 0);
+      }),
+    );
+    expect(abortReasonOf(r)).toBe(NON_STRUCT);
+  });
+
+  test("a Resolve cap pointer that is a list", () => {
+    const r = raw(ping);
+    r.send(
+      frame(Message.resolve, (m) => {
+        const res = m.initStruct(0, 1, 1);
+        res.setU32(0, 1);
+        res.initPointerList(0, 0);
+      }),
+    );
+    expect(abortReasonOf(r)).toBe(NON_STRUCT);
+  });
+
+  test("a capability earlier in the copy walk does not hide a later far error", () => {
+    const r = raw(ping);
+    r.send(
+      flatWords([
+        wpMakeStruct(0, 1, 2),
+        BigInt(Message.accept),
+        wpMakeCap(0),
+        wpMakeFar(false, 1, 3),
+      ]),
+    );
+    expect(abortReasonOf(r)).toBe(
+      "expected segment != nullptr [0 != nullptr]; Message contains far pointer to unknown segment.",
+    );
+  });
+
+  test("a Provide that carries a capability pointer", () => {
+    const b = new MessageBuilder();
+    const root = b.initRoot(1, 1);
+    root.setU16(0, Message.provide);
+    root.adopt(0, Orphan.cap(b, 0));
+    const r = raw(ping);
+    r.send(b.toFlat());
+    expect(abortReasonOf(r)).toBe("Message contained invalid capability pointer.");
+    expect(r.vat.disconnected).toBeDefined();
+  });
+
+  test("a bootstrap object id that is not text", () => {
+    const r = raw(undefined, undefined, { restorer: new ExportMap().restore });
+    r.send(
+      frame(Message.bootstrap, (m) => {
+        const bs = m.initStruct(0, 1, 1);
+        bs.setU32(0, 0);
+        bs.initStruct(0, 1, 0);
+      }),
+    );
+    const ret = r.take().find((m) => m.which === Message.return);
+    expect(Return_which(ret!.body)).toBe(Return.exception);
+    expect(Exception_getReason(Return_getException(ret!.body))).toBe(
+      "expected ref->kind() == WirePointer::LIST [0 == 1]; Schema mismatch: Message contains non-list pointer where text was expected.",
+    );
+    expect(r.vat.disconnected).toBeUndefined();
+  });
+
+  test("an Abort whose exception type is outside the four names is echoed as that type", () => {
+    const r = raw(ping);
+    r.send(
+      frame(Message.abort, (m) => {
+        const exc = m.initStruct(0, 1, 1);
+        exc.setU16(4, 7);
+        exc.setText(0, "");
+      }),
+    );
+    const abort = r.take().find((m) => m.which === Message.abort);
+    expect(Exception_getType(abort!.body)).toBe(7);
+    expect(Exception_getReason(abort!.body)).toBe("remote exception: ");
   });
 });
