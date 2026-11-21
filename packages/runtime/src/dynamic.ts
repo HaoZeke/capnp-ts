@@ -2040,9 +2040,8 @@ export class DynamicStructBuilder {
     }
 
     if (!t.isPointerType()) {
-      const r = orphan.getReader();
+      this.set(field, orphan.getReader());
       orphan.markConsumed();
-      this.set(field, r);
       return;
     }
 
@@ -2086,8 +2085,8 @@ export class DynamicStructBuilder {
         );
         break;
     }
-    orphan.markConsumed();
     this.sb.adopt(field.offset, orphan.orphan ?? Orphan.null());
+    orphan.markConsumed();
   }
 }
 

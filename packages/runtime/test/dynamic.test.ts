@@ -953,3 +953,43 @@ describe("DynamicList.Builder.adopt", () => {
     expect(stringify(list.asReader().get(0))).toBe('(key = "k", code = 3)');
   });
 });
+
+describe("DynamicStruct.Builder.adopt", () => {
+  const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+  const sinkSchema = loader.resolveStruct("KitchenSink");
+  const tag = loader.resolveStruct("Tag");
+
+  test("a scalar field keeps an orphan of the wrong type", () => {
+    const b = new MessageBuilder();
+    const sink = DynamicStruct.initRoot(b, sinkSchema);
+    const { builder: texts } = newDynamicListOrphan(b, ListSchema.of(Type.TEXT), 1);
+    texts.set(0, "hi");
+    const orphan = texts.disown(0);
+    expect(() => sink.adopt("i32", orphan)).toThrow(CapnpError);
+    expect(orphan.isAlive).toBe(true);
+    expect(orphan.getReader().asText()).toBe("hi");
+    sink.adopt("title", orphan);
+    expect(sink.asReader().get("title").asText()).toBe("hi");
+  });
+
+  test("an integer orphan sets an enum field, as in capnp", () => {
+    const b = new MessageBuilder();
+    const sink = DynamicStruct.initRoot(b, sinkSchema);
+    const { builder: ints } = newDynamicListOrphan(b, ListSchema.of(Type.INT32), 1);
+    ints.set(0, 2);
+    sink.adopt("priority", ints.disown(0));
+    expect(stringify(sink.asReader().get("priority"))).toBe("high");
+  });
+
+  test("a pointer orphan from another message stays alive", () => {
+    const b = new MessageBuilder();
+    const sink = DynamicStruct.initRoot(b, sinkSchema);
+    const { orphan, builder } = newDynamicStructOrphan(new MessageBuilder(), tag);
+    builder.set("key", "far");
+    expect(() => sink.adopt("defaultTag", orphan)).toThrow(
+      "orphan from a different MessageBuilder",
+    );
+    expect(orphan.isAlive).toBe(true);
+    expect(stringify(orphan.getReader())).toBe('(key = "far", code = -42)');
+  });
+});
