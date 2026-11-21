@@ -22,12 +22,16 @@ import {
   Message,
   Message_which,
   Payload_getCapTable,
+  Payload_getContent,
   Resolve,
   Resolve_getCap,
   Resolve_getException,
   Resolve_getPromiseId,
   Resolve_which,
+  Return,
   Return_getAnswerId,
+  Return_getException,
+  Return_getNoFinishNeeded,
   Return_getResults,
   Return_which,
 } from "../src/rpc.capnp.ts";
@@ -258,5 +262,66 @@ describe("broken capabilities are failed promises (capability.c++ BrokenClient)"
     expect(Resolve_which(out[0]!.body)).toBe(Resolve.cap);
     expect(Resolve_getPromiseId(out[0]!.body)).toBe(1);
     expect(CapDescriptor_which(Resolve_getCap(out[0]!.body))).toBe(CapDescriptor.senderHosted);
+  });
+});
+
+const ping: RpcServer = {
+  dispatch(_i, _m, params, results) {
+    results.setU32(0, params.getU32(0) + 1);
+  },
+};
+
+describe("capability-free returns need no Finish (rpc.c++ sendReturn)", () => {
+  test("a Return without capabilities sets noFinishNeeded and drops the answer", () => {
+    const r = raw(ping);
+    r.send(bootstrap(0));
+    r.send(call(1, (t) => toAnswer(t, 0), undefined, (p) => p.setU32(0, 41)));
+    const out = r.take();
+    const ret = out[1]!.body;
+    expect(Return_getAnswerId(ret)).toBe(1);
+    expect(Return_getNoFinishNeeded(ret)).toBe(true);
+    // The answer is gone: a pipelined call on it fails, and the id is free.
+    r.send(call(2, (t) => toAnswer(t, 1, [0])));
+    const failed = r.take()[0]!.body;
+    expect(Return_which(failed)).toBe(Return.exception);
+    expect(Exception_getReason(Return_getException(failed))).toBe(
+      "Pipeline call on a request that returned no capabilities or was already closed.",
+    );
+    r.send(call(1, (t) => toAnswer(t, 0), undefined, (p) => p.setU32(0, 1)));
+    expect(Return_getNoFinishNeeded(r.take()[0]!.body)).toBe(true);
+    expect(r.vat.disconnected).toBeUndefined();
+  });
+
+  test("a Return with capabilities still needs its Finish", () => {
+    const r = raw(returning(() => Client.local(ping)));
+    r.send(bootstrap(0));
+    r.send(call(1, (t) => toAnswer(t, 0)));
+    const ret = r.take()[1]!.body;
+    expect(capKinds(ret)).toEqual([CapDescriptor.senderHosted]);
+    expect(Return_getNoFinishNeeded(ret)).toBe(false);
+  });
+
+  test("an exception keeps the answer for pipelined calls", () => {
+    const r = raw({
+      dispatch() {
+        throw new RpcError("nope");
+      },
+    });
+    r.send(bootstrap(0));
+    r.send(call(1, (t) => toAnswer(t, 0)));
+    expect(Return_getNoFinishNeeded(r.take()[1]!.body)).toBe(false);
+    r.send(call(2, (t) => toAnswer(t, 1, [0])));
+    const piped = r.take()[0]!.body;
+    expect(Exception_getReason(Return_getException(piped))).toBe("nope");
+  });
+
+  test("a null capability is a null pointer with no cap table entry", () => {
+    const r = raw(returning(() => new Client(newNullCap())));
+    r.send(bootstrap(0));
+    r.send(call(1, (t) => toAnswer(t, 0)));
+    const ret = r.take()[1]!.body;
+    expect(capKinds(ret)).toEqual([]);
+    expect(Payload_getContent(Return_getResults(ret)).getP(0).kind).toBe(PtrKind.Null);
+    expect(Return_getNoFinishNeeded(ret)).toBe(true);
   });
 });

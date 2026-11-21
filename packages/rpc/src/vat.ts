@@ -208,6 +208,7 @@ const OFF = {
   returnUnion: 6,
   returnTakeFromOtherQuestion: 8,
   returnReleaseParamCaps: 32, // bit offset, default true
+  returnNoFinishNeeded: 33, // bit offset
   finishReleaseResultCaps: 32, // bit offset, default true
   finishRequireEarly: 33, // bit offset, default true
   bootstrapQuestionId: 0,
@@ -1701,7 +1702,16 @@ export class RpcConnection implements RemoteHost {
         false,
       );
       if (answer.isCall && s.value.caps.length > 0) this.freezePipeline(answer, s.value);
+      const noCaps = answer.isCall && s.value.caps.length === 0;
+      if (noCaps) {
+        // Nothing to pipeline on and nothing to release: the caller need
+        // not Finish, and the answer goes now.
+        ret.setBool(OFF.returnNoFinishNeeded, true);
+        answer.finished = true;
+        if (this.answers.get(questionId) === answer) this.answers.delete(questionId);
+      }
       this.transport.send(b.toFlat());
+      if (noCaps) answer.call.release();
     } else {
       this.sendException(questionId, s.error);
     }

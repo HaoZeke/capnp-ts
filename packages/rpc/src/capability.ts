@@ -141,8 +141,16 @@ export class CallBuilder {
     this.root = this.message.initRoot(dwords, pwords);
   }
 
-  /** Put `hook` in the cap table, taking over the caller's reference. */
+  /**
+   * Put `hook` in the cap table, taking over the caller's reference. A
+   * null capability is a null pointer and takes no table entry, as in
+   * capnp-C++'s `setCapabilityPointer`.
+   */
   addCap(hook: ClientHook): Orphan {
+    if (isNullCap(hook)) {
+      hook.release();
+      return Orphan.null();
+    }
     this.caps.push(hook);
     return Orphan.cap(this.message, this.caps.length - 1);
   }
