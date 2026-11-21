@@ -41,6 +41,7 @@ const M = {
   ping: 0,
   makePromise: 2,
   slow: 4,
+  unblock: 5,
   resolveLater: 3,
   echoCap: 8,
   fail: 9,
@@ -381,6 +382,17 @@ const SCENARIOS: Record<string, Step[]> = {
       r.setU32(0, 5);
       r.setU16(4, 7);
     }),
+  ],
+  // A pipelined call through a pointer the results leave null reaches a
+  // null capability, one step deep and two. `unblock` goes pipeline-only,
+  // so it has no Return to order against the one of `slow`.
+  "pipeline-through-null": [
+    bootstrap(0),
+    call({ q: 1, method: M.slow, target: (t) => targetAnswer(t, 0) }),
+    call({ q: 2, method: M.ping, target: (t) => targetAnswer(t, 1, [0]), params: (p) => p.setU32(0, 1) }),
+    call({ q: 3, method: M.ping, target: (t) => targetAnswer(t, 1, [0, 0]), params: (p) => p.setU32(0, 1) }),
+    W(100),
+    call({ q: 0x80000004, method: M.unblock, target: (t) => targetAnswer(t, 0), onlyPromisePipeline: true }),
   ],
   "disembargo-provide": [bootstrap(0), W(100), disembargoProvide(1)],
   "disembargo-accept": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0, [0, 2]), 2)],

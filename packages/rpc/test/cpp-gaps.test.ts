@@ -1416,6 +1416,31 @@ describe("the null capability (capability.c++ newNullCap)", () => {
   });
 });
 
+describe("pipeline paths through null pointers (any.c++ getPipelinedCap)", () => {
+  test("a null step reads as an empty struct and ends at a null capability", async () => {
+    let open!: () => void;
+    const gate = new Promise<void>((res) => (open = res));
+    const r = raw({
+      dispatch(_i, _m, _p, _r, ctx) {
+        ctx.initResults(1, 0);
+        return gate;
+      },
+    });
+    r.send(bootstrap(0));
+    r.send(call(1, (t) => toAnswer(t, 0)));
+    r.send(call(2, (t) => toAnswer(t, 1, [0])));
+    r.send(call(3, (t) => toAnswer(t, 1, [0, 0])));
+    open();
+    await nextTurn();
+    await nextTurn();
+    const reasons = r
+      .take()
+      .filter((m) => m.which === Message.return && Return_getAnswerId(m.body) >= 2)
+      .map((m) => Exception_getReason(Return_getException(m.body)));
+    expect(reasons).toEqual(["Called null capability.", "Called null capability."]);
+  });
+});
+
 describe("a call's param capabilities (rpc.c++ RpcCallContext paramsCapTable)", () => {
   test("are released after the call's Return", async () => {
     for (const server of [ping, { dispatch: () => Promise.reject(new RpcError("no")) }]) {

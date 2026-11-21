@@ -166,12 +166,14 @@ export class Payload {
 
   /**
    * The capability a pipelined call along `ops` reaches, as an owned
-   * reference. As capnp-C++ `AnyPointer::Reader::getPipelinedCap`, a
-   * capability that cannot be read is a broken one.
+   * reference. As capnp-C++ `AnyPointer::Reader::getPipelinedCap`, a null
+   * step reads as an empty struct, and a capability that cannot be read
+   * is a broken one.
    */
   pipelinedCapAt(ops: readonly number[]): ClientHook {
     let at = this.content;
     for (const field of ops) {
+      if (at.kind === PtrKind.Null) return newNullCap();
       if (at.kind !== PtrKind.Struct) {
         return new BrokenClient(new RpcError("pipeline path walks into a non-struct"));
       }
