@@ -250,10 +250,15 @@ function exceptionTypeFromWire(n: number): ExceptionType {
   }
 }
 
+const REMOTE_PREFIX = "remote exception: ";
+
+/** A received exception, as capnp-C++ `toException()` reads one for every message kind. */
 function readException(exc: Ptr): RpcError {
   const e = structOrDefault(exc);
   const trace = e.getP(1).kind === PtrKind.Null ? undefined : Exception_getTrace(e);
-  return new RpcError(Exception_getReason(e), exceptionTypeFromWire(Exception_getType(e)), trace);
+  const reason = Exception_getReason(e);
+  const message = reason.startsWith(REMOTE_PREFIX) ? reason : REMOTE_PREFIX + reason;
+  return new RpcError(message, exceptionTypeFromWire(Exception_getType(e)), trace);
 }
 
 /**
@@ -679,14 +684,9 @@ export class RpcConnection implements RemoteHost {
         if (this.twoParty) this.sendUnimplemented(frame);
         else this.handleAccept(body(Message_getAccept));
         break;
-      case Message.abort: {
-        const exc = readException(body(Message_getAbort));
-        const reason = exc.message.startsWith("remote exception: ")
-          ? exc.message
-          : `remote exception: ${exc.message}`;
-        this.abort(new RpcError(reason, exc.type, exc.remoteTrace));
+      case Message.abort:
+        this.abort(readException(body(Message_getAbort)));
         break;
-      }
       case Message.unimplemented:
         this.handleUnimplemented(Message_getUnimplemented(root));
         break;

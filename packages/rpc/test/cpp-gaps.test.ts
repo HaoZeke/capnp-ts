@@ -964,6 +964,85 @@ describe("a released export of a promise (rpc.c++ handleRelease)", () => {
   });
 });
 
+describe("received exceptions read as remote (rpc.c++ toException)", () => {
+  const returnException = (reason: string): Uint8Array =>
+    frame(Message.return, (m) => {
+      const ret = m.initStruct(0, 2, 1);
+      ret.setU16(6, Return.exception);
+      ret.initStruct(0, 1, 2).setText(0, reason);
+    });
+  const resolveException = (promiseId: number, reason: string): Uint8Array =>
+    frame(Message.resolve, (m) => {
+      const r = m.initStruct(0, 1, 1);
+      r.setU32(0, promiseId);
+      r.setU16(4, Resolve.exception);
+      r.initStruct(0, 1, 2).setText(0, reason);
+    });
+  /** Method 0 keeps the capability in params pointer 0; method 1 waits on it. */
+  const keeper = (): { server: RpcServer; held: () => Client } => {
+    let held: Client | undefined;
+    return {
+      server: {
+        dispatch(_i, m, params, _r, ctx) {
+          if (m === 0) held = new Client(ctx.getCap(params.getP(0)).addRef());
+          else return held!.whenResolved();
+        },
+      },
+      held: () => held!,
+    };
+  };
+
+  test("a Return.exception reads with the remote prefix", async () => {
+    const r = raw();
+    const cap = r.vat.bootstrap();
+    r.send(returnException("bad"));
+    await expect(Promise.resolve(cap.call(IFACE, 0))).rejects.toMatchObject({
+      message: "remote exception: bad",
+    });
+  });
+
+  test("a reason that already has the prefix is not prefixed twice", async () => {
+    const r = raw();
+    const cap = r.vat.bootstrap();
+    r.send(returnException("remote exception: bad"));
+    await expect(Promise.resolve(cap.call(IFACE, 0))).rejects.toMatchObject({
+      message: "remote exception: bad",
+    });
+  });
+
+  test("a Resolve.exception reads with the remote prefix", async () => {
+    const k = keeper();
+    const r = raw(k.server);
+    r.send(bootstrap(0));
+    r.send(callWithCap(1, (t) => toAnswer(t, 0), CapDescriptor.senderPromise, 5));
+    await nextTurn();
+    r.send(resolveException(5, "gone"));
+    await expect(k.held().whenResolved()).rejects.toMatchObject({ message: "remote exception: gone" });
+  });
+
+  test("an exception passed on to the peer carries the prefix once", async () => {
+    const r = raw(keeper().server);
+    r.send(bootstrap(0));
+    r.send(callWithCap(1, (t) => toAnswer(t, 0), CapDescriptor.senderPromise, 5));
+    await nextTurn();
+    r.send(resolveException(5, "gone"));
+    r.send(
+      frame(Message.call, (m) => {
+        const c = m.initStruct(0, 3, 3);
+        c.setU32(0, 2);
+        c.setU64(8, IFACE);
+        c.setU16(4, 1);
+        toAnswer(c.initStruct(0, 1, 1), 0);
+      }),
+    );
+    await nextTurn();
+    await nextTurn();
+    const ret = r.take().find((m) => m.which === Message.return && Return_getAnswerId(m.body) === 2);
+    expect(Return_which(ret!.body)).toBe(Return.exception);
+    expect(Exception_getReason(Return_getException(ret!.body))).toBe("remote exception: gone");
+  });
+});
+
 describe("Exception.trace (rpc.c++ toException, fromException)", () => {
   const failing: RpcServer = {
     dispatch() {

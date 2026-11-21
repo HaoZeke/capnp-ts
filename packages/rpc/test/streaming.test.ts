@@ -306,7 +306,7 @@ describe("streaming over a connection", () => {
     expect(results[results.length - 2]!.status).toBe("fulfilled");
     expect(results[results.length - 1]!.status).toBe("rejected");
     const failures = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
-    for (const f of failures) expect(f.reason).toMatchObject({ message: "disk full" });
+    for (const f of failures) expect(f.reason).toMatchObject({ message: "remote exception: disk full" });
     // After the failure the server did no more writes.
     expect(sink.writes).toEqual([0, 1, 2, 3]);
   });

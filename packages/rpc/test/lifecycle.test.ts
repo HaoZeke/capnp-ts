@@ -133,7 +133,7 @@ describe("calls over a connection", () => {
     const out = a.bootstrap().call(IFACE, 0);
     await settle();
     await expect(Promise.resolve(out)).rejects.toMatchObject({
-      message: "too busy",
+      message: "remote exception: too busy",
       type: "overloaded",
     });
   });
@@ -373,7 +373,7 @@ describe("promises over a connection", () => {
 
     reject(new RpcError("gave up", "overloaded"));
     await settle();
-    await expect(Promise.resolve(pending)).rejects.toMatchObject({ message: "gave up" });
+    await expect(Promise.resolve(pending)).rejects.toMatchObject({ message: "remote exception: gave up" });
     await promise.whenResolved().catch(() => {});
     expect(promise.isBroken).toBe(true);
   });
@@ -1013,7 +1013,7 @@ describe("Return flags and disconnect cleanup", () => {
     );
     await settle();
     await expect(Promise.resolve(out)).rejects.toMatchObject({
-      message: "reject with cap",
+      message: "remote exception: reject with cap",
       type: "overloaded",
     });
     const excReturn = tb.frames

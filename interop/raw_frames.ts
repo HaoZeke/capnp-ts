@@ -114,8 +114,8 @@ function call(o: CallOpts): Uint8Array {
   });
 }
 
-/** `Echo.hold` with a capability the driver hosts as export `id`. */
-function hold(q: number, id: number): Uint8Array {
+/** `Echo.hold` with a capability the driver hosts as export `id`; `kind` 2 makes it a promise. */
+function hold(q: number, id: number, kind = 1): Uint8Array {
   const b = new MessageBuilder();
   const root = b.initRoot(1, 1);
   root.setU16(0, Message.call);
@@ -127,9 +127,18 @@ function hold(q: number, id: number): Uint8Array {
   const payload = c.initStruct(1, 0, 2);
   payload.initStruct(0, 0, 1).adopt(0, Orphan.cap(b, 0));
   const table = payload.initCompositeList(1, 1, 1, 1);
-  table.setU16(0, 1);
+  table.setU16(0, kind);
   table.setU32(4, id);
   return b.toFlat();
+}
+
+function resolveException(promiseId: number, reason: string): Uint8Array {
+  return frame(Message.resolve, (m) => {
+    const r = m.initStruct(0, 1, 1);
+    r.setU32(0, promiseId);
+    r.setU16(4, 1);
+    r.initStruct(0, 1, 2).setText(0, reason);
+  });
 }
 
 function finish(q: number, releaseResultCaps = true): Uint8Array {
@@ -285,6 +294,15 @@ const SCENARIOS: Record<string, Step[]> = {
       params: (p) => p.setU32(0, 3),
       onlyPromisePipeline: true,
     }),
+  ],
+  // A received exception goes back out with one "remote exception: " prefix.
+  "forward-remote-exception": [
+    bootstrap(0),
+    hold(1, 5, 2),
+    W(100),
+    resolveException(5, "gone"),
+    W(100),
+    call({ q: 2, method: M.callHeld, target: (t) => targetAnswer(t, 0), params: (p) => p.setU32(0, 3) }),
   ],
   "disembargo-provide": [bootstrap(0), W(100), disembargoProvide(1)],
   "disembargo-accept": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0, [0, 2]), 2)],
