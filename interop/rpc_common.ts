@@ -34,11 +34,15 @@ export {
   KEEP_INTERFACE_ID,
 };
 
-export function attach(sock: Socket, bootstrap?: RpcServer | Client): RpcConnection {
+export function attach(
+  sock: Socket,
+  bootstrap?: RpcServer | Client,
+  options?: ConstructorParameters<typeof RpcConnection>[3],
+): RpcConnection {
   const transport = new StreamTransport((bytes) => {
     if (!sock.destroyed) sock.write(bytes);
   });
-  const conn = new RpcConnection(transport, bootstrap);
+  const conn = new RpcConnection(transport, bootstrap, undefined, options);
   const drain = (): void => {
     try {
       conn.pump();

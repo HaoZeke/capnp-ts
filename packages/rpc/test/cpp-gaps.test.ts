@@ -14,7 +14,14 @@ import {
 } from "@haozeke/capnp";
 
 import { LocalClient, newNullCap } from "../src/capability.ts";
-import { Client, membrane, RevocablePolicy, RpcError, type RpcServer } from "../src/index.ts";
+import {
+  Client,
+  ExportMap,
+  membrane,
+  RevocablePolicy,
+  RpcError,
+  type RpcServer,
+} from "../src/index.ts";
 import {
   Call_getNoPromisePipelining,
   Call_getOnlyPromisePipeline,
@@ -104,9 +111,13 @@ interface Raw {
   take(): Array<{ which: number; body: Ptr }>;
 }
 
-function raw(server?: RpcServer | Client, multiParty?: Vat): Raw {
+function raw(
+  server?: RpcServer | Client,
+  multiParty?: Vat,
+  options?: ConstructorParameters<typeof RpcConnection>[3],
+): Raw {
   const pair = new MemoryTransportPair();
-  const vat = new RpcConnection(pair.a, server, multiParty);
+  const vat = new RpcConnection(pair.a, server, multiParty, options);
   return {
     vat,
     send(f) {
@@ -927,5 +938,77 @@ describe("Exception.trace (rpc.c++ toException, fromException)", () => {
     pair.b.receive();
     const ret = CapnpMessage.fromFlat(pair.b.receive()!).root().getP(0);
     expect(Exception_getTrace(Return_getException(ret))).toBe("trace of nope");
+  });
+});
+
+describe("named Bootstrap (ez-rpc.c++ restore, rpc.c++ handleBootstrap)", () => {
+  const named = (q: number, name: string): Uint8Array =>
+    frame(Message.bootstrap, (m) => {
+      const bs = m.initStruct(0, 1, 1);
+      bs.setU32(0, q);
+      bs.setText(0, name);
+    });
+  const echo = (): Client => new Client(new LocalClient({ dispatch() {} }));
+
+  test("a restorer answers a named export", () => {
+    const exports = new ExportMap();
+    exports.exportCap("echo", echo());
+    const r = raw(undefined, undefined, { restorer: exports.restore });
+    r.send(named(0, "echo"));
+    const [ret] = r.take();
+    expect(Return_which(ret!.body)).toBe(Return.results);
+    expect(capKinds(ret!.body)).toEqual([CapDescriptor.senderHosted]);
+  });
+
+  test("an unknown name fails as EzRpcServer does", () => {
+    const r = raw(echo(), undefined, { restorer: new ExportMap().restore });
+    r.send(named(0, "nope"));
+    const [ret] = r.take();
+    expect(Return_which(ret!.body)).toBe(Return.exception);
+    expect(Exception_getReason(Return_getException(ret!.body))).toBe(
+      "Server exports no such capability.; name = nope",
+    );
+  });
+
+  test("a restorer serves the main interface when no bootstrap is given", () => {
+    const r = raw(undefined, undefined, { restorer: new ExportMap(echo()).restore });
+    r.send(bootstrap(0));
+    const [ret] = r.take();
+    expect(capKinds(ret!.body)).toEqual([CapDescriptor.senderHosted]);
+  });
+
+  test("releasing the registered client leaves the export answering", () => {
+    let calls = 0;
+    const cap = new Client(
+      new LocalClient({
+        dispatch(_i, _m, _p, results) {
+          calls++;
+          results.setU32(0, 4);
+        },
+      }),
+    );
+    const exports = new ExportMap();
+    exports.exportCap("echo", cap);
+    cap.release();
+    const r = raw(undefined, undefined, { restorer: exports.restore });
+    r.send(named(0, "echo"));
+    const [ret] = r.take();
+    expect(Return_which(ret!.body)).toBe(Return.results);
+    r.send(call(1, (t) => {
+      t.setU16(4, MessageTarget.importedCap);
+      t.setU32(0, 0);
+    }));
+    const [reply] = r.take();
+    expect(Return_which(reply!.body)).toBe(Return.results);
+    expect(calls).toBe(1);
+    expect(r.vat.disconnected).toBeUndefined();
+  });
+
+  test("`restore(name)` sends the name as the object id", () => {
+    const r = raw();
+    r.vat.restore("echo");
+    const [bs] = r.take();
+    expect(bs!.which).toBe(Message.bootstrap);
+    expect(bs!.body.getText(0)).toBe("echo");
   });
 });

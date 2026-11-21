@@ -53,6 +53,7 @@ import {
   type RpcClientHook,
   type TargetWriter,
 } from "./remote.ts";
+import type { Restorer } from "./restorer.ts";
 import {
   CALL_DWORDS,
   CALL_PWORDS,
@@ -537,6 +538,7 @@ export class RpcConnection implements RemoteHost {
   private readonly windowGetter: WindowGetter;
   private flowLimit: number;
   private traceEncoder: ((error: RpcError) => string) | undefined;
+  private readonly restorer: Restorer | undefined;
   /** Words of incoming calls not yet complete, as capnp-C++ `callWordsInFlight`. */
   private callWordsInFlight = 0;
   private flowBlocked = false;
@@ -551,10 +553,13 @@ export class RpcConnection implements RemoteHost {
       flowLimit?: number;
       /** Fills `Exception.trace` in what this side sends, as capnp-C++ `setTraceEncoder`. */
       traceEncoder?: (error: RpcError) => string;
+      /** Answers named Bootstraps, and plain ones when no bootstrap is given. */
+      restorer?: Restorer;
     } = {},
   ) {
     this.flowLimit = options.flowLimit ?? Infinity;
     this.traceEncoder = options.traceEncoder;
+    this.restorer = options.restorer;
     this.vat = vat ?? new Vat();
     this.twoParty = vat === undefined;
     const w = options.streamWindow;
@@ -1070,22 +1075,27 @@ export class RpcConnection implements RemoteHost {
 
   /** The peer's bootstrap capability, usable before the answer arrives. */
   bootstrap(): Client {
-    const { q } = this.startBootstrap();
+    return this.restore();
+  }
+
+  /** A named export of the peer, as capnp-C++ `EzRpcClient::importCap`. */
+  restore(name?: string): Client {
+    const { q } = this.startBootstrap(name);
     const cap = q.call.pipeline.getPipelinedCap([]);
     q.call.release();
     return new Client(cap);
   }
 
-  private startBootstrap(): { id: number; q: QuestionState } {
+  private startBootstrap(name?: string): { id: number; q: QuestionState } {
     const question = this.newQuestion();
     if (this.gone !== undefined) {
       this.failQuestion(question.q, this.gone);
       return question;
     }
     const { b, root } = newMessage(Message.bootstrap);
-    root
-      .initStruct(0, BOOTSTRAP_DWORDS, BOOTSTRAP_PWORDS)
-      .setU32(OFF.bootstrapQuestionId, question.id);
+    const bs = root.initStruct(0, BOOTSTRAP_DWORDS, BOOTSTRAP_PWORDS);
+    bs.setU32(OFF.bootstrapQuestionId, question.id);
+    if (name !== undefined) bs.setText(0, name);
     this.transport.send(b.toFlat());
     return question;
   }
@@ -1633,19 +1643,20 @@ export class RpcConnection implements RemoteHost {
     const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
     ret.setU32(OFF.returnAnswerId, questionId);
     let pipelineCap: ClientHook;
-    if (Bootstrap_getDeprecatedObjectId(bootstrap).kind !== PtrKind.Null) {
-      const error = new RpcError(
-        "This vat only supports a bootstrap interface, not the old Cap'n-Proto-0.4-style named exports.",
-      );
+    let cap: ClientHook | RpcError;
+    try {
+      cap = this.bootstrapCap(Bootstrap_getDeprecatedObjectId(bootstrap));
+    } catch (e) {
+      cap = e instanceof RpcError ? e : new RpcError(String(e));
+    }
+    if (cap instanceof RpcError) {
+      const error = cap;
       ret.setU16(OFF.returnUnion, Return.exception);
       this.writeException(ret.initStruct(0, EXCEPTION_DWORDS, EXCEPTION_PWORDS), error);
       answer.call = new CallState();
       answer.call.result.reject(error);
       pipelineCap = new BrokenClient(error);
     } else {
-      const cap =
-        this.bootstrapHook?.addRef() ??
-        new BrokenClient(new RpcError("This vat does not expose any public/bootstrap interfaces."));
       pipelineCap = this.innermostForExport(cap).addRef();
       const payload = capPayload(cap);
       ret.setU16(OFF.returnUnion, Return.results);
@@ -1668,6 +1679,21 @@ export class RpcConnection implements RemoteHost {
       pipelineCap.release();
     };
     this.transport.send(b.toFlat());
+  }
+
+  /** What a Bootstrap names, as capnp-C++ `handleBootstrap` and `baseCreateFor`. */
+  private bootstrapCap(objectId: Ptr): ClientHook {
+    if (objectId.kind !== PtrKind.Null) {
+      if (this.restorer === undefined) {
+        throw new RpcError(
+          "This vat only supports a bootstrap interface, not the old Cap'n-Proto-0.4-style named exports.",
+        );
+      }
+      return this.restorer(objectId).hook.addRef();
+    }
+    if (this.bootstrapHook !== undefined) return this.bootstrapHook.addRef();
+    if (this.restorer !== undefined) return this.restorer(objectId).hook.addRef();
+    return new BrokenClient(new RpcError("This vat does not expose any public/bootstrap interfaces."));
   }
 
   /** As capnp-C++ `RpcSystem::setTraceEncoder`. */

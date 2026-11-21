@@ -80,6 +80,13 @@ const scenarios: Record<string, () => Promise<void>> = {
     assert.ok(plain.pipeline(0).isBroken);
   },
 
+  async named() {
+    // capnp-C++ `EzRpcServer` looks a named Bootstrap up in its export map.
+    const missing = conn.restore("nope");
+    await assert.rejects(Promise.resolve(inc(missing, 1)), /Server exports no such capability\.; name = nope/);
+    missing.release();
+  },
+
   async nullpipeline() {
     // Pipelining onto a null capability must fail cleanly without sending a
     // Disembargo that would make capnp-C++ abort the connection.

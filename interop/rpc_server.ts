@@ -8,14 +8,15 @@
 import { createServer } from "node:net";
 
 import { attach, EchoImpl } from "./rpc_common.ts";
-import { RpcError } from "../packages/rpc/src/index.ts";
+import { ExportMap, RpcError } from "../packages/rpc/src/index.ts";
 
 const port = Number(process.argv[2] ?? 43119);
 
 const server = createServer((sock) => {
   sock.setNoDelay(true);
   const echo = new EchoImpl(() => conn.abort(new RpcError("server shutting down")));
-  const conn = attach(sock, echo);
+  // capnp-C++ `EzRpcServer` answers named Bootstraps from its export map.
+  const conn = attach(sock, echo, { restorer: new ExportMap().restore });
 });
 
 server.listen(port, "127.0.0.1", () => {

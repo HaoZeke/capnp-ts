@@ -27,6 +27,7 @@ export {
   WindowFlowController,
   type WindowGetter,
 } from "./flow.ts";
+export { ExportMap, type Restorer } from "./restorer.ts";
 export { RpcStream } from "./stream.ts";
 export {
   BrokenClient,
