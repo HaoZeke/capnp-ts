@@ -9,6 +9,8 @@
 // exit status.
 #include "interop.capnp.h"
 #include <capnp/ez-rpc.h>
+#include <capnp/rpc-twoparty.h>
+#include <kj/async-io.h>
 #include <kj/async.h>
 #include <kj/debug.h>
 #include <cstdlib>
@@ -475,6 +477,45 @@ void runClient(const std::string &addr, const std::vector<std::string> &only) {
 	}
 }
 
+// `EzRpcServer` offers no `setFlowLimit()`, so a limited server builds
+// each connection's `RpcSystem` itself. Its restorer is the one
+// `EzRpcServer` uses, so named Bootstraps fail as under `serve`.
+struct EzRestorer final : public capnp::SturdyRefRestorer<capnp::AnyPointer> {
+	capnp::Capability::Client main = kj::heap<EchoImpl>();
+
+	capnp::Capability::Client restore(capnp::AnyPointer::Reader objectId) override {
+		if (objectId.isNull()) return main;
+		auto name = objectId.getAs<capnp::Text>();
+		KJ_FAIL_REQUIRE("Server exports no such capability.", name) { break; }
+		return nullptr;
+	}
+};
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+struct FlowConnection {
+	kj::Own<kj::AsyncIoStream> stream;
+	capnp::TwoPartyVatNetwork network;
+	EzRestorer restorer;
+	capnp::RpcSystem<capnp::rpc::twoparty::VatId> rpc;
+
+	FlowConnection(kj::Own<kj::AsyncIoStream> s, size_t limit)
+	    : stream(kj::mv(s)), network(*stream, capnp::rpc::twoparty::Side::SERVER),
+	      rpc(capnp::makeRpcServer(network, restorer)) {
+		rpc.setFlowLimit(limit);
+	}
+};
+#pragma GCC diagnostic pop
+
+kj::Promise<void> acceptFlow(kj::ConnectionReceiver &listener, size_t limit) {
+	return listener.accept().then([&listener, limit](kj::Own<kj::AsyncIoStream> stream) {
+		auto conn = kj::heap<FlowConnection>(kj::mv(stream), limit);
+		auto &network = conn->network;
+		network.onDisconnect().attach(kj::mv(conn)).detach([](kj::Exception &&) {});
+		return acceptFlow(listener, limit);
+	});
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -484,6 +525,13 @@ int main(int argc, char **argv) {
 		capnp::EzRpcServer server(kj::heap<EchoImpl>(), "127.0.0.1:" + port);
 		auto &waitScope = server.getWaitScope();
 		kj::NEVER_DONE.wait(waitScope);
+	}
+	if (mode == "serve-flow") {
+		size_t limit = std::stoul(argc > 3 ? argv[3] : "0");
+		auto io = kj::setupAsyncIo();
+		auto addr = io.provider->getNetwork().parseAddress("127.0.0.1", std::stoi(port)).wait(io.waitScope);
+		auto listener = addr->listen();
+		acceptFlow(*listener, limit).wait(io.waitScope);
 	}
 	std::vector<std::string> only;
 	for (int i = 3; i < argc; i++) only.push_back(argv[i]);

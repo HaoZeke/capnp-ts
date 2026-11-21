@@ -250,6 +250,12 @@ function exceptionTypeFromWire(n: number): ExceptionType {
   }
 }
 
+/** A frame's size as capnp-C++ `MessageReader::sizeInWords()` counts it: segments only. */
+function segmentWords(frame: Uint8Array): number {
+  const segments = new DataView(frame.buffer, frame.byteOffset, 4).getUint32(0, true) + 1;
+  return frame.length / 8 - (Math.floor(segments / 2) + 1);
+}
+
 const REMOTE_PREFIX = "remote exception: ";
 
 /** A received exception, as capnp-C++ `toException()` reads one for every message kind. */
@@ -655,7 +661,7 @@ export class RpcConnection implements RemoteHost {
         this.handleBootstrap(body(Message_getBootstrap));
         break;
       case Message.call:
-        this.handleCall(body(Message_getCall), frame.length / 8);
+        this.handleCall(body(Message_getCall), segmentWords(frame));
         break;
       case Message.finish:
         this.handleFinish(body(Message_getFinish));

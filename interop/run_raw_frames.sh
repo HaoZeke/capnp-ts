@@ -4,6 +4,8 @@
 # scenario where they differ.
 #
 #   run_raw_frames.sh <rpc_peer> [scenario...]
+#
+# With FLOW_LIMIT set, both servers read calls under that flow limit.
 set -u
 PEER=$1
 shift
@@ -22,10 +24,14 @@ wait_port() {
 }
 
 PC=$(port)
-"$PEER" serve "$PC" >/dev/null 2>&1 &
+if [ -n "${FLOW_LIMIT:-}" ]; then
+  "$PEER" serve-flow "$PC" "$FLOW_LIMIT" >/dev/null 2>&1 &
+else
+  "$PEER" serve "$PC" >/dev/null 2>&1 &
+fi
 PIDS+=($!)
 PT=$(port)
-bun "$HERE/rpc_server.ts" "$PT" >/dev/null 2>&1 &
+bun "$HERE/rpc_server.ts" "$PT" ${FLOW_LIMIT:+"$FLOW_LIMIT"} >/dev/null 2>&1 &
 PIDS+=($!)
 wait_port "$PC" && wait_port "$PT" || { echo "servers did not start"; exit 1; }
 

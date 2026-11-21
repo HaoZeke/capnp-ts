@@ -931,6 +931,20 @@ describe("incoming flow limit (rpc.c++ messageLoop, setFlowLimit)", () => {
     await nextTurn();
     expect(seen).toEqual([1, 2]);
   });
+
+  test("a call counts its segment words and leaves out the segment table", () => {
+    for (const segments of [1, 3]) {
+      const one = call(1, (t) => toAnswer(t, 0), undefined, (p) => p.setU32(0, 1));
+      const g = gated();
+      const pair = new MemoryTransportPair();
+      const vat = new RpcConnection(pair.a, g.server, undefined, { flowLimit: one.length / 8 - 1 });
+      pair.b.send(bootstrap(0));
+      pair.b.send(withSegments(one, segments));
+      pair.b.send(call(2, (t) => toAnswer(t, 0), undefined, (p) => p.setU32(0, 2)));
+      vat.pump();
+      expect(g.seen).toEqual([1, 2]);
+    }
+  });
 });
 
 describe("a released export of a promise (rpc.c++ handleRelease)", () => {

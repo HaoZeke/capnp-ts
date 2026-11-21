@@ -40,6 +40,7 @@ const ECHO = ECHO_INTERFACE_ID;
 const M = {
   ping: 0,
   makePromise: 2,
+  slow: 4,
   resolveLater: 3,
   echoCap: 8,
   brokenCap: 10,
@@ -350,6 +351,15 @@ const SCENARIOS: Record<string, Step[]> = {
     }),
     W(100),
     call({ q: 2, method: M.ping, target: (t) => targetAnswer(t, 0), params: (p) => p.setU32(0, 2) }),
+  ],
+  // Run with FLOW_LIMIT: a `slow` call of 16 segment words, then a ping that
+  // is read only when the limit is at least 16.
+  "flow-limit": [
+    bootstrap(0),
+    W(100),
+    call({ q: 1, method: M.slow, target: (t) => targetAnswer(t, 0) }),
+    W(100),
+    call({ q: 2, method: M.ping, target: (t) => targetAnswer(t, 0), params: (p) => p.setU32(0, 1) }),
   ],
   // A Bootstrap pipeline is a `SingleCapPipeline`: even a lone noop is invalid.
   "bootstrap-noop-transform": [
