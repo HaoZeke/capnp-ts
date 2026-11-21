@@ -1601,3 +1601,45 @@ describe("a null PromisedAnswer reads as question 0 (rpc.c++ getMessageTarget, r
     expect(Return_which(ret!.body)).toBe(Return.results);
   });
 });
+
+describe("Call checks in capnp-C++ order (rpc.c++ handleCall)", () => {
+  const pending: RpcServer = { dispatch: () => new Promise<void>(() => {}) };
+  const withPending = (): Raw => {
+    const r = raw(pending);
+    r.send(bootstrap(0));
+    r.send(call(1, (t) => toAnswer(t, 0)));
+    r.take();
+    return r;
+  };
+
+  test("a reused question is canceled, its params released, then the connection aborts", () => {
+    const r = withPending();
+    r.send(callWithCap(1, (t) => toAnswer(t, 0), CapDescriptor.senderHosted, 5));
+    const out = r.take();
+    expect(out.map((m) => m.which)).toEqual([Message.return, Message.release, Message.abort]);
+    expect(Return_which(out[0]!.body)).toBe(Return.canceled);
+    expect(Return_getAnswerId(out[0]!.body)).toBe(1);
+    expect(Return_getReleaseParamCaps(out[0]!.body)).toBe(false);
+    expect(Exception_getReason(out[2]!.body)).toBe("expected !answer.active; questionId is already in use");
+  });
+
+  test("the target is checked first, then `sendResultsTo`, then the question", () => {
+    const badTarget = (t: StructBuilder): void => t.setU32(0, 99);
+    let r = withPending();
+    r.send(call(1, badTarget));
+    expect(abortReasonOf(r)).toBe("Message target is not a current export ID.");
+    r = withPending();
+    r.send(call(1, (t) => toAnswer(t, 0), (c) => c.setU16(6, 7)));
+    expect(abortReasonOf(r)).toBe("Unsupported `Call.sendResultsTo`.");
+    r = withPending();
+    r.send(call(2, badTarget, (c) => c.setU16(6, 7)));
+    expect(abortReasonOf(r)).toBe("Message target is not a current export ID.");
+  });
+
+  test("a reused Bootstrap question", () => {
+    const r = raw(ping);
+    r.send(bootstrap(0));
+    r.send(bootstrap(0));
+    expect(abortReasonOf(r)).toBe("expected !answer.active; questionId is already in use; answerId = 0");
+  });
+});

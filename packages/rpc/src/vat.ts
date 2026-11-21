@@ -1649,7 +1649,9 @@ export class RpcConnection implements RemoteHost {
   private handleBootstrap(bootstrap: Ptr): void {
     const questionId = Bootstrap_getQuestionId(bootstrap);
     if (this.answers.has(questionId)) {
-      this.abort(new RpcError(`bootstrap reuses question id ${questionId} still in use`));
+      this.abort(
+        new RpcError(`expected !answer.active; questionId is already in use; answerId = ${questionId}`),
+      );
       return;
     }
     const answer = this.newAnswer(questionId);
@@ -1731,25 +1733,35 @@ export class RpcConnection implements RemoteHost {
     });
   }
 
+  private sendCanceledReturn(questionId: number): void {
+    const { b, root } = newMessage(Message.return);
+    const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+    ret.setU32(OFF.returnAnswerId, questionId);
+    ret.setU16(OFF.returnUnion, Return.canceled);
+    ret.setBool(OFF.returnReleaseParamCaps, false, true);
+    this.transport.send(b.toFlat());
+  }
+
+  /** A Call, checked in the order of capnp-C++ `handleCall`. */
   private handleCall(call: Ptr, words: number): void {
     const questionId = Call_getQuestionId(call);
-    if (this.answers.has(questionId)) {
-      this.abort(new RpcError(`call reuses question id ${questionId} still in use`));
-      return;
-    }
+    const target = this.targetHook(Call_getTarget(call), true);
+    if (target === undefined) return;
     const sendTo = Call_sendResultsTo_which(call);
     if (sendTo !== Call_sendResultsTo.caller && sendTo !== Call_sendResultsTo.yourself) {
+      target.release();
       this.abort(new RpcError("Unsupported `Call.sendResultsTo`."));
       return;
     }
-    // The cap table describes the message, not the dispatch: a call this
-    // vat cannot route still told us where a third party's capability
-    // lives.
     const params = Call_getParams(call);
     const caps = this.receiveCaps(params);
-    const target = this.targetHook(Call_getTarget(call), true);
-    if (target === undefined) {
+    if (this.answers.has(questionId)) {
+      // capnp-C++ finds the id in use only after it built the call context,
+      // and dropping that context cancels it and releases its params.
+      if (this.gone === undefined) this.sendCanceledReturn(questionId);
       caps.forEach((c) => c.release());
+      target.release();
+      this.abort(new RpcError("expected !answer.active; questionId is already in use"));
       return;
     }
     let callPayload: Payload;
@@ -1938,12 +1950,7 @@ export class RpcConnection implements RemoteHost {
     if (finished) {
       // The caller sent Finish before we returned; reply Return.canceled so
       // it can release the question table entry without waiting forever.
-      const { b, root } = newMessage(Message.return);
-      const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
-      ret.setU32(OFF.returnAnswerId, questionId);
-      ret.setU16(OFF.returnUnion, Return.canceled);
-      ret.setBool(OFF.returnReleaseParamCaps, false, true);
-      this.transport.send(b.toFlat());
+      this.sendCanceledReturn(questionId);
       return;
     }
     if (s.state === "ok") {

@@ -159,6 +159,9 @@ describe("a level 3 handoff between three vats", () => {
     // 2. Alice tells Carol where to go. Carol records the introduction
     //    rather than dialling: reaching Bob is the network's job, and
     //    here the connection already exists.
+    aliceToCarol.sendBootstrap();
+    carolToAlice.pump();
+    aliceToCarol.pump();
     tellCarolWhereToGo(aliceToCarol, ac.a, 90, BOB, NONCE);
     carolToAlice.pump();
     ac.a.receive();

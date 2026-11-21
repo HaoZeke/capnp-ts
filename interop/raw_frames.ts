@@ -525,6 +525,31 @@ const SCENARIOS: Record<string, Step[]> = {
     W(100),
     call({ q: 2, method: M.ping, target: (t) => targetAnswer(t, 1, [0]), params: (p) => p.setU32(0, 3) }),
   ],
+  // `handleCall` checks the target, then `sendResultsTo`, then the question,
+  // and cancels a reused question before it aborts.
+  "question-reuse-call": [
+    bootstrap(0),
+    call({ q: 1, method: M.slow, target: (t) => targetAnswer(t, 0) }),
+    call({ q: 1, method: M.ping, target: (t) => targetAnswer(t, 0) }),
+  ],
+  "question-reuse-bootstrap": [bootstrap(0), bootstrap(0)],
+  "question-reuse-with-caps": [
+    bootstrap(0),
+    call({ q: 1, method: M.slow, target: (t) => targetAnswer(t, 0) }),
+    capCall(1, M.ping, (t) => targetAnswer(t, 0), [[1, 5]]),
+  ],
+  "question-reuse-bad-target": [
+    bootstrap(0),
+    call({ q: 1, method: M.slow, target: (t) => targetAnswer(t, 0) }),
+    call({ q: 1, method: M.ping, target: (t) => targetImport(t, 99) }),
+  ],
+  "bad-target-with-caps": [bootstrap(0), W(100), capCall(1, M.ping, (t) => targetImport(t, 99), [[1, 5]])],
+  "bad-send-to-bad-target": [bootstrap(0), W(100), callSendingTo(1, 7, (t) => targetImport(t, 99))],
+  "question-reuse-bad-send-to": [
+    bootstrap(0),
+    call({ q: 1, method: M.slow, target: (t) => targetAnswer(t, 0) }),
+    callSendingTo(1, 7),
+  ],
   "disembargo-provide": [bootstrap(0), W(100), disembargoProvide(1)],
   "disembargo-accept": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0, [0, 2]), 2)],
   "disembargo-unknown": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0), 9)],

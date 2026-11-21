@@ -1215,8 +1215,9 @@ describe("other incoming protocol errors", () => {
         const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
         call.setU32(0, 1);
         const target = call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS);
-        target.setU16(4, MessageTarget.importedCap);
-        target.setU32(0, 0);
+        // An unknown answer is a broken target, so the cap table is read.
+        target.setU16(4, MessageTarget.promisedAnswer);
+        target.initStruct(0, 1, 1).setU32(0, 5);
         const params = call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
         const table = params.initCompositeList(1, 1, 1, 1);
         table.setU16(0, 9);
