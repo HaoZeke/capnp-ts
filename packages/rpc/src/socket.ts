@@ -49,7 +49,10 @@ export function frameLength(buf: Uint8Array, traversalLimitWords = TRAVERSAL_LIM
 export class StreamTransport implements Transport {
   private buffer = new Uint8Array(0);
   private readonly inbox: Uint8Array[] = [];
+  private readonly held: Uint8Array[] = [];
   private shut = false;
+  /** Set while the vat is over its flow limit and must not read. */
+  protected paused = false;
 
   constructor(
     private readonly write: (bytes: Uint8Array) => void,
@@ -65,8 +68,40 @@ export class StreamTransport implements Transport {
     return this.buffer.length;
   }
 
+  /**
+   * Bytes still required to finish the buffered frame.
+   * `0` means the buffer is empty or the bytes already form a whole frame.
+   */
+  protected bytesToFinishFrame(): number {
+    const buf = this.buffer;
+    if (buf.length === 0) return 0;
+    if (buf.length < 8) return 8 - buf.length;
+    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const first = view.getUint32(0, true);
+    if (first === 0xffffffff) return 0;
+    const nsegs = first + 1;
+    const tableBytes = (Math.floor(nsegs / 2) + 1) * 8;
+    if (buf.length < tableBytes) return tableBytes - buf.length;
+    let words = tableBytes / 8;
+    for (let i = 0; i < nsegs; i++) words += view.getUint32(4 + i * 4, true);
+    const total = words * 8;
+    return buf.length >= total ? 0 : total - buf.length;
+  }
+
+  /** Keep frames while the vat is over its flow limit, then pass them on. */
+  setPaused(paused: boolean): void {
+    this.paused = paused;
+    if (paused) return;
+    const chunks = this.held.splice(0);
+    for (const chunk of chunks) this.feed(chunk);
+  }
+
   /** Take bytes off the stream; complete frames become receivable. */
   feed(chunk: Uint8Array): void {
+    if (this.paused) {
+      this.held.push(chunk.slice());
+      return;
+    }
     const merged = new Uint8Array(this.buffer.length + chunk.length);
     merged.set(this.buffer);
     merged.set(chunk, this.buffer.length);

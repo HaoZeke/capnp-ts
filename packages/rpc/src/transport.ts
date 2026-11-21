@@ -27,6 +27,11 @@ export interface Transport {
    * The portable core never imports a host filesystem; the transport does.
    */
   closeFd?(fd: number): void;
+  /**
+   * Stop taking bytes while the vat is over its flow limit.
+   * `false` passes on what arrived in the meantime.
+   */
+  setPaused?(paused: boolean): void;
 }
 
 /**

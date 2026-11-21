@@ -64,7 +64,7 @@ describe("unix socket attached fd", () => {
     const lib = openFdLib(built!.so);
     const fd = unixConnect(lib, sock);
     expect(fd).toBeGreaterThan(2);
-    const transport = new UnixFdTransport(fd, lib);
+    const transport = new UnixFdTransport(fd, lib, 8);
     const conn = new RpcConnection(transport);
     const cap: Client = conn.bootstrap();
     let got: number | undefined;
@@ -91,6 +91,10 @@ const libc = dlopen("libc.so.6", {
   },
   pipe: {
     args: [FFIType.ptr],
+    returns: FFIType.i32,
+  },
+  fcntl: {
+    args: [FFIType.i32, FFIType.i32],
     returns: FFIType.i32,
   },
 });
@@ -120,7 +124,7 @@ describe("recvmsg fd association", () => {
     try {
       sendFds(lib, a, new Uint8Array(16), [extra[0]!]);
       closeSync(extra[0]!);
-      const transport = new UnixFdTransport(b, lib);
+      const transport = new UnixFdTransport(b, lib, 8);
       expect(transport.pull()).toBe(2);
       expect(transport.receive()).not.toBeNull();
       expect([...transport.receivedFds()]).toEqual([]);
@@ -145,7 +149,7 @@ describe("recvmsg fd association", () => {
     try {
       sendFds(lib, a, new Uint8Array(12), [extra[0]!]);
       closeSync(extra[0]!);
-      const transport = new UnixFdTransport(b, lib);
+      const transport = new UnixFdTransport(b, lib, 8);
       expect(transport.pull()).toBe(1);
       expect(transport.receive()).not.toBeNull();
       expect([...transport.receivedFds()]).toEqual([]);
@@ -172,7 +176,7 @@ describe("recvmsg fd association", () => {
     try {
       sendFds(lib, a, new Uint8Array(16), [extra[0]!]);
       closeSync(extra[0]!);
-      const transport = new UnixFdTransport(b, lib);
+      const transport = new UnixFdTransport(b, lib, 8);
       expect(transport.pull()).toBe(2);
       transport.close();
       expect(() => writeSync(extra[1]!, Buffer.from("x"))).toThrow();
@@ -181,6 +185,207 @@ describe("recvmsg fd association", () => {
       closeSync(a);
       closeSync(b);
       try { closeSync(extra[1]!); } catch { /* already closed or EPIPE */ }
+    }
+  });
+
+  test("partial reads keep at most maxFdsPerMessage descriptors", () => {
+    const so = compileSo();
+    expect(so).toBeDefined();
+    const lib = openFdLib(so!);
+    const [a, b] = socketpair();
+    const writes: number[] = [];
+    const transport = new UnixFdTransport(b, lib, 2);
+    const frame = new Uint8Array(16);
+    frame[4] = 1;
+    try {
+      for (let i = 0; i < 3; i++) {
+        const pipe = new Int32Array(2);
+        expect(libc.symbols.pipe(ptr(pipe))).toBe(0);
+        writes.push(pipe[1]!);
+        sendFds(lib, a, frame.subarray(i * 4, i * 4 + 4), [pipe[0]!]);
+        closeSync(pipe[0]!);
+        transport.pull();
+      }
+      sendFds(lib, a, frame.subarray(12), []);
+      expect(transport.pull()).toBe(1);
+      expect(transport.receive()).not.toBeNull();
+      expect(transport.receivedFds().length).toBeLessThanOrEqual(2);
+      expect(() => writeSync(writes[2]!, Buffer.from("x"))).toThrow();
+    } finally {
+      transport.close();
+      lib.close();
+      closeSync(a);
+      closeSync(b);
+      for (const fd of writes) {
+        try { closeSync(fd); } catch { /* closed with the pipe */ }
+      }
+    }
+  });
+
+  test("received descriptors are close-on-exec and extras are closed", () => {
+    const so = compileSo();
+    expect(so).toBeDefined();
+    const lib = openFdLib(so!);
+    const [a, b] = socketpair();
+    const pipes = [new Int32Array(2), new Int32Array(2)];
+    const transport = new UnixFdTransport(b, lib, 1);
+    try {
+      for (const pipe of pipes) expect(libc.symbols.pipe(ptr(pipe))).toBe(0);
+      sendFds(lib, a, new Uint8Array(8), [pipes[0]![0]!, pipes[1]![0]!]);
+      closeSync(pipes[0]![0]!);
+      closeSync(pipes[1]![0]!);
+      expect(transport.pull()).toBe(1);
+      expect(transport.receive()).not.toBeNull();
+      const got = transport.receivedFds();
+      expect(got.length).toBe(1);
+      expect(libc.symbols.fcntl(got[0]!, 1) & 1).toBe(1);
+      expect(() => writeSync(pipes[1]![1]!, Buffer.from("x"))).toThrow();
+    } finally {
+      transport.close();
+      lib.close();
+      closeSync(a);
+      closeSync(b);
+      for (const pipe of pipes) {
+        try { closeSync(pipe[1]!); } catch { /* write end */ }
+      }
+    }
+  });
+
+  test("two SCM_RIGHTS headers in one recvmsg are both kept", () => {
+    const so = compileSo();
+    expect(so).toBeDefined();
+    const lib = dlopen(so!, {
+      capnp_send_two: {
+        args: [FFIType.i32, FFIType.ptr, FFIType.i32, FFIType.i32, FFIType.i32],
+        returns: FFIType.i32,
+      },
+    });
+    const [a, b] = socketpair();
+    const pipes = [new Int32Array(2), new Int32Array(2)];
+    const transport = new UnixFdTransport(b, openFdLib(so!), 4);
+    try {
+      for (const pipe of pipes) expect(libc.symbols.pipe(ptr(pipe))).toBe(0);
+      const bytes = new Uint8Array(8);
+      const n = lib.symbols.capnp_send_two(a, ptr(bytes), bytes.byteLength, pipes[0]![0]!, pipes[1]![0]!);
+      expect(n).toBe(bytes.byteLength);
+      closeSync(pipes[0]![0]!);
+      closeSync(pipes[1]![0]!);
+      expect(transport.pull()).toBe(1);
+      expect(transport.receive()).not.toBeNull();
+      expect(transport.receivedFds().length).toBe(2);
+    } finally {
+      transport.close();
+      lib.close();
+      closeSync(a);
+      closeSync(b);
+      for (const pipe of pipes) {
+        try { closeSync(pipe[1]!); } catch { /* write end */ }
+      }
+    }
+  });
+
+  test("a partial frame that already has an fd leaves the next message's fd open", () => {
+    const so = compileSo();
+    expect(so).toBeDefined();
+    const lib = openFdLib(so!);
+    const [a, b] = socketpair();
+    const first = new Int32Array(2);
+    const second = new Int32Array(2);
+    expect(libc.symbols.pipe(ptr(first))).toBe(0);
+    expect(libc.symbols.pipe(ptr(second))).toBe(0);
+    const transport = new UnixFdTransport(b, lib, 1);
+    const head = new Uint8Array(8);
+    head[4] = 1;
+    try {
+      sendFds(lib, a, head, [first[0]!]);
+      closeSync(first[0]!);
+      expect(transport.pull()).toBe(0);
+      sendFds(lib, a, new Uint8Array(8), []);
+      sendFds(lib, a, new Uint8Array(8), [second[0]!]);
+      closeSync(second[0]!);
+      expect(transport.pull()).toBe(1);
+      expect(transport.receive()).not.toBeNull();
+      expect(transport.receivedFds().length).toBe(1);
+      expect(transport.pull()).toBe(1);
+      expect(transport.receive()).not.toBeNull();
+      expect(transport.receivedFds().length).toBe(1);
+      expect(writeSync(second[1]!, Buffer.from("x"))).toBe(1);
+    } finally {
+      transport.close();
+      lib.close();
+      closeSync(a);
+      closeSync(b);
+      for (const fd of [first[1]!, second[1]!]) {
+        try { closeSync(fd); } catch { /* write end */ }
+      }
+    }
+  });
+
+  test("pull retries when recvmsg returns EINTR", () => {
+    const libcWrite = dlopen("libc.so.6", {
+      memcpy: {
+        args: [FFIType.ptr, FFIType.ptr, FFIType.u64],
+        returns: FFIType.ptr,
+      },
+    });
+    let calls = 0;
+    const lib = {
+      symbols: {
+        capnp_send_fds: () => 0,
+        capnp_unix_connect: () => -1,
+        capnp_recv_fds: (
+          _sock: number,
+          _buf: unknown,
+          _cap: number,
+          _fds: unknown,
+          _max: number,
+          nfds: number,
+        ) => {
+          calls++;
+          if (calls === 1) {
+            const err = new Int32Array([4]);
+            libcWrite.symbols.memcpy(nfds, ptr(err), 4);
+            return -2;
+          }
+          return 0;
+        },
+      },
+      close() {},
+    } as ReturnType<typeof openFdLib>;
+    const transport = new UnixFdTransport(-1, lib, 1);
+    try {
+      expect(transport.pull()).toBe(0);
+      expect(calls).toBe(2);
+    } finally {
+      libcWrite.close();
+    }
+  });
+
+  test("an error other than EAGAIN is thrown", () => {
+    const so = compileSo();
+    expect(so).toBeDefined();
+    const transport = new UnixFdTransport(-1, openFdLib(so!), 1);
+    expect(() => transport.pull()).toThrow(/errno/);
+  });
+
+  test("pull does not read while paused", () => {
+    const so = compileSo();
+    expect(so).toBeDefined();
+    const lib = openFdLib(so!);
+    const [a, b] = socketpair();
+    const transport = new UnixFdTransport(b, lib, 4);
+    try {
+      sendFds(lib, a, new Uint8Array(8), []);
+      transport.setPaused(true);
+      expect(transport.pull()).toBe(0);
+      expect(transport.pending).toBe(0);
+      transport.setPaused(false);
+      expect(transport.pull()).toBe(1);
+    } finally {
+      transport.close();
+      lib.close();
+      closeSync(a);
+      closeSync(b);
     }
   });
 });

@@ -13,6 +13,8 @@ import { frameLength, StreamTransport } from "./socket.ts";
 
 const MAX_FDS = 253;
 const RECV_CAP = 1024 * 1024;
+/** Linux `EINTR`. `KJ_NONBLOCKING_SYSCALL` retries this and no other errno. */
+const EINTR = 4;
 
 type FdLib = {
   symbols: {
@@ -67,6 +69,8 @@ export class UnixFdTransport extends StreamTransport {
   constructor(
     fd: number,
     private readonly lib: FdLib,
+    /** FDs accepted for one message. `0` accepts none, as `maxFdsPerMessage`. */
+    private readonly maxFdsPerMessage = 0,
   ) {
     super((bytes) => {
       UnixFdTransport.sendRaw(lib, fd, bytes, []);
@@ -81,22 +85,35 @@ export class UnixFdTransport extends StreamTransport {
 
   /** Read one `recvmsg` and split complete frames off the buffer. */
   pull(): number {
-    const n = this.lib.symbols.capnp_recv_fds(
-      this.socketFd,
-      ptr(this.recvBuf),
-      this.recvBuf.byteLength,
-      ptr(this.fdBuf),
-      MAX_FDS,
-      ptr(this.nfdBuf),
-    );
-    if (n < 0) return 0;
-    if (n === 0) {
-      this.close();
-      return 0;
+    if (this.paused) return 0;
+    for (;;) {
+      const room = Math.max(0, this.maxFdsPerMessage - this.carriedFds.length);
+      // Descriptors already queued belong to the unfinished frame. Reading
+      // past it would take the next message's descriptors with `room == 0`.
+      const need = this.bytesToFinishFrame();
+      const cap =
+        this.carriedFds.length > 0 && need > 0 ? Math.min(this.recvBuf.byteLength, need) : this.recvBuf.byteLength;
+      const n = this.lib.symbols.capnp_recv_fds(
+        this.socketFd,
+        ptr(this.recvBuf),
+        cap,
+        ptr(this.fdBuf),
+        room,
+        ptr(this.nfdBuf),
+      );
+      if (n === -1) return 0;
+      if (n < 0) {
+        if ((this.nfdBuf[0] ?? 0) === EINTR) continue;
+        throw new Error(`recvmsg failed; errno = ${this.nfdBuf[0] ?? 0}`);
+      }
+      if (n === 0) {
+        this.close();
+        return 0;
+      }
+      const chunk = this.recvBuf.slice(0, n);
+      const fds = Array.from(this.fdBuf.subarray(0, this.nfdBuf[0] ?? 0));
+      return this.ingest(chunk, fds);
     }
-    const chunk = this.recvBuf.slice(0, n);
-    const fds = Array.from(this.fdBuf.subarray(0, this.nfdBuf[0] ?? 0));
-    return this.ingest(chunk, fds);
   }
 
   /**
@@ -109,7 +126,7 @@ export class UnixFdTransport extends StreamTransport {
     const before = this.pending;
     this.feed(chunk);
     const gained = this.pending - before;
-    const incoming = [...this.carriedFds, ...fds];
+    const incoming = this.keepFds([...this.carriedFds, ...fds]);
     this.carriedFds = [];
     const tail = this.incompleteBytes() > 0;
     if (gained <= 0 || tail) {
@@ -121,6 +138,16 @@ export class UnixFdTransport extends StreamTransport {
       this.inboxFds.push(i === gained - 1 ? incoming : []);
     }
     return gained;
+  }
+
+  /** Keep the first `maxFdsPerMessage` descriptors and close the rest. */
+  private keepFds(fds: readonly number[]): number[] {
+    const keep: number[] = [];
+    for (const fd of fds) {
+      if (keep.length < this.maxFdsPerMessage) keep.push(fd);
+      else this.closeFd(fd);
+    }
+    return keep;
   }
 
   /** Close one OS descriptor received on this socket. */
