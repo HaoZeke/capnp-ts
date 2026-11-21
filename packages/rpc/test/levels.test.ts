@@ -5,6 +5,7 @@ import {
   Client,
   RpcConnection,
   type RpcServer,
+  Vat,
 } from "../src/index.ts";
 import {
   Message,
@@ -54,7 +55,7 @@ describe("level 4: Join", () => {
   };
 
   test("two parts naming the same object join", async () => {
-    const { a, settle } = link(undefined, new Counter());
+    const { a, settle } = link(undefined, new Counter(), { vat: new Vat() });
     a.bootstrap();
     await settle();
     const q0 = a.sendJoin(0, 7, 2, 0);
@@ -74,7 +75,7 @@ describe("level 4: Join", () => {
         ctx.setResultCap(ctx.initResults(0, 1), 0, Client.local(new Counter()).hook);
       },
     };
-    const { a, settle } = link(undefined, hub);
+    const { a, settle } = link(undefined, hub, { vat: new Vat() });
     const boot = a.bootstrap();
     const reply = boot.call(IFACE, 0);
     await settle();

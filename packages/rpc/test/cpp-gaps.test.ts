@@ -37,7 +37,7 @@ import {
   Return_which,
 } from "../src/rpc.capnp.ts";
 import { MemoryTransportPair } from "../src/transport.ts";
-import { RpcConnection } from "../src/vat.ts";
+import { RpcConnection, Vat } from "../src/vat.ts";
 
 const IFACE = 0x1234n;
 const nextTurn = (): Promise<void> => new Promise((res) => setImmediate(res));
@@ -90,9 +90,9 @@ interface Raw {
   take(): Array<{ which: number; body: Ptr }>;
 }
 
-function raw(server?: RpcServer | Client): Raw {
+function raw(server?: RpcServer | Client, multiParty?: Vat): Raw {
   const pair = new MemoryTransportPair();
-  const vat = new RpcConnection(pair.a, server);
+  const vat = new RpcConnection(pair.a, server, multiParty);
   return {
     vat,
     send(f) {
@@ -400,5 +400,72 @@ describe("bootstrap answers (rpc.c++ handleBootstrap)", () => {
     const ret = r.take()[0]!.body;
     expect(Return_which(ret)).toBe(Return.exception);
     expect(Exception_getReason(Return_getException(ret))).toBe("Invalid pipeline transform.");
+  });
+});
+
+function provide(q: number, nonce: bigint): Uint8Array {
+  return frame(Message.provide, (m) => {
+    const p = m.initStruct(0, 1, 2);
+    p.setU32(0, q);
+    p.initStruct(0, 1, 1).setU32(0, 0);
+    p.initStruct(1, 1, 1).setU64(0, nonce);
+  });
+}
+
+function disembargo(which: number, value: number, target: (t: StructBuilder) => void): Uint8Array {
+  return frame(Message.disembargo, (m) => {
+    const d = m.initStruct(0, 1, 1);
+    target(d.initStruct(0, 1, 1));
+    d.setU16(4, which);
+    d.setU32(0, value);
+  });
+}
+
+describe("two-party connections refuse level 3 and 4 (rpc.c++ handleMessage)", () => {
+  for (const [name, tag, f] of [
+    ["Provide", Message.provide, provide(1, 7n)],
+    ["Accept", Message.accept, frame(Message.accept, (m) => m.initStruct(0, 1, 2).setU32(0, 1))],
+    ["Join", Message.join, frame(Message.join, (m) => m.initStruct(0, 1, 2).setU32(0, 1))],
+  ] as const) {
+    test(`${name} is echoed as unimplemented`, () => {
+      const r = raw(ping);
+      r.send(bootstrap(0));
+      r.take();
+      r.send(f);
+      const out = r.take();
+      expect(out.map((m) => m.which)).toEqual([Message.unimplemented]);
+      expect(Message_which(out[0]!.body)).toBe(tag);
+      expect(r.vat.pendingProvisions()).toEqual([]);
+      expect(r.vat.disconnected).toBeUndefined();
+    });
+  }
+
+  test("Disembargo.provide aborts and prints the message", () => {
+    const r = raw(ping);
+    r.send(bootstrap(0));
+    r.take();
+    r.send(disembargo(3, 1, (t) => t.setU32(0, 0)));
+    const out = r.take();
+    expect(out.map((m) => m.which)).toEqual([Message.abort]);
+    expect(Exception_getReason(out[0]!.body)).toBe(
+      "Unimplemented Disembargo type.; disembargo = (target = (importedCap = 0), context = (provide = 1))",
+    );
+  });
+
+  test("Disembargo.accept prints a promised answer's transform", () => {
+    const r = raw(ping, new Vat());
+    r.send(disembargo(2, 0, (t) => toAnswer(t, 4, [0, 2])));
+    expect(Exception_getReason(r.take()[0]!.body)).toBe(
+      "Unimplemented Disembargo type.; disembargo = (target = (promisedAnswer = (questionId = 4, " +
+        "transform = [(getPointerField = 0), (getPointerField = 2)])), context = (accept = void))",
+    );
+  });
+
+  test("an unknown Disembargo context prints as empty", () => {
+    const r = raw(ping);
+    r.send(disembargo(9, 0, (t) => toAnswer(t, 0)));
+    expect(Exception_getReason(r.take()[0]!.body)).toBe(
+      "Unimplemented Disembargo type.; disembargo = (target = (promisedAnswer = (questionId = 0)), context = ())",
+    );
   });
 });

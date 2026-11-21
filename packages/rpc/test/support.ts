@@ -2,7 +2,7 @@ import { Message as CapnpMessage } from "@haozeke/capnp";
 
 import { Message, Message_which } from "../src/rpc.capnp.ts";
 import { MemoryTransportPair, type Transport } from "../src/transport.ts";
-import { RpcConnection } from "../src/vat.ts";
+import { RpcConnection, type Vat } from "../src/vat.ts";
 import type { Client, RpcServer } from "../src/index.ts";
 
 export const IFACE = 0x1234n;
@@ -52,13 +52,14 @@ export interface Link {
 export function link(
   serverA?: RpcServer | Client,
   serverB?: RpcServer | Client,
-  options?: { streamWindow?: number },
+  options?: { streamWindow?: number; vat?: Vat },
 ): Link {
   const pair = new MemoryTransportPair();
   const ta = tap(pair.a);
   const tb = tap(pair.b);
-  const a = new RpcConnection(ta, serverA, undefined, options);
-  const b = new RpcConnection(tb, serverB);
+  const a = new RpcConnection(ta, serverA, undefined, { streamWindow: options?.streamWindow });
+  // Level 3 and 4 need a vat; without one, B is two-party.
+  const b = new RpcConnection(tb, serverB, options?.vat);
   const settle = async (): Promise<void> => {
     for (let quiet = 0; quiet < 3; ) {
       const moved = a.pump() + b.pump();

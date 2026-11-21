@@ -54,7 +54,7 @@ import {
   VAT_ID_PWORDS,
 } from "../src/rpc-threeparty.capnp.ts";
 import { MemoryTransportPair, type Transport } from "../src/transport.ts";
-import { RpcConnection, type RpcServer } from "../src/vat.ts";
+import { RpcConnection, type RpcServer, Vat } from "../src/vat.ts";
 
 class Marked implements RpcServer {
   calls = 0;
@@ -162,7 +162,7 @@ function readReply(t: Transport): Reply {
 /** Bob, with one capability bootstrapped so export 0 is live. */
 function bobWithExport(): { bob: RpcConnection; alice: Transport } {
   const pair = new MemoryTransportPair();
-  const bob = new RpcConnection(pair.b, new Marked(7));
+  const bob = new RpcConnection(pair.b, new Marked(7), new Vat());
   sendBootstrap(pair.a, 1);
   bob.pump();
   pair.a.receive();
@@ -183,7 +183,7 @@ describe("level 3 handoff", () => {
 
     // Carol arrives on her own connection and presents the nonce.
     const carolPair = new MemoryTransportPair();
-    const bobToCarol = new RpcConnection(carolPair.b);
+    const bobToCarol = new RpcConnection(carolPair.b, undefined, new Vat());
     // The arrangement lives on Bob, so it is Bob's own vat that answers;
     // here the same vat serves both, which is what a real Bob does.
     sendAccept(alice, 11, nonce);

@@ -68,7 +68,7 @@ import {
   Return_which,
 } from "../src/rpc.capnp.ts";
 import { MemoryTransportPair, type Transport } from "../src/transport.ts";
-import { RpcConnection } from "../src/vat.ts";
+import { RpcConnection, Vat } from "../src/vat.ts";
 import { IFACE, link } from "./support.ts";
 
 class Counter implements RpcServer {
@@ -1054,7 +1054,7 @@ describe("other incoming protocol errors", () => {
 
   test("level 3 Provide keeps its lookup: an unsupported op on an unknown answer is an exception", () => {
     const pair = new MemoryTransportPair();
-    const vat = new RpcConnection(pair.b, new Counter());
+    const vat = new RpcConnection(pair.b, new Counter(), new Vat());
     pair.a.send(provideFrame(5, { answer: 99, ops: [5] }));
     vat.pump();
     expect(vat.disconnected).toBeUndefined();
@@ -1071,7 +1071,7 @@ describe("other incoming protocol errors", () => {
       },
     };
     const pair = new MemoryTransportPair();
-    const vat = new RpcConnection(pair.b, srv);
+    const vat = new RpcConnection(pair.b, srv, new Vat());
     pair.a.send(bootstrapFrame(0));
     pair.a.send(callFrame(1, { answer: 0 }));
     vat.pump();

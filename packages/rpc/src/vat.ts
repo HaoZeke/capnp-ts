@@ -249,6 +249,47 @@ function readException(exc: Ptr): RpcError {
   return new RpcError(Exception_getReason(e), exceptionTypeFromWire(Exception_getType(e)));
 }
 
+/**
+ * A `Disembargo` in capnp-C++'s text format, as its errors print one:
+ * every scalar, non-null pointers, and the active union member.
+ */
+function disembargoText(d: Ptr): string {
+  const context = ["senderLoopback", "receiverLoopback", "accept", "provide"];
+  const which = d.getU16(OFF.disembargoContextUnion);
+  const name = context[which];
+  let ctx = "";
+  if (name === "accept") ctx = "accept = void";
+  else if (name !== undefined) ctx = `${name} = ${d.getU32(OFF.disembargoContextValue)}`;
+  const target = d.getP(0);
+  const fields = target.kind === PtrKind.Null ? [] : [`target = ${messageTargetText(target)}`];
+  fields.push(`context = (${ctx})`);
+  return `(${fields.join(", ")})`;
+}
+
+function messageTargetText(t: Ptr): string {
+  switch (t.getU16(4)) {
+    case 0:
+      return `(importedCap = ${t.getU32(0)})`;
+    case 1: {
+      const pa = structOrDefault(t.getP(0));
+      const fields = [`questionId = ${pa.getU32(0)}`];
+      const ops = pa.getP(0);
+      if (ops.kind === PtrKind.List) {
+        const parts: string[] = [];
+        for (let i = 0; i < ops.listLen(); i++) {
+          const op = ops.listGetP(i);
+          const w = op.getU16(0);
+          parts.push(w === 0 ? "(noop = void)" : w === 1 ? `(getPointerField = ${op.getU16(2)})` : "()");
+        }
+        fields.push(`transform = [${parts.join(", ")}]`);
+      }
+      return `(promisedAnswer = (${fields.join(", ")}))`;
+    }
+    default:
+      return "()";
+  }
+}
+
 let emptyStruct: Ptr | undefined;
 
 /** `p`, or a struct with no fields when `p` is null: every field reads as its default. */
@@ -277,8 +318,8 @@ interface Provision {
  * the arrangement holds is the capability itself, and the claiming
  * connection exports it under an id of its own.
  *
- * Connections given no vat get one to themselves, which is what a
- * two-party deployment wants.
+ * Connections given no vat are two-party, as capnp-C++ 1.4 always is:
+ * they echo `Provide`, `Accept` and `Join` back as unimplemented.
  */
 export class Vat {
   /** Capabilities held for a third vat, by the nonce that claims them. */
@@ -465,6 +506,8 @@ export class RpcConnection implements RemoteHost {
   private readonly questions = new Map<number, QuestionState>();
   private readonly embargoes = new Map<number, Settle<void>>();
   private readonly vat: Vat;
+  /** No vat was given, so level 3 and 4 messages are refused. */
+  private readonly twoParty: boolean;
   /** Embargoed Accepts, keyed by the introducer's Provide question. */
   private readonly heldAccepts = new Map<number, HeldAccept>();
   private readonly introductions = new Map<bigint, Introduction>();
@@ -484,6 +527,7 @@ export class RpcConnection implements RemoteHost {
     options: { streamWindow?: number | (() => number) | WindowGetter } = {},
   ) {
     this.vat = vat ?? new Vat();
+    this.twoParty = vat === undefined;
     const w = options.streamWindow;
     if (typeof w === "number") {
       this.windowGetter = { getWindow: () => w };
@@ -574,7 +618,8 @@ export class RpcConnection implements RemoteHost {
         this.handleResolve(body(Message_getResolve));
         break;
       case Message.join:
-        this.handleJoin(body(Message_getJoin));
+        if (this.twoParty) this.sendUnimplemented(frame);
+        else this.handleJoin(body(Message_getJoin));
         break;
       case Message.disembargo:
         this.handleDisembargo(body(Message_getDisembargo));
@@ -583,10 +628,12 @@ export class RpcConnection implements RemoteHost {
         this.handleReturn(body(Message_getReturn), frame);
         break;
       case Message.provide:
-        this.handleProvide(body(Message_getProvide));
+        if (this.twoParty) this.sendUnimplemented(frame);
+        else this.handleProvide(body(Message_getProvide));
         break;
       case Message.accept:
-        this.handleAccept(body(Message_getAccept));
+        if (this.twoParty) this.sendUnimplemented(frame);
+        else this.handleAccept(body(Message_getAccept));
         break;
       case Message.abort: {
         const exc = readException(body(Message_getAbort));
@@ -2028,6 +2075,7 @@ export class RpcConnection implements RemoteHost {
     const context = Disembargo_getContext(disembargo);
     switch (Disembargo_context_which(context)) {
       case Disembargo_context.provide: {
+        if (this.twoParty) break;
         // The introducer lifts the embargo on the Accept it arranged,
         // naming its own Provide question. One naming nothing we hold is
         // the sender's problem, not a reason to disturb this connection.
@@ -2108,9 +2156,11 @@ export class RpcConnection implements RemoteHost {
         return;
       }
       default:
-        this.abort(new RpcError("Unimplemented Disembargo type."));
-        return;
+        break;
     }
+    this.abort(
+      new RpcError(`Unimplemented Disembargo type.; disembargo = ${disembargoText(disembargo)}`),
+    );
   }
 
   // --- level 4 -----------------------------------------------------

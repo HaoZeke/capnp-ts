@@ -159,6 +159,14 @@ function disembargoProvide(q: number): Uint8Array {
   });
 }
 
+function disembargoOther(target: (t: StructBuilder) => void, which: number): Uint8Array {
+  return frame(Message.disembargo, (m) => {
+    const d = m.initStruct(0, 1, 1);
+    target(d.initStruct(0, 1, 1));
+    d.setU16(4, which);
+  });
+}
+
 function abortWith(reason: string | null, trace?: string): Uint8Array {
   return frame(Message.abort, (m) => {
     if (reason === null) return;
@@ -217,6 +225,8 @@ const SCENARIOS: Record<string, Step[]> = {
   accept: [accept(1)],
   join: [bootstrap(0), W(100), join(1)],
   "disembargo-provide": [bootstrap(0), W(100), disembargoProvide(1)],
+  "disembargo-accept": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0, [0, 2]), 2)],
+  "disembargo-unknown": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0), 9)],
   // Gap 10: a 512-segment frame.
   "segments-512": [manySegments(bootstrap(0), 512)],
   "segments-1000": [manySegments(bootstrap(0), 1000)],
