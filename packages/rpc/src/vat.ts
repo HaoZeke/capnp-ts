@@ -412,6 +412,8 @@ interface AnswerState {
   tailSent: boolean;
   /** A Call's answer: its pipeline is frozen when the Return carries capabilities. */
   isCall: boolean;
+  /** A Bootstrap's answer, a capnp-C++ `SingleCapPipeline`: any transform at all is invalid. */
+  singleCap: boolean;
   returned: boolean;
   finished: boolean;
 }
@@ -1641,6 +1643,7 @@ export class RpcConnection implements RemoteHost {
     }
     const answer = this.newAnswer(questionId);
     answer.returned = true;
+    answer.singleCap = true;
     const { b, root } = newMessage(Message.return);
     const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
     ret.setU32(OFF.returnAnswerId, questionId);
@@ -1862,6 +1865,7 @@ export class RpcConnection implements RemoteHost {
       noPromisePipelining: false,
       tailSent: false,
       isCall: false,
+      singleCap: false,
       returned: false,
       finished: false,
     };
@@ -2157,6 +2161,9 @@ export class RpcConnection implements RemoteHost {
       ops.push(PromisedAnswer_Op_getGetPointerField(op));
     }
     if (answer === undefined || (mode === "target" && answer.finished)) return undefined;
+    if (answer.singleCap && transform.listLen() > 0) {
+      return new BrokenClient(new RpcError("Invalid pipeline transform."));
+    }
     return answer.call.pipeline.getPipelinedCap(ops);
   }
 

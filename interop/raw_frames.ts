@@ -68,6 +68,7 @@ function bootstrap(q: number): Uint8Array {
   return frame(Message.bootstrap, (m) => m.initStruct(0, 1, 1).setU32(0, q));
 }
 
+/** A promised-answer target; in `ops`, -1 is a `noop` and any other value a pointer field. */
 function targetAnswer(t: StructBuilder, q: number, ops: number[] = []): void {
   t.setU16(4, 1);
   const pa = t.initStruct(0, 1, 1);
@@ -76,6 +77,7 @@ function targetAnswer(t: StructBuilder, q: number, ops: number[] = []): void {
   let op = pa.initCompositeList(0, ops.length, 1, 0);
   ops.forEach((f, i) => {
     if (i > 0) op = op.nextElement();
+    if (f < 0) return;
     op.setU16(0, 1);
     op.setU16(2, f);
   });
@@ -330,6 +332,11 @@ const SCENARIOS: Record<string, Step[]> = {
     }),
     W(100),
     call({ q: 2, method: M.ping, target: (t) => targetAnswer(t, 0), params: (p) => p.setU32(0, 2) }),
+  ],
+  // A Bootstrap pipeline is a `SingleCapPipeline`: even a lone noop is invalid.
+  "bootstrap-noop-transform": [
+    bootstrap(0),
+    call({ q: 1, method: M.ping, target: (t) => targetAnswer(t, 0, [-1]), params: (p) => p.setU32(0, 1) }),
   ],
   // Gap 15 and 16: a deprecated named bootstrap.
   "named-bootstrap": [

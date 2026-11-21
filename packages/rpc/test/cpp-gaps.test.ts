@@ -428,6 +428,42 @@ describe("bootstrap answers (rpc.c++ handleBootstrap)", () => {
     expect(Return_which(ret)).toBe(Return.exception);
     expect(Exception_getReason(Return_getException(ret))).toBe("Invalid pipeline transform.");
   });
+
+  /** A promised-answer target whose transform is `ops`, with -1 for `noop`. */
+  const withOps = (t: StructBuilder, q: number, ops: number[]): void => {
+    t.setU16(4, 1);
+    const pa = t.initStruct(0, 1, 1);
+    pa.setU32(0, q);
+    let op = pa.initCompositeList(0, ops.length, 1, 0);
+    ops.forEach((f, i) => {
+      if (i > 0) op = op.nextElement();
+      if (f >= 0) {
+        op.setU16(0, 1);
+        op.setU16(2, f);
+      }
+    });
+  };
+
+  test("a transform of one noop is still a nonempty transform", () => {
+    const r = raw(ping);
+    r.send(bootstrap(0));
+    r.take();
+    r.send(call(1, (t) => withOps(t, 0, [-1])));
+    const ret = r.take()[0]!.body;
+    expect(Return_which(ret)).toBe(Return.exception);
+    expect(Exception_getReason(Return_getException(ret))).toBe("Invalid pipeline transform.");
+  });
+
+  test("a noop in a call answer's transform moves nowhere", () => {
+    const r = raw(returning(() => Client.local(ping)));
+    r.send(bootstrap(0));
+    r.send(call(1, (t) => toAnswer(t, 0)));
+    r.take();
+    r.send(call(2, (t) => withOps(t, 1, [-1, 0, -1]), undefined, (p) => p.setU32(0, 6)));
+    const ret = r.take()[0]!.body;
+    expect(Return_which(ret)).toBe(Return.results);
+    expect(Payload_getContent(Return_getResults(ret)).getU32(0)).toBe(7);
+  });
 });
 
 function provide(q: number, nonce: bigint): Uint8Array {
