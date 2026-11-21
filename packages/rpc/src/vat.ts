@@ -245,8 +245,21 @@ function exceptionTypeFromWire(n: number): ExceptionType {
 }
 
 function readException(exc: Ptr): RpcError {
-  if (exc.kind !== PtrKind.Struct) return new RpcError("peer sent an empty exception");
-  return new RpcError(Exception_getReason(exc), exceptionTypeFromWire(Exception_getType(exc)));
+  const e = structOrDefault(exc);
+  return new RpcError(Exception_getReason(e), exceptionTypeFromWire(Exception_getType(e)));
+}
+
+let emptyStruct: Ptr | undefined;
+
+/** `p`, or a struct with no fields when `p` is null: every field reads as its default. */
+function structOrDefault(p: Ptr): Ptr {
+  if (p.kind !== PtrKind.Null) return p;
+  if (emptyStruct === undefined) {
+    const b = new MessageBuilder();
+    b.initRoot(0, 0);
+    emptyStruct = CapnpMessage.fromFlat(b.toFlat()).root();
+  }
+  return emptyStruct;
 }
 
 /** A capability held for a third vat, and the Provide that arranged it. */
@@ -540,40 +553,43 @@ export class RpcConnection implements RemoteHost {
     const msg = CapnpMessage.fromFlat(frame);
     const root = msg.root();
     const which = Message_which(root);
+    // Every body is the union's one pointer. A null one reads as the
+    // default struct, as capnp-C++'s generated getters return.
+    const body = (get: (p: Ptr) => Ptr): Ptr => structOrDefault(get(root));
 
     switch (which) {
       case Message.bootstrap:
-        this.handleBootstrap(Message_getBootstrap(root));
+        this.handleBootstrap(body(Message_getBootstrap));
         break;
       case Message.call:
-        this.handleCall(Message_getCall(root));
+        this.handleCall(body(Message_getCall));
         break;
       case Message.finish:
-        this.handleFinish(Message_getFinish(root));
+        this.handleFinish(body(Message_getFinish));
         break;
       case Message.release:
-        this.handleRelease(Message_getRelease(root));
+        this.handleRelease(body(Message_getRelease));
         break;
       case Message.resolve:
-        this.handleResolve(Message_getResolve(root));
+        this.handleResolve(body(Message_getResolve));
         break;
       case Message.join:
-        this.handleJoin(Message_getJoin(root));
+        this.handleJoin(body(Message_getJoin));
         break;
       case Message.disembargo:
-        this.handleDisembargo(Message_getDisembargo(root));
+        this.handleDisembargo(body(Message_getDisembargo));
         break;
       case Message.return:
-        this.handleReturn(Message_getReturn(root), frame);
+        this.handleReturn(body(Message_getReturn), frame);
         break;
       case Message.provide:
-        this.handleProvide(Message_getProvide(root));
+        this.handleProvide(body(Message_getProvide));
         break;
       case Message.accept:
-        this.handleAccept(Message_getAccept(root));
+        this.handleAccept(body(Message_getAccept));
         break;
       case Message.abort: {
-        const exc = readException(Message_getAbort(root));
+        const exc = readException(body(Message_getAbort));
         const reason = exc.message.startsWith("remote exception: ")
           ? exc.message
           : `remote exception: ${exc.message}`;
@@ -1433,10 +1449,6 @@ export class RpcConnection implements RemoteHost {
    * it sends `Finish` once the recipient has been told where to go.
    */
   private handleProvide(provide: Ptr): void {
-    // The peer chooses the message shape, so a truncated one is a
-    // protocol error to answer rather than a reason to throw out of the
-    // message loop.
-    if (provide.kind !== PtrKind.Struct) return;
     const questionId = Provide_getQuestionId(provide);
     if (this.answers.has(questionId)) {
       this.abort(new RpcError(`provide reuses question id ${questionId} still in use`));
@@ -1462,7 +1474,6 @@ export class RpcConnection implements RemoteHost {
    * learns it take the capability again later.
    */
   private handleAccept(accept: Ptr): void {
-    if (accept.kind !== PtrKind.Struct) return;
     const questionId = Accept_getQuestionId(accept);
     if (this.answers.has(questionId)) {
       this.abort(new RpcError(`accept reuses question id ${questionId} still in use`));
@@ -1500,7 +1511,6 @@ export class RpcConnection implements RemoteHost {
   // --- answering ------------------------------------------------------
 
   private handleBootstrap(bootstrap: Ptr): void {
-    if (bootstrap.kind !== PtrKind.Struct) return;
     const questionId = Bootstrap_getQuestionId(bootstrap);
     if (this.answers.has(questionId)) {
       this.abort(new RpcError(`bootstrap reuses question id ${questionId} still in use`));
@@ -1523,7 +1533,6 @@ export class RpcConnection implements RemoteHost {
   }
 
   private handleCall(call: Ptr): void {
-    if (call.kind !== PtrKind.Struct) return;
     const questionId = Call_getQuestionId(call);
     if (this.answers.has(questionId)) {
       this.abort(new RpcError(`call reuses question id ${questionId} still in use`));
@@ -2081,7 +2090,6 @@ export class RpcConnection implements RemoteHost {
    * this transport does not have.
    */
   private handleJoin(join: Ptr): void {
-    if (join.kind !== PtrKind.Struct) return;
     const questionId = Join_getQuestionId(join);
     if (this.answers.has(questionId)) {
       this.abort(new RpcError(`join reuses question id ${questionId} still in use`));

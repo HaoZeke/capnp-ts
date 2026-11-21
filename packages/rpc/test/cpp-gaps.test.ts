@@ -325,3 +325,48 @@ describe("capability-free returns need no Finish (rpc.c++ sendReturn)", () => {
     expect(Return_getNoFinishNeeded(ret)).toBe(true);
   });
 });
+
+describe("null message bodies read as defaults (rpc.c++ handleMessage)", () => {
+  const seen: Array<[bigint, number]> = [];
+  const recorder: RpcServer = {
+    dispatch(iface, method) {
+      seen.push([iface, method]);
+    },
+  };
+
+  test("a null Call body is a call to export 0", () => {
+    seen.length = 0;
+    const r = raw(recorder);
+    r.send(bootstrap(5));
+    r.send(frame(Message.call));
+    const out = r.take();
+    expect(out.map((m) => m.which)).toEqual([Message.return, Message.return]);
+    expect(Return_getAnswerId(out[1]!.body)).toBe(0);
+    expect(seen).toEqual([[0n, 0]]);
+  });
+
+  test("a null Call body with nothing exported aborts as a bad target", () => {
+    const r = raw(recorder);
+    r.send(frame(Message.call));
+    const out = r.take();
+    expect(out.map((m) => m.which)).toEqual([Message.abort]);
+    expect(Exception_getReason(out[0]!.body)).toBe("Message target is not a current export ID.");
+  });
+
+  test("a null Bootstrap body is a bootstrap for question 0", () => {
+    const r = raw(recorder);
+    r.send(frame(Message.bootstrap));
+    const out = r.take();
+    expect(out.map((m) => m.which)).toEqual([Message.return]);
+    expect(Return_getAnswerId(out[0]!.body)).toBe(0);
+    expect(capKinds(out[0]!.body)).toEqual([CapDescriptor.senderHosted]);
+  });
+
+  test("a null Abort body is an empty remote exception", () => {
+    const r = raw(recorder);
+    r.send(frame(Message.abort));
+    const out = r.take();
+    expect(out.map((m) => m.which)).toEqual([Message.abort]);
+    expect(Exception_getReason(out[0]!.body)).toBe("remote exception: ");
+  });
+});
