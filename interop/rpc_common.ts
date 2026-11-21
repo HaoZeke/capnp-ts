@@ -45,9 +45,15 @@ export function attach(sock: Socket, bootstrap?: RpcServer | Client): RpcConnect
       conn.abort(new RpcError(e instanceof Error ? e.message : String(e)));
       sock.destroy();
     }
+    // capnp-C++ closes the stream once the connection is gone.
+    if (conn.disconnected !== undefined) sock.end();
   };
   sock.on("data", (chunk: Buffer) => {
-    transport.feed(new Uint8Array(chunk));
+    try {
+      transport.feed(new Uint8Array(chunk));
+    } catch (e) {
+      conn.abort(new RpcError(e instanceof Error ? e.message : String(e)));
+    }
     drain();
   });
   const gone = (): void => conn.disconnect(new RpcError("connection closed", "disconnected"));
@@ -129,7 +135,12 @@ export class EchoImpl implements RpcServer {
     results: StructBuilder,
     ctx: CallContext,
   ): void | Promise<void> {
-    if (interfaceId !== ECHO_INTERFACE_ID) throw new RpcError("wrong interface", "unimplemented");
+    if (interfaceId !== ECHO_INTERFACE_ID) {
+      throw new RpcError(
+        `Requested interface not implemented.; actualInterfaceName = interop.capnp:Echo; requestedTypeId = ${interfaceId}`,
+        "unimplemented",
+      );
+    }
     const m = Echo_methods;
     switch (methodId) {
       case m.ping.ordinal:

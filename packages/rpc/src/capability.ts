@@ -115,14 +115,14 @@ export class Payload {
    * reference. This is what a pipelined call addresses.
    */
   getPipelinedCap(ops: readonly number[]): ClientHook {
-    let cursor = this.content;
+    let pos = this.content;
     for (const field of ops) {
-      if (cursor.kind !== PtrKind.Struct) {
+      if (pos.kind !== PtrKind.Struct) {
         return new BrokenClient(new RpcError("pipeline path walks into a non-struct"));
       }
-      cursor = cursor.getP(field);
+      pos = pos.getP(field);
     }
-    return this.getCap(cursor);
+    return this.getCap(pos);
   }
 
   release(): void {
