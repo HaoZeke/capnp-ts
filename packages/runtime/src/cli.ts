@@ -24,7 +24,12 @@ import {
 } from "./dynamic.ts";
 import { loadU32 } from "./endian.ts";
 import { CapnpError, MAX_SEGMENTS, WORD_BYTES, assertCapnp } from "./kinds.ts";
-import { decodeJson, encodeJsonBytes, splitJsonMessages } from "./json.ts";
+import {
+  decodeJson,
+  encodeJsonBytes,
+  type JsonAnnotationMode,
+  splitJsonMessages,
+} from "./json.ts";
 import { Message } from "./message.ts";
 import { pack, unpack } from "./packed.ts";
 import { SchemaLoader, StructSchema, Type } from "./schema.ts";
@@ -337,10 +342,11 @@ export interface WriteFormatOptions {
   short?: boolean;
   segmentSize?: number;
   /**
-   * Apply `$Json` annotations. `capnp convert` compiles and applies them.
-   * `capnp eval` drops annotations, so eval passes false.
+   * `$Json` annotation handling for JSON output. `capnp convert` applies
+   * them. `capnp eval` keeps the annotated struct layout but applies none,
+   * so eval passes `"layoutOnly"`.
    */
-  annotations?: boolean;
+  annotations?: JsonAnnotationMode;
 }
 
 function rebuildMessageRoot(msg: Message, segmentSize = 0): MessageBuilder {
@@ -1160,8 +1166,7 @@ export async function runCli(
       const out = formatEvaluatedValue(value, type, outFmt, {
         short: flags.short,
         segmentSize: flags.segmentSize,
-        // eval drops annotations; convert is what applies $Json names.
-        annotations: false,
+        annotations: "layoutOnly",
       });
       writeOut(out);
       return 0;

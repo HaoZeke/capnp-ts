@@ -535,6 +535,8 @@ describe("capnp-ts CLI (encode, decode, convert, eval)", () => {
       for (const [extraFlags, expr] of [
         [[], "extremeConst"],
         [["--short"], "extremeConst"],
+        [["-ojson"], "extremeConst"],
+        [["--short", "-ojson"], "extremeConst"],
         [["-ocanonical"], "extremeConst"],
         [[], "magicAnswer"],
         [[], "greetingList"],
@@ -917,4 +919,37 @@ describe("CLI options and invalid text input follow capnp", () => {
       }
     },
   );
+});
+
+describe("eval -o json goldens from capnp 1.4.0", () => {
+  const unionCgr = join(goldenDir, "eval-unions.cgr.bin");
+  const ksCgr = join(goldenDir, "dynamic-kitchen.cgr.bin");
+  const cases: [string, string][] = [
+    [ksCgr, "extremeConst"],
+    ...[
+      "emptyDefault",
+      "unsetArms",
+      "numArm",
+      "tagArm",
+      "groupArm",
+      "voidArm",
+      "nested",
+      "custom",
+      "customFlat",
+      "customEmpty",
+    ].map((c): [string, string] => [unionCgr, c]),
+  ];
+
+  for (const [cgr, name] of cases) {
+    for (const short of [false, true]) {
+      test(`${name}${short ? " --short" : ""} matches byte for byte`, async () => {
+        const argv = ["eval", ...(short ? ["--short"] : []), "-ojson", cgr, name];
+        const ours = await execCliInMemory(argv);
+        expect(ours.code).toBe(0);
+        const golden = readGolden(`eval-json/${name}${short ? ".short" : ""}.json`);
+        expect(new TextDecoder().decode(ours.stdout)).toBe(new TextDecoder().decode(golden));
+        expect(ours.stdout).toEqual(golden);
+      });
+    }
+  }
 });

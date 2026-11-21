@@ -85,10 +85,29 @@ MSG
 MSG
 fi
 
+# `capnp eval -o json` output for constants whose JSON depends on union
+# placement. The schema is compiled from schema/ so the request names stay
+# relative.
+EVAL_JSON_CONSTS="emptyDefault unsetArms numArm tagArm groupArm voidArm nested custom customFlat customEmpty"
+mkdir -p "$FIX/eval-json"
+(cd "$ROOT/schema" && capnp compile -o- eval-unions.capnp) >"$FIX/eval-unions.cgr.bin"
+EVAL_JSON_FILES="eval-unions.cgr.bin"
+for c in extremeConst; do
+  capnp eval -o json "$ROOT/schema/dynamic-kitchen.capnp" "$c" >"$FIX/eval-json/$c.json"
+  capnp eval --short -o json "$ROOT/schema/dynamic-kitchen.capnp" "$c" >"$FIX/eval-json/$c.short.json"
+  EVAL_JSON_FILES="$EVAL_JSON_FILES eval-json/$c.json eval-json/$c.short.json"
+done
+for c in $EVAL_JSON_CONSTS; do
+  capnp eval -o json "$ROOT/schema/eval-unions.capnp" "$c" >"$FIX/eval-json/$c.json"
+  capnp eval --short -o json "$ROOT/schema/eval-unions.capnp" "$c" >"$FIX/eval-json/$c.short.json"
+  EVAL_JSON_FILES="$EVAL_JSON_FILES eval-json/$c.json eval-json/$c.short.json"
+done
+
 if [[ $CHECK -eq 1 ]]; then
   rc=0
   for f in addressbook.bin addressbook.packed.bin addressbook.canonical.bin \
-           calculator_add_2_3.bin calculator_value_5.bin calculator_mul_add.bin; do
+           calculator_add_2_3.bin calculator_value_5.bin calculator_mul_add.bin \
+           $EVAL_JSON_FILES; do
     [[ -e "$FIX/$f" ]] || continue
     if cmp -s "$FIX/$f" "$REAL/$f"; then
       echo "ok   $f matches $(capnp --version)"

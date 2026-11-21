@@ -856,12 +856,13 @@ class AnnotatedStructHandler implements JsonCustomHandler {
     discriminator: DiscriminatorSpec | null,
     unionDeclName: string | null,
     dependencies: Schema[],
+    readAnnotations: boolean,
   ) {
     this.schema = schema;
     this.discriminantOffset = schema.discriminantOffset;
 
     let discSpec = discriminator;
-    if (!discSpec) {
+    if (!discSpec && readAnnotations) {
       const structDisc = schema.findAnnotation(JSON_DISCRIMINATOR_ANNOTATION_ID);
       if (structDisc && structDisc.rawValue.which === "struct") {
         discSpec = readDiscriminatorPtr(structDisc.rawValue.ptr);
@@ -887,7 +888,7 @@ class AnnotatedStructHandler implements JsonCustomHandler {
       let flattened = false;
       let subDisc: DiscriminatorSpec | null = null;
 
-      for (const anno of field.getAnnotations()) {
+      for (const anno of readAnnotations ? field.getAnnotations() : []) {
         if (anno.id === JSON_NAME_ANNOTATION_ID && anno.rawValue.which === "text") {
           fName = anno.rawValue.value;
         } else if (anno.id === JSON_FLATTEN_ANNOTATION_ID) {
@@ -926,6 +927,7 @@ class AnnotatedStructHandler implements JsonCustomHandler {
           subDisc,
           subName,
           dependencies,
+          readAnnotations,
         );
         if (flattened) flattenHandler = subH;
       } else if (fType.isStruct() && flattened) {
@@ -934,6 +936,7 @@ class AnnotatedStructHandler implements JsonCustomHandler {
           null,
           null,
           dependencies,
+          readAnnotations,
         );
       }
 
@@ -1304,6 +1307,7 @@ export class JsonCodec {
     discriminator: DiscriminatorSpec | null,
     unionDeclName: string | null,
     dependencies: Schema[],
+    readAnnotations = true,
   ): AnnotatedStructHandler {
     const key = schema.brandKey;
     const state = this.annotatedStructs.get(key);
@@ -1322,6 +1326,7 @@ export class JsonCodec {
       discriminator,
       unionDeclName,
       dependencies,
+      readAnnotations,
     );
     this.annotatedStructs.set(key, handler);
     this.addTypeHandler(schema, handler);
@@ -1331,15 +1336,20 @@ export class JsonCodec {
   /**
    * Inspect `schema` and all transitive field dependencies for `$Json`
    * annotations (`name`, `flatten`, `discriminator`, `base64`, `hex`).
+   *
+   * With `readAnnotations: false`, structs keep the annotated layout (the
+   * active union member last, a null default member still written) and no
+   * annotation applies. `capnp eval -o json` 1.4.0 encodes this way.
    */
-  handleByAnnotation(schema: Schema): void {
+  handleByAnnotation(schema: Schema, opts?: { readAnnotations?: boolean }): void {
+    const readAnnotations = opts?.readAnnotations ?? true;
     if (schema.which === "struct") {
       const deps: Schema[] = [];
-      this._loadAnnotatedStructHandler(schema.asStruct(), null, null, deps);
+      this._loadAnnotatedStructHandler(schema.asStruct(), null, null, deps, readAnnotations);
       for (const dep of deps) {
-        this.handleByAnnotation(dep);
+        this.handleByAnnotation(dep, opts);
       }
-    } else if (schema.which === "enum") {
+    } else if (schema.which === "enum" && readAnnotations) {
       const es = schema.asEnum();
       if (!this.annotatedEnums.has(es.brandKey)) {
         this.annotatedEnums.add(es.brandKey);
@@ -1922,16 +1932,14 @@ export function encodeJson(
   opts?: {
     pretty?: boolean;
     hasMode?: HasMode;
-    annotations?: boolean;
+    annotations?: JsonAnnotationMode;
   },
 ): string {
   const codec = new JsonCodec({
     prettyPrint: opts?.pretty ?? false,
     hasMode: opts?.hasMode ?? HasMode.NON_NULL,
   });
-  if (opts?.annotations ?? true) {
-    codec.handleByAnnotation(value.getSchema());
-  }
+  applyAnnotationMode(codec, value.getSchema(), opts?.annotations ?? true);
   return codec.encode(value);
 }
 
@@ -1944,17 +1952,35 @@ export function encodeJsonBytes(
   opts?: {
     pretty?: boolean;
     hasMode?: HasMode;
-    annotations?: boolean;
+    annotations?: JsonAnnotationMode;
   },
 ): Uint8Array {
   const codec = new JsonCodec({
     prettyPrint: opts?.pretty ?? false,
     hasMode: opts?.hasMode ?? HasMode.NON_NULL,
   });
-  if (opts?.annotations ?? true) {
-    codec.handleByAnnotation(value.getSchema());
-  }
+  applyAnnotationMode(codec, value.getSchema(), opts?.annotations ?? true);
   return codec.encodeBytes(value);
+}
+
+/**
+ * How `encodeJson` treats `$Json` annotations: `true` applies them like
+ * `capnp convert`, `false` uses the plain `JsonCodec` layout, and
+ * `"layoutOnly"` lays structs out as the annotated handler does without
+ * applying any annotation, like `capnp eval -o json`.
+ */
+export type JsonAnnotationMode = boolean | "layoutOnly";
+
+function applyAnnotationMode(
+  codec: JsonCodec,
+  schema: StructSchema,
+  mode: JsonAnnotationMode,
+): void {
+  if (mode === "layoutOnly") {
+    codec.handleByAnnotation(schema, { readAnnotations: false });
+  } else if (mode) {
+    codec.handleByAnnotation(schema);
+  }
 }
 
 /**
