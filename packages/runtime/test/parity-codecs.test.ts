@@ -16,6 +16,7 @@ import {
   SchemaLoader,
   TextCodec,
   canonicalize,
+  canonicalizeFlat,
   decodeText,
   isCanonical,
   pack,
@@ -78,7 +79,9 @@ describe("stream framing against capnp 1.4.0", () => {
       return out;
     };
     expect(Message.fromFlat(one(511)).segmentCount).toBe(511);
-    expect(() => Message.fromFlat(one(512))).toThrow(/too many segments/);
+    expect(Message.fromFlat(one(512)).segmentCount).toBe(512);
+    expect(Message.fromFlat(one(513)).segmentCount).toBe(513);
+    expect(() => canonicalizeFlat(one(513))).not.toThrow();
   });
 
   test("W-03 stream framing checks total words against the traversal limit", () => {

@@ -8,20 +8,26 @@
  */
 import type { Transport } from "./transport.ts";
 
-const MAX_SEGMENTS = 511;
-
-/** Bytes the frame starting at `buf[0]` occupies, or 0 if incomplete. */
+/**
+ * Bytes the frame starting at `buf[0]` occupies, or 0 if incomplete.
+ *
+ * As capnp-C++ `BufferedMessageStream` reads RPC frames, any segment
+ * count is accepted.
+ */
 export function frameLength(buf: Uint8Array): number {
-  if (buf.length < 4) return 0;
+  if (buf.length < 8) return 0;
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  const nsegs = view.getUint32(0, true) + 1;
-  if (nsegs > MAX_SEGMENTS) throw new Error(`bad segment count ${nsegs}`);
-  let table = 4 + nsegs * 4;
-  if (table % 8 !== 0) table += 4;
-  if (buf.length < table) return 0;
-  let words = 0;
-  for (let i = 0; i < nsegs; i++) words += view.getUint32(4 + i * 4, true);
-  const total = table + words * 8;
+  const first = view.getUint32(0, true);
+  if (first === 0xffffffff) {
+    throw new Error("expected segmentCount != 0 [0 != 0]; Message segment count too large, caused overflow.");
+  }
+  const nsegs = first + 1;
+  const tableWords = Math.floor(nsegs / 2) + 1;
+  const known = Math.min(nsegs, Math.floor(buf.length / 8) * 2 - 1);
+  let words = tableWords;
+  for (let i = 0; i < known; i++) words += view.getUint32(4 + i * 4, true);
+  if (known < nsegs) return 0;
+  const total = words * 8;
   return buf.length < total ? 0 : total;
 }
 

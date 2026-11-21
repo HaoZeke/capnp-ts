@@ -232,14 +232,18 @@ describe("flow controller", () => {
 });
 
 describe("stream framing", () => {
-  test("accepts 511 segments and rejects 512", () => {
-    const accepted = new Uint8Array(2048);
-    new DataView(accepted.buffer).setUint32(0, 510, true);
-    expect(frameLength(accepted)).toBe(accepted.length);
-
-    const rejected = new Uint8Array(2056);
-    new DataView(rejected.buffer).setUint32(0, 511, true);
-    expect(() => frameLength(rejected)).toThrow("bad segment count 512");
+  // capnp-C++ reads RPC frames with FlatArrayMessageReader, which has no
+  // segment cap; only InputStreamMessageReader stops at 511.
+  test("accepts 511, 512 and 1000 segments", () => {
+    for (const [n, bytes] of [
+      [511, 2048],
+      [512, 2056],
+      [1000, 4008],
+    ] as const) {
+      const frame = new Uint8Array(bytes);
+      new DataView(frame.buffer).setUint32(0, n - 1, true);
+      expect(frameLength(frame)).toBe(frame.length);
+    }
   });
 });
 

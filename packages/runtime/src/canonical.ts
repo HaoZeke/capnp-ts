@@ -257,7 +257,10 @@ export function canonicalize(
 ): Uint8Array {
   // Fresh Message over the same segment bodies so traversal budget is full
   // and the caller's charge counter is left alone.
-  const fresh = Message.fromSegments(message.segments, limits);
+  const fresh = Message.fromSegments(message.segments, {
+    ...limits,
+    segmentLimit: message.segments.length,
+  });
   const root = fresh.root();
   const b = new CanonBuilder(Math.max(64, estimateWords(fresh)));
   const rootWord = b.alloc(1);

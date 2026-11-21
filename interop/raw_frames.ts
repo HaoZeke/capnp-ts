@@ -278,6 +278,8 @@ const SCENARIOS: Record<string, Step[]> = {
   "segments-1000": [manySegments(bootstrap(0), 1000)],
   // Gap 3: a frame larger than the traversal limit.
   "oversize-frame": [header(8 * 1024 * 1024 + 1)],
+  // Gap 10: a segment count that overflows.
+  "segment-overflow": [new Uint8Array([255, 255, 255, 255, 0, 0, 0, 0])],
   // Gap 11: a capability-free return.
   "no-finish-needed": [
     bootstrap(0),

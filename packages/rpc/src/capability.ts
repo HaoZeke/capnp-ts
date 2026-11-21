@@ -162,7 +162,9 @@ export class CallBuilder {
 
   /** The readable view; the builder gives up its capabilities to it. */
   toPayload(): Payload {
-    const root = CapnpMessage.fromFlat(this.message.toFlat()).root();
+    const root = CapnpMessage.fromFlat(this.message.toFlat(), {
+      maxSegments: Number.MAX_SAFE_INTEGER,
+    }).root();
     return new Payload(root, this.caps.splice(0));
   }
 }

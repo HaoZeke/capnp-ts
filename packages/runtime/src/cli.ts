@@ -127,7 +127,12 @@ function* iterateFramedMessages(input: Uint8Array): Generator<Message> {
       "FRAMING",
       "truncated segment body in stream",
     );
-    yield Message.fromFlat(input.subarray(offset, offset + frameBytes), CLI_READ_LIMITS);
+    // `capnp` reads streams with `InputStreamMessageReader`, which caps a
+    // frame at 511 segments.
+    yield Message.fromFlat(input.subarray(offset, offset + frameBytes), {
+      ...CLI_READ_LIMITS,
+      maxSegments: 511,
+    });
     offset += frameBytes;
   }
 }

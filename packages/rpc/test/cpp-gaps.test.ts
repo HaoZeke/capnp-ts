@@ -48,6 +48,7 @@ import {
   Return_getResults,
   Return_which,
 } from "../src/rpc.capnp.ts";
+import { frameLength } from "../src/socket.ts";
 import { MemoryTransportPair } from "../src/transport.ts";
 import { RpcConnection, Vat } from "../src/vat.ts";
 
@@ -724,5 +725,42 @@ describe("membranes (membrane.c++)", () => {
     policy.revoke("gone");
     const pending = new Promise((r) => setTimeout(() => r("still pending"), 50));
     expect(await Promise.race([flushed, pending])).toBe("gone");
+  });
+});
+
+/** `f`, a one-segment frame, re-framed with empty segments to `n` in all. */
+function withSegments(f: Uint8Array, n: number): Uint8Array {
+  const words = new DataView(f.buffer, f.byteOffset).getUint32(4, true);
+  let table = 4 + 4 * n;
+  if (table % 8 !== 0) table += 4;
+  const out = new Uint8Array(table + words * 8);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, n - 1, true);
+  view.setUint32(4, words, true);
+  out.set(f.subarray(8, 8 + words * 8), table);
+  return out;
+}
+
+describe("RPC frames are flat arrays (serialize-async.c++ BufferedMessageStream)", () => {
+  for (const n of [512, 1000]) {
+    test(`a ${n}-segment frame is read`, () => {
+      const f = withSegments(bootstrap(0), n);
+      expect(frameLength(f)).toBe(f.length);
+      const r = raw(ping);
+      r.send(f);
+      const out = r.take();
+      expect(out.map((m) => m.which)).toEqual([Message.return]);
+      expect(r.vat.disconnected).toBeUndefined();
+    });
+  }
+
+  test("a segment count that overflows is refused", () => {
+    expect(() => frameLength(new Uint8Array([255, 255, 255, 255, 0, 0, 0, 0]))).toThrow(
+      "expected segmentCount != 0 [0 != 0]; Message segment count too large, caused overflow.",
+    );
+  });
+
+  test("a flat reader accepts 512 segments", () => {
+    expect(CapnpMessage.fromFlat(withSegments(bootstrap(0), 512)).segmentCount).toBe(512);
   });
 });

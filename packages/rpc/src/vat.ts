@@ -294,6 +294,9 @@ function messageTargetText(t: Ptr): string {
   }
 }
 
+/** RPC frames are read as capnp-C++ `FlatArrayMessageReader` reads them, with no segment cap. */
+const RPC_FRAME = { maxSegments: Number.MAX_SAFE_INTEGER };
+
 let emptyStruct: Ptr | undefined;
 
 /** `p`, or a struct with no fields when `p` is null: every field reads as its default. */
@@ -605,7 +608,7 @@ export class RpcConnection implements RemoteHost {
   }
 
   private dispatchFrame(frame: Uint8Array): void {
-    const msg = CapnpMessage.fromFlat(frame);
+    const msg = CapnpMessage.fromFlat(frame, RPC_FRAME);
     const root = msg.root();
     const which = Message_which(root);
     // Every body is the union's one pointer. A null one reads as the
@@ -2311,7 +2314,7 @@ export class RpcConnection implements RemoteHost {
 
   /** Echo a message we did not understand, per the spec. */
   private sendUnimplemented(frame: Uint8Array): void {
-    const incoming = CapnpMessage.fromFlat(frame).root();
+    const incoming = CapnpMessage.fromFlat(frame, RPC_FRAME).root();
     const { b, root } = newMessage(Message.unimplemented);
     root.setP(0, incoming);
     this.transport.send(b.toFlat());

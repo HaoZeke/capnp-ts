@@ -97,6 +97,13 @@ export interface RecoverableReadError {
   readonly location: string;
 }
 
+export interface FlatOptions {
+  traversalWords?: number;
+  depthLimit?: number;
+  /** Most segments a frame may have. */
+  maxSegments?: number;
+}
+
 export class Message {
   /** Internal segment views (data + word count). */
   readonly segs: SegmentView[];
@@ -135,19 +142,18 @@ export class Message {
     return this.segs.map((s) => s.data.subarray(0, s.words * WORD_BYTES));
   }
 
-  /** Parse stream-framed message, copying so the input buffer may be reused. */
-  static fromFlat(
-    data: Uint8Array,
-    opts?: { traversalWords?: number; depthLimit?: number },
-  ): Message {
+  /**
+   * Parse stream-framed message, copying so the input buffer may be reused.
+   * capnp-C++ `FlatArrayMessageReader` has no segment cap. Pass
+   * `maxSegments` to apply one. `InputStreamMessageReader` and the packed
+   * reader cap the count at 511.
+   */
+  static fromFlat(data: Uint8Array, opts?: FlatOptions): Message {
     return Message.parseFlat(data, true, opts);
   }
 
   /** Zero-copy view of stream-framed message; data must outlive the Message. */
-  static viewFlat(
-    data: Uint8Array,
-    opts?: { traversalWords?: number; depthLimit?: number },
-  ): Message {
+  static viewFlat(data: Uint8Array, opts?: FlatOptions): Message {
     return Message.parseFlat(data, false, opts);
   }
 
@@ -157,9 +163,10 @@ export class Message {
    */
   static fromSegments(
     segs: SegmentInput[],
-    opts?: { traversalWords?: number; depthLimit?: number },
+    opts?: { traversalWords?: number; depthLimit?: number; segmentLimit?: number },
   ): Message {
-    assertCapnp(segs.length > 0 && segs.length <= MAX_SEGMENTS, "FRAMING");
+    const limit = opts?.segmentLimit ?? MAX_SEGMENTS;
+    assertCapnp(segs.length > 0 && segs.length <= limit, "FRAMING");
     const views = segs.map(asView);
     for (let i = 0; i < views.length; i++) {
       const s = views[i]!;
@@ -224,22 +231,31 @@ export class Message {
     return this.traversalLeft;
   }
 
-  private static parseFlat(
-    data: Uint8Array,
-    copy: boolean,
-    opts?: { traversalWords?: number; depthLimit?: number },
-  ): Message {
+  private static parseFlat(data: Uint8Array, copy: boolean, opts?: FlatOptions): Message {
     assertCapnp(data.length >= 8, "FRAMING", "message shorter than 8 bytes");
-    const nsegs = loadU32(data, 0) + 1;
-    // InputStreamMessageReader rejects segmentCount-1 >= 511 (at most 511 segments).
-    assertCapnp(
-      nsegs > 0 && nsegs <= 511,
-      "FRAMING",
-      "Message has too many segments.",
-    );
+    const first = loadU32(data, 0);
+    // FlatArrayMessageReader rejects only the uint32 wrap, not a 511 cap.
+    if (first === 0xffffffff) {
+      throw new CapnpError(
+        "FRAMING",
+        "expected segmentCount != 0 [0 != 0]; Message segment count too large, caused overflow.",
+      );
+    }
+    const nsegs = first + 1;
+    if (opts?.maxSegments !== undefined) {
+      assertCapnp(nsegs <= opts.maxSegments, "FRAMING", "Message has too many segments.");
+    }
     let tableBytes = 4 + 4 * nsegs;
     if (tableBytes % 8 !== 0) tableBytes += 4;
-    assertCapnp(data.length >= tableBytes, "FRAMING", "truncated segment table");
+    const arrayWords = Math.floor(data.length / WORD_BYTES);
+    // FlatArrayMessageReader::init sizes the table as segmentCount/2 + 1 words.
+    let offset = Math.floor(nsegs / 2) + 1;
+    if (arrayWords < offset) {
+      throw new CapnpError(
+        "FRAMING",
+        `expected array.size() >= offset [${arrayWords} >= ${offset}]; Message ends prematurely in segment table.`,
+      );
+    }
 
     const sizes: number[] = [];
     let totalWords = 0;
@@ -253,8 +269,19 @@ export class Message {
       "TRAVERSAL",
       "Message is too large.",
     );
+    for (let i = 0; i < nsegs; i++) {
+      const segmentSize = sizes[i]!;
+      if (arrayWords < offset + segmentSize) {
+        const where = i === 0 ? "Message ends prematurely in first segment." : "Message ends prematurely.";
+        throw new CapnpError(
+          "FRAMING",
+          `expected array.size() >= offset + segmentSize [${arrayWords} >= ${offset + segmentSize}]; ${where}`,
+        );
+      }
+      offset += segmentSize;
+    }
     const body = tableBytes + totalWords * WORD_BYTES;
-    assertCapnp(body <= data.length, "FRAMING", "truncated segment body");
+
 
     const owned = copy ? data.slice(0, body) : undefined;
     const base = owned ?? data.subarray(0, body);
@@ -266,7 +293,11 @@ export class Message {
       segs.push({ data: base.subarray(off, off + nbytes), words });
       off += nbytes;
     }
-    return new Message(segs, { ...opts, owned });
+    return new Message(segs, {
+      traversalWords: opts?.traversalWords,
+      depthLimit: opts?.depthLimit,
+      owned,
+    });
   }
 }
 
