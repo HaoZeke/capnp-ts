@@ -996,7 +996,7 @@ export class DynamicOrphan {
 
   /** @internal */
   markConsumed(): void {
-    assertCapnp(this.isAlive, "ARG", "DynamicOrphan already adopted");
+    assertCapnp(!this.consumed, "ARG", "DynamicOrphan already adopted");
     this.consumed = true;
   }
 
@@ -3090,17 +3090,65 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
     assertCapnp(orphan.isAlive, "ARG", "DynamicOrphan already adopted");
     const elemType = this.schema.getElementType();
 
-    if (elemType.isStruct() || !elemType.isPointerType()) {
-      const r = orphan.getReader();
+    if (!elemType.isPointerType()) {
+      // C++ `set` reads an enum element with `as<DynamicEnum>()`, which
+      // refuses a plain integer.
+      assertCapnp(
+        !elemType.isEnum() ||
+          orphan.type === DynamicValueType.ENUM ||
+          orphan.type === DynamicValueType.TEXT,
+        "KIND",
+        "Value type mismatch.",
+      );
+      this.set(index, orphan.getReader());
       orphan.markConsumed();
-      orphan.orphan?.consume();
-      this.set(index, r);
       return;
     }
 
+    switch (elemType.whichCode) {
+      case TypeKind.Text:
+        assertCapnp(orphan.type === DynamicValueType.TEXT, "KIND", "Value type mismatch.");
+        break;
+      case TypeKind.Data:
+        assertCapnp(orphan.type === DynamicValueType.DATA, "KIND", "Value type mismatch.");
+        break;
+      case TypeKind.List:
+        assertCapnp(
+          orphan.type === DynamicValueType.LIST &&
+            orphan.listSchema === elemType.asList(),
+          "KIND",
+          "Value type mismatch.",
+        );
+        break;
+      case TypeKind.Struct: {
+        assertCapnp(
+          orphan.type === DynamicValueType.STRUCT &&
+            orphan.structSchema === elemType.asStruct(),
+          "KIND",
+          "Value type mismatch.",
+        );
+        this.set(index, orphan.getReader());
+        orphan.orphan?.consume();
+        orphan.markConsumed();
+        return;
+      }
+      case TypeKind.Interface:
+        assertCapnp(
+          orphan.type === DynamicValueType.CAPABILITY &&
+            orphan.interfaceSchema !== null &&
+            orphan.interfaceSchema.extends(elemType.asInterface()),
+          "KIND",
+          "Value type mismatch.",
+        );
+        break;
+      case TypeKind.AnyPointer:
+        assertCapnp(orphan.orphan !== null, "KIND", "Value type mismatch.");
+        break;
+    }
+
     const slot = new BuilderPointer(this.builder, this.seg, this.pointerWord(index));
-    orphan.markConsumed();
     this.builder.adopt(slot, orphan.orphan ?? Orphan.null());
+    orphan.markConsumed();
   }
 
   *[Symbol.iterator](): Iterator<DynamicValueBuilder> {

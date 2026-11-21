@@ -9,6 +9,8 @@ import {
   DynamicCapabilityServer,
   DynamicEnum,
   DynamicList,
+  type DynamicOrphan,
+  type DynamicSetValue,
   DynamicStruct,
   DynamicValue,
   ElemSize,
@@ -24,6 +26,7 @@ import {
   deepCopyPtrToSlot,
   newDynamicListOrphan,
   newDynamicStructOrphan,
+  stringify,
 } from "../src/index.ts";
 import { loadU32 } from "../src/endian.ts";
 
@@ -827,5 +830,126 @@ describe("dynamic list builder storage", () => {
     primRow.get(0).asStruct().set("key", "from-prim");
     expect(primRow.get(0).asStruct().get("key").asText()).toBe("from-prim");
     expect(primRow.get(0).asStruct().get("code").asInt32()).toBe(77);
+  });
+});
+
+describe("DynamicList.Builder.adopt", () => {
+  const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+  const tag = loader.resolveStruct("Tag");
+  const opts = loader.resolveStruct("JsonFlattenOptions");
+  const prio = loader.resolve("Priority").asEnum();
+  const base = loader.resolve("BaseService").asInterface();
+  const sub = loader.resolve("SubService").asInterface();
+  const i32List = ListSchema.of(Type.INT32);
+  const textList = ListSchema.of(Type.TEXT);
+
+  function disownOne(b: MessageBuilder, schema: ListSchema, value?: DynamicSetValue) {
+    const { builder: list } = newDynamicListOrphan(b, schema, 1);
+    if (value !== undefined) list.set(0, value);
+    return list.disown(0);
+  }
+
+  const sources: Record<string, (b: MessageBuilder) => DynamicOrphan> = {
+    void: (b) => disownOne(b, ListSchema.of(Type.VOID)),
+    bool: (b) => disownOne(b, ListSchema.of(Type.BOOL), true),
+    int: (b) => disownOne(b, i32List, 7),
+    float: (b) => disownOne(b, ListSchema.of(Type.FLOAT64), 2.5),
+    enum: (b) => disownOne(b, ListSchema.of(prio.asType()), new DynamicEnum(prio, 2)),
+    text: (b) => disownOne(b, textList, "hi"),
+    data: (b) => disownOne(b, ListSchema.of(Type.DATA), new Uint8Array([1, 2])),
+    "List(Int32)": (b) => {
+      const { orphan, builder } = newDynamicListOrphan(b, i32List, 2);
+      builder.set(0, 5);
+      builder.set(1, -6);
+      return orphan;
+    },
+    "List(Text)": (b) => {
+      const { orphan, builder } = newDynamicListOrphan(b, textList, 1);
+      builder.set(0, "t");
+      return orphan;
+    },
+    Tag: (b) => {
+      const { orphan, builder } = newDynamicStructOrphan(b, tag);
+      builder.set("key", "k");
+      builder.set("code", 3);
+      return orphan;
+    },
+    JsonFlattenOptions: (b) => {
+      const { orphan, builder } = newDynamicStructOrphan(b, opts);
+      builder.set("prefix", "p");
+      return orphan;
+    },
+    SubService: (b) =>
+      disownOne(b, ListSchema.of(sub.asType()), new DynamicCapability.Client(sub, 0)),
+  };
+
+  // Element kind, the orphans capnp 1.4.0 `DynamicList::Builder::adopt`
+  // accepts, and the element printed after each accepted adopt.
+  const targets: [string, ListSchema, Record<string, string>][] = [
+    ["Void", ListSchema.of(Type.VOID), { void: "void" }],
+    ["Bool", ListSchema.of(Type.BOOL), { bool: "true" }],
+    ["Int32", i32List, { int: "7" }],
+    ["Float64", ListSchema.of(Type.FLOAT64), { int: "7", float: "2.5" }],
+    ["Priority", ListSchema.of(prio.asType()), { enum: "high" }],
+    ["Text", textList, { text: '"hi"' }],
+    ["Data", ListSchema.of(Type.DATA), { data: '"\\001\\002"' }],
+    ["List(Int32)", ListSchema.of(i32List.asType()), { "List(Int32)": "[5, -6]" }],
+    ["Tag", ListSchema.of(tag.asType()), { Tag: '(key = "k", code = 3)' }],
+    ["BaseService", ListSchema.of(base.asType()), { SubService: "<external capability>" }],
+  ];
+
+  for (const [name, schema, accepted] of targets) {
+    test(`List(${name}) accepts and rejects orphans like capnp`, () => {
+      for (const [source, make] of Object.entries(sources)) {
+        const b = new MessageBuilder();
+        const { builder: list } = newDynamicListOrphan(b, schema, 1);
+        const orphan = make(b);
+        const expected = accepted[source];
+        if (expected === undefined) {
+          const before = stringify(orphan.getReader());
+          const slot = stringify(list.asReader().get(0));
+          expect(() => list.adopt(0, orphan), `${name} <- ${source}`).toThrow(CapnpError);
+          expect(orphan.isAlive, `${name} <- ${source}`).toBe(true);
+          expect(stringify(orphan.getReader())).toBe(before);
+          expect(stringify(list.asReader().get(0))).toBe(slot);
+        } else {
+          list.adopt(0, orphan);
+          expect(orphan.isAlive, `${name} <- ${source}`).toBe(false);
+          expect(stringify(list.asReader().get(0)), `${name} <- ${source}`).toBe(expected);
+          expect(() => list.adopt(0, orphan)).toThrow(CapnpError);
+        }
+      }
+    });
+  }
+
+  test("a rejected List(Int32) orphan leaves a List(Text) element readable", () => {
+    const b = new MessageBuilder();
+    const { builder: list } = newDynamicListOrphan(b, textList, 1);
+    list.set(0, "keep");
+    const orphan = sources["List(Int32)"]!(b);
+    expect(() => list.adopt(0, orphan)).toThrow("Value type mismatch.");
+    expect(list.asReader().get(0).asText()).toBe("keep");
+    const nested = newDynamicListOrphan(b, ListSchema.of(i32List.asType()), 1).builder;
+    nested.adopt(0, orphan);
+    expect(stringify(nested.asReader().get(0))).toBe("[5, -6]");
+  });
+
+  test("a pointer orphan from another message stays alive", () => {
+    const b = new MessageBuilder();
+    const other = new MessageBuilder();
+    const { builder: list } = newDynamicListOrphan(b, textList, 1);
+    const orphan = sources.text!(other);
+    expect(() => list.adopt(0, orphan)).toThrow("orphan from a different MessageBuilder");
+    expect(orphan.isAlive).toBe(true);
+    expect(orphan.getReader().asText()).toBe("hi");
+  });
+
+  test("a struct orphan from another message is copied into the element", () => {
+    const b = new MessageBuilder();
+    const { builder: list } = newDynamicListOrphan(b, ListSchema.of(tag.asType()), 1);
+    const orphan = sources.Tag!(new MessageBuilder());
+    list.adopt(0, orphan);
+    expect(orphan.isAlive).toBe(false);
+    expect(stringify(list.asReader().get(0))).toBe('(key = "k", code = 3)');
   });
 });
