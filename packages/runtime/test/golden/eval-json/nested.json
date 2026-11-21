@@ -1,0 +1,3 @@
+{ "arms": [{"textA": ""}, {"num": 1}, {"after": "x", "textA": ""}],
+  "inner": {"mid": 0, "a": null},
+  "named": {"second": {"tag": {"code": -42}}} }

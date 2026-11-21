@@ -964,7 +964,7 @@ function listLenHand(seg: Uint8Array, ptrByteOff: number, word: bigint): number 
   return wpListCount(word);
 }
 
-function readTextHand(seg: Uint8Array, ptrByteOff: number, word: bigint): string {
+export function readTextHand(seg: Uint8Array, ptrByteOff: number, word: bigint): string {
   if (word === 0n) return "";
   if (wpKind(word) !== WireKind.List) {
     throw new Error("CGR walk: Text is not a list pointer");
@@ -974,11 +974,13 @@ function readTextHand(seg: Uint8Array, ptrByteOff: number, word: bigint): string
   }
   const count = wpListCount(word);
   const body = nearBody(seg, ptrByteOff, word);
-  const n = Math.max(0, count - 1);
-  if (body + n > seg.length) {
+  if (body < 0 || body + count > seg.length) {
     throw new Error("CGR walk: Text overruns segment");
   }
-  return new TextDecoder().decode(seg.subarray(body, body + n));
+  if (count === 0 || seg[body + count - 1] !== 0) {
+    throw new Error("CGR walk: Text pointer is not NUL-terminated");
+  }
+  return new TextDecoder("utf-8", { ignoreBOM: true }).decode(seg.subarray(body, body + count - 1));
 }
 
 /** Single-segment near-pointer hand walk of CGR (counts + filenames only). */

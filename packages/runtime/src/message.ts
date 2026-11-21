@@ -36,6 +36,7 @@ import {
   wpFarSeg,
   wpFarTwo,
   wpKind,
+  wpCompositeElementCount,
   wpListCount,
   wpListEsize,
   wpOffset,
@@ -90,12 +91,23 @@ function asView(s: SegmentInput): SegmentView {
   return s;
 }
 
+/** An error capnp reports and then recovers from while reading. */
+export interface RecoverableReadError {
+  readonly description: string;
+  readonly location: string;
+}
+
 export class Message {
   /** Internal segment views (data + word count). */
   readonly segs: SegmentView[];
   traversalLeft: number;
   readonly depthLimit: number;
   owned?: Uint8Array;
+  /**
+   * Receives errors capnp recovers from while reading, after which the read
+   * continues with capnp's fallback. Without a handler they are thrown.
+   */
+  onRecoverable?: (error: RecoverableReadError) => void;
 
   private constructor(
     segs: SegmentView[],
@@ -176,6 +188,11 @@ export class Message {
     return loadU64(s.data, word * WORD_BYTES);
   }
 
+  recover(description: string, location: string): void {
+    if (!this.onRecoverable) throw new CapnpError("KIND", description);
+    this.onRecoverable({ description, location });
+  }
+
   /** Re-frame segments into a stream buffer. */
   copyFlat(): Uint8Array {
     const segs = this.segs;
@@ -244,6 +261,77 @@ export class Message {
 }
 
 
+const OUT_OF_BOUNDS_DETAIL =
+  "This usually indicates that the input data was corrupted, used a different encoding " +
+  "than specified (e.g. packed vs. non-packed), or was not a Cap'n Proto message to begin " +
+  "with. Note that this error is NOT due to a schema mismatch; the input is invalid " +
+  "regardless of schema.";
+
+function recoverNull(m: Message, description: string, line: number): true {
+  m.recover(description, `capnp/layout.c++:${line}`);
+  return true;
+}
+
+/**
+ * Whether the pointer word at `seg`/`word` reads as null, like C++
+ * `PointerReader::getPointerType`: far pointers are followed but the target
+ * is not bounds-checked, and malformed pointers count as null once the error
+ * is reported.
+ */
+function pointerWordIsNull(m: Message, seg: number, word: number): boolean {
+  let w = m.readWord(seg, word);
+  if (w === 0n) return true;
+  if (wpKind(w) === WireKind.Far) {
+    const tseg = wpFarSeg(w);
+    const toff = wpFarOff(w);
+    if (tseg >= m.segs.length) {
+      return recoverNull(
+        m,
+        "expected segment != nullptr [0 != nullptr]; Message contains far pointer to unknown segment.",
+        580,
+      );
+    }
+    if (toff + (wpFarTwo(w) ? 2 : 1) > m.segs[tseg]!.words) {
+      return recoverNull(
+        m,
+        "expected boundsCheck(segment, ptr, padWords); Message contains out-of-bounds far " +
+          `pointer. ${OUT_OF_BOUNDS_DETAIL}`,
+        587,
+      );
+    }
+    const pad = readWord(m, tseg, toff);
+    if (!wpFarTwo(w)) {
+      w = pad;
+    } else {
+      if (wpFarSeg(pad) >= m.segs.length) {
+        return recoverNull(
+          m,
+          "expected newSegment != nullptr [0 != nullptr]; Message contains double-far pointer to unknown segment.",
+          606,
+        );
+      }
+      if (wpKind(pad) !== WireKind.Far) {
+        return recoverNull(
+          m,
+          `expected pad->kind() == WirePointer::FAR [${wpKind(pad)} == 2]; Second word of double-far pad must be far pointer.`,
+          610,
+        );
+      }
+      w = readWord(m, tseg, toff + 1);
+    }
+  }
+  switch (wpKind(w)) {
+    case WireKind.Struct:
+    case WireKind.List:
+      return false;
+    case WireKind.Far:
+      return recoverNull(m, "far pointer not followed?", 2773);
+    default:
+      if ((w & 0xffffffffn) === 3n) return false;
+      return recoverNull(m, "expected ptr->isCapability(); unknown pointer type", 2779);
+  }
+}
+
 function boundsWord(m: Message, seg: number, word: number): void {
   assertCapnp(seg >= 0 && seg < m.segs.length, "SEGMENT");
   // Negative word offsets must not reach loadU64 (would throw TypeError/RangeError).
@@ -261,7 +349,7 @@ function readWord(m: Message, seg: number, word: number): bigint {
 function chargeWords(m: Message, words: number | bigint): void {
   const w = typeof words === "bigint" ? words : BigInt(words);
   assertCapnp(w >= 0n, "BOUNDS");
-  if (w > BigInt(m.traversalLeft)) {
+  if (m.traversalLeft !== Infinity && w > BigInt(m.traversalLeft)) {
     throw new CapnpError("TRAVERSAL");
   }
   m.charge(Number(w));
@@ -392,8 +480,8 @@ function finishList(
     }
     const tag = readWord(m, seg, start);
     assertCapnp(wpKind(tag) === WireKind.Struct, "KIND");
-    // Element count lives in the tag "offset" field as unsigned 30-bit.
-    const nelem = Number((tag >> 2n) & 0x3fff_ffffn);
+    // C++ masks this to 29 bits. The extra offset bit is not an element.
+    const nelem = wpCompositeElementCount(tag);
     const dwords = wpStructDwords(tag);
     const pwords = wpStructPwords(tag);
     const step = dwords + pwords;
@@ -402,8 +490,8 @@ function finishList(
       throw new CapnpError("BOUNDS");
     }
     if (step === 0) {
-      // A zero-size element carries no words, so the element count itself is
-      // the amplification. Charge one word per element.
+      // Zero-sized structs carry no words. C++ amplifiedRead charges one
+      // word per element so the count cannot outrun the traversal limit.
       chargeWords(m, nelem);
     }
     return Ptr.list(m, seg, start + 1, esize, nelem, dwords, pwords, step, depth);
@@ -620,6 +708,15 @@ export class Ptr {
     );
   }
 
+  /**
+   * Whether pointer slot `ptrIndex` is null, like C++ `PointerReader::isNull`.
+   * The target object is not resolved or bounds-checked.
+   */
+  isNullP(ptrIndex: number): boolean {
+    if (this.kind !== PtrKind.Struct || ptrIndex >= this.pwords) return true;
+    return pointerWordIsNull(this.msg, this.seg, this.word + this.dwords + ptrIndex);
+  }
+
   /** Alias for getP (canonical / C-style naming). */
   getp(ptrIndex: number): Ptr {
     return this.getP(ptrIndex);
@@ -632,12 +729,14 @@ export class Ptr {
       list.kind === PtrKind.List && list.esize === ElemSize.Byte,
       "KIND",
     );
-    if (list.count === 0) return "";
     const s = list.msg.segs[list.seg]!;
     const start = list.word * WORD_BYTES;
-    let n = list.count;
-    if (n > 0 && s.data[start + n - 1] === 0) n -= 1;
-    return new TextDecoder().decode(s.data.subarray(start, start + n));
+    assertCapnp(
+      list.count > 0 && s.data[start + list.count - 1] === 0,
+      "TEXT",
+      "Text pointer is not NUL-terminated",
+    );
+    return new TextDecoder("utf-8", { ignoreBOM: true }).decode(s.data.subarray(start, start + list.count - 1));
   }
 
   getData(ptrIndex: number, dflt: Uint8Array = EMPTY_DATA): Uint8Array {
@@ -784,9 +883,12 @@ export class Ptr {
       if (elem.kind === PtrKind.List && elem.esize === ElemSize.Byte) {
         const s = elem.msg.segs[elem.seg]!;
         const start = elem.word * WORD_BYTES;
-        let n = elem.count;
-        if (n > 0 && s.data[start + n - 1] === 0) n -= 1;
-        return new TextDecoder().decode(s.data.subarray(start, start + n));
+        assertCapnp(
+          elem.count > 0 && s.data[start + elem.count - 1] === 0,
+          "TEXT",
+          "Text pointer is not NUL-terminated",
+        );
+        return new TextDecoder("utf-8", { ignoreBOM: true }).decode(s.data.subarray(start, start + elem.count - 1));
       }
       throw new CapnpError("KIND");
     }
@@ -802,7 +904,7 @@ export class Ptr {
    * is 1 for a pointer list. Promotions and Bool-to-data reads throw SCHEMA.
    * A Bool reader may view a wider data list; the bool accessor then ignores step.
    */
-  private assertListCompat(expectedBits: number, expectedPointers: number): void {
+  assertListCompat(expectedBits: number, expectedPointers: number): void {
     if (this.esize === ElemSize.Composite) {
       if (expectedBits === 1 && expectedPointers === 0) {
         throw new CapnpError(

@@ -15,3 +15,7 @@ export * from "./packed.ts";
 export * from "./canonical.ts";
 export * from "./builder.ts";
 export * from "./copy.ts";
+export * from "./schema.ts";
+export * from "./dynamic.ts";
+export * from "./text.ts";
+export * from "./json.ts";

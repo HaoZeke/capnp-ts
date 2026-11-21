@@ -25,6 +25,7 @@ pycapnp bidirectional interop suite locally, provision the venv and fixtures:
 ```console
 python3 -m venv .venv-pycapnp
 .venv-pycapnp/bin/pip install --upgrade pip pycapnp
+.venv-pycapnp/bin/python scripts/pycapnp_interop.py check
 .venv-pycapnp/bin/python scripts/pycapnp_interop.py write-all
 CAPNP_REQUIRE_PYCAPNP=1 bun test --timeout 10000 packages/runtime/test/pycapnp-interop.test.ts
 ```

@@ -1,0 +1,1577 @@
+/**
+ * Cap'n Proto text-format encoder and decoder (models capnp/pretty-print.h
+ * and capnp/serialize-text.h, matching `capnp decode` and `capnp encode`).
+ */
+
+import { MessageBuilder } from "./builder.ts";
+import {
+  DynamicCapabilityClient,
+  DynamicEnum,
+  DynamicListBuilder,
+  DynamicListReader,
+  DynamicStructBuilder,
+  DynamicStructReader,
+  DynamicValueBuilder,
+  DynamicValueReader,
+  DynamicValueType,
+  initDynamicRoot,
+} from "./dynamic.ts";
+import { CapnpError, assertCapnp } from "./kinds.ts";
+import { Message } from "./message.ts";
+import {
+  ListSchema,
+  StructField,
+  StructSchema,
+  Type,
+  TypeKind,
+} from "./schema.ts";
+import { rawStringByteLength, rawStringToBytes, validUtf8SeqLen } from "./utf8.ts";
+
+const UTF8_ENC = new TextEncoder();
+const UTF8_DEC = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
+
+/**
+ * `Number.prototype.toExponential` rounds exact ties up, but glibc `printf`
+ * rounds them to even. Detect a tie with exact integer arithmetic and round
+ * it down when the kept digit is even.
+ */
+function toExponentialHalfEven(abs: number, fractionDigits: number): string {
+  const rounded = abs.toExponential(fractionDigits);
+  if (fractionDigits >= 100) return rounded;
+  const longer = abs.toExponential(fractionDigits + 1);
+  const eIdx = longer.indexOf("e");
+  if (longer[eIdx - 1] !== "5") return rounded;
+
+  const bits = new DataView(new ArrayBuffer(8));
+  bits.setFloat64(0, abs);
+  const hi = bits.getUint32(0);
+  const lo = bits.getUint32(4);
+  const biased = (hi >>> 20) & 0x7ff;
+  let mant = (BigInt(hi & 0xfffff) << 32n) | BigInt(lo);
+  if (biased !== 0) mant |= 1n << 52n;
+  const q = (biased === 0 ? 1 : biased) - 1075;
+
+  const exp10 = Number.parseInt(longer.slice(eIdx + 1), 10);
+  const digits = BigInt(longer.slice(0, eIdx).replace(".", ""));
+  const s = exp10 - (fractionDigits + 1);
+  const lhs = mant * 2n ** BigInt(Math.max(q, 0)) * 10n ** BigInt(Math.max(-s, 0));
+  const rhs = digits * 10n ** BigInt(Math.max(s, 0)) * 2n ** BigInt(Math.max(-q, 0));
+  if (lhs !== rhs) return rounded;
+
+  const kept = digits / 10n;
+  if (kept % 2n !== 0n) return rounded;
+  const keptStr = kept.toString();
+  const mantissa =
+    fractionDigits === 0 ? keptStr : `${keptStr[0]}.${keptStr.slice(1)}`;
+  return `${mantissa}e${exp10 < 0 ? "-" : "+"}${Math.abs(exp10)}`;
+}
+
+/**
+ * Format a positive/negative finite number using C `snprintf("%.*g", prec, v)`
+ * rules with KJ exponent normalization (`e+06` -> `e06`, `e-05` -> `e-05`).
+ */
+function formatCPrintfG(v: number, prec: number): string {
+  const sign = v < 0 || Object.is(v, -0) ? "-" : "";
+  const abs = Math.abs(v);
+  if (abs === 0) return `${sign}0`;
+
+  const expStr = toExponentialHalfEven(abs, prec - 1);
+  const eIdx = expStr.indexOf("e");
+  const mant = expStr.slice(0, eIdx);
+  const exp = Number.parseInt(expStr.slice(eIdx + 1), 10);
+  const digits = mant.replace(".", "");
+  const sig = digits.replace(/0+$/, "") || "0";
+
+  if (exp < -4 || exp >= prec) {
+    const m = sig.length === 1 ? sig : `${sig[0]}.${sig.slice(1)}`;
+    const eSign = exp < 0 ? "-" : "";
+    const eAbs = Math.abs(exp).toString().padStart(2, "0");
+    return `${sign}${m}e${eSign}${eAbs}`;
+  }
+
+  if (exp < 0) {
+    return `${sign}0.${"0".repeat(-exp - 1)}${sig}`;
+  }
+  if (exp + 1 >= sig.length) {
+    return `${sign}${sig}${"0".repeat(exp + 1 - sig.length)}`;
+  }
+  return `${sign}${sig.slice(0, exp + 1)}.${sig.slice(exp + 1)}`;
+}
+
+/** Format a Float32 matching `kj::str(float)`. */
+export function formatKjFloat32(v: number): string {
+  const f = Math.fround(v);
+  if (Number.isNaN(f)) return "nan";
+  if (f === Infinity) return "inf";
+  if (f === -Infinity) return "-inf";
+  if (f === 0) return Object.is(f, -0) ? "-0" : "0";
+
+  // KJ retains eight significant digits for Float32 subnormals even when
+  // fewer digits would round-trip in JavaScript.
+  if (Math.abs(f) < 1.1754943508222875e-38) return formatCPrintfG(f, 8);
+
+  // kj::FloatToBuffer tries FLT_DIG (6) digits, then FLT_DIG + 2 (8) only.
+  const s = formatCPrintfG(f, 6);
+  if (Math.fround(Number(s)) === f) return s;
+  return formatCPrintfG(f, 8);
+}
+
+/** Format a Float64 matching `kj::str(double)`. */
+export function formatKjFloat64(v: number): string {
+  if (Number.isNaN(v)) return "nan";
+  if (v === Infinity) return "inf";
+  if (v === -Infinity) return "-inf";
+  if (v === 0) return Object.is(v, -0) ? "-0" : "0";
+
+  const s15 = formatCPrintfG(v, 15);
+  if (Number(s15) === v) return s15;
+  return formatCPrintfG(v, 17);
+}
+
+function escapeByteC(b: number): string {
+  switch (b) {
+    case 0x07:
+      return "\\a";
+    case 0x08:
+      return "\\b";
+    case 0x09:
+      return "\\t";
+    case 0x0a:
+      return "\\n";
+    case 0x0b:
+      return "\\v";
+    case 0x0c:
+      return "\\f";
+    case 0x0d:
+      return "\\r";
+    case 0x22:
+      return '\\"';
+    case 0x27:
+      return "\\'";
+    case 0x5c:
+      return "\\\\";
+    default:
+      if (b >= 0x20 && b < 0x7f) {
+        return String.fromCharCode(b);
+      }
+      return `\\${b.toString(8).padStart(3, "0")}`;
+  }
+}
+
+/** Escape Data bytes matching `kj::encodeCEscape(ArrayPtr<const byte>)`. */
+export function encodeCEscapeData(bytes: Uint8Array): string {
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) {
+    out += escapeByteC(bytes[i]!);
+  }
+  return out;
+}
+
+/**
+ * Print Text bytes as `kj::encodeCEscape` does for Text: control bytes,
+ * DEL, quotes and backslash are escaped and every other byte is written
+ * as is. A string cannot hold a byte that is not valid UTF-8, so each
+ * run of bytes from 0x80 up is decoded with U+FFFD replacement. The
+ * result is the string the bytes C++ prints decode to.
+ */
+export function encodeCEscapeTextBytes(bytes: Uint8Array): string {
+  let out = "";
+  let i = 0;
+  while (i < bytes.length) {
+    const b = bytes[i]!;
+    if (b < 0x80) {
+      out += escapeByteC(b);
+      i++;
+      continue;
+    }
+    let end = i + 1;
+    while (end < bytes.length && bytes[end]! >= 0x80) end++;
+    out += UTF8_DEC.decode(bytes.subarray(i, end));
+    i = end;
+  }
+  return out;
+}
+
+/** Internal byte output uses low-surrogate sentinels until it is encoded. */
+function encodeCEscapeRawTextBytes(bytes: Uint8Array): string {
+  let out = "";
+  let i = 0;
+  while (i < bytes.length) {
+    const b = bytes[i]!;
+    if (b < 0x80) {
+      out += escapeByteC(b);
+      i++;
+      continue;
+    }
+    const seqLen = validUtf8SeqLen(bytes, i);
+    if (seqLen > 0) {
+      out += UTF8_DEC.decode(bytes.subarray(i, i + seqLen));
+      i += seqLen;
+      continue;
+    }
+    out += String.fromCharCode(0xdc00 + b);
+    i++;
+  }
+  return out;
+}
+
+/**
+ * The string the printed bytes decode to as UTF-8, with U+FFFD for each
+ * invalid sequence. Line breaks were chosen from the byte lengths, so
+ * they fall where capnp breaks its lines.
+ */
+function printedString(printed: string): string {
+  return UTF8_DEC.decode(rawStringToBytes(printed));
+}
+
+/** Escape UTF-8 Text matching `kj::encodeCEscape()` for a string. */
+export function encodeCEscapeText(text: string): string {
+  return encodeCEscapeTextBytes(UTF8_ENC.encode(text));
+}
+
+type PrintMode = "bare" | "prefixed" | "parenthesized";
+type PrintKind = "list" | "record";
+
+const MAX_INLINE_VALUE_SIZE = 24;
+const MAX_INLINE_RECORD_SIZE = 64;
+
+class Indent {
+  readonly amount: number;
+  readonly readCapabilities: boolean;
+
+  constructor(amount: number, readCapabilities: boolean) {
+    this.amount = amount;
+    this.readCapabilities = readCapabilities;
+  }
+
+  static root(enable: boolean, readCapabilities: boolean): Indent {
+    return new Indent(enable ? 1 : 0, readCapabilities);
+  }
+
+  next(): Indent {
+    return new Indent(this.amount === 0 ? 0 : this.amount + 1, this.readCapabilities);
+  }
+
+  delimit(items: readonly string[], mode: PrintMode, kind: PrintKind): string {
+    if (this.amount === 0 || Indent.canPrintAllInline(items, kind)) {
+      return items.join(", ");
+    }
+    const spaces = " ".repeat(this.amount * 2);
+    const delim = `,\n${spaces}`;
+    const prefix = mode === "bare" ? " " : `\n${spaces}`;
+    return `${prefix}${items.join(delim)} `;
+  }
+
+  private static canPrintInline(item: string): boolean {
+    if (item.includes("\n")) return false;
+    return rawStringByteLength(item) <= MAX_INLINE_VALUE_SIZE;
+  }
+
+  private static canPrintAllInline(
+    items: readonly string[],
+    kind: PrintKind,
+  ): boolean {
+    let totalSize = 0;
+    for (const item of items) {
+      if (!Indent.canPrintInline(item)) return false;
+      if (kind === "record") {
+        totalSize += rawStringByteLength(item);
+        if (totalSize > MAX_INLINE_RECORD_SIZE) return false;
+      }
+    }
+    return true;
+  }
+}
+
+function whichFieldTypeCode(field: StructField): number {
+  if (field.isGroup()) return TypeKind.Struct;
+  return field.getType().whichCode;
+}
+
+function printDynamicValue(
+  value: DynamicValueReader,
+  typeCode: number,
+  indent: Indent,
+  mode: PrintMode,
+): string {
+  switch (value.getType()) {
+    case DynamicValueType.UNKNOWN:
+      return "?";
+    case DynamicValueType.VOID:
+      return "void";
+    case DynamicValueType.BOOL:
+      return value.asBool() ? "true" : "false";
+    case DynamicValueType.INT:
+      return value.asInt64().toString(10);
+    case DynamicValueType.UINT:
+      return value.asUInt64().toString(10);
+    case DynamicValueType.FLOAT:
+      if (typeCode === TypeKind.Float32) {
+        return formatKjFloat32(value.asFloat32());
+      }
+      return formatKjFloat64(value.asFloat64());
+    case DynamicValueType.TEXT:
+      return `"${encodeCEscapeRawTextBytes(value.asTextBytes())}"`;
+    case DynamicValueType.DATA:
+      return `"${encodeCEscapeData(value.asData())}"`;
+    case DynamicValueType.LIST: {
+      const list = value.asList();
+      const elemCode = list.getSchema().whichElementTypeCode();
+      const nextIndent = indent.next();
+      const elements: string[] = [];
+      for (let i = 0; i < list.size(); i++) {
+        elements.push(
+          elemCode === TypeKind.AnyPointer
+            ? OPAQUE_POINTER
+            : printDynamicValue(list.get(i), elemCode, nextIndent, "bare"),
+        );
+      }
+      return `[${indent.delimit(elements, mode, "list")}]`;
+    }
+    case DynamicValueType.ENUM: {
+      const e = value.asEnum();
+      const enumerant = e.getEnumerant();
+      if (enumerant) return enumerant.name;
+      return `(${e.getRaw()})`;
+    }
+    case DynamicValueType.STRUCT: {
+      const st = value.asStruct();
+      const schema = st.getSchema();
+      const nonUnionFields = schema.getNonUnionFields();
+      const printed: string[] = [];
+
+      let activeUnion = st.which();
+      let unionRendered = "";
+      if (activeUnion) {
+        if (activeUnion.discriminantValue !== 0 || st.has(activeUnion)) {
+          unionRendered = `${activeUnion.name} = ${printField(st, activeUnion, indent)}`;
+        } else {
+          activeUnion = null;
+        }
+      }
+
+      for (const field of nonUnionFields) {
+        if (activeUnion && activeUnion.index < field.index) {
+          printed.push(unionRendered);
+          activeUnion = null;
+        }
+        if (st.has(field)) {
+          printed.push(`${field.name} = ${printField(st, field, indent)}`);
+        }
+      }
+      if (activeUnion) {
+        printed.push(unionRendered);
+      }
+
+      if (mode === "parenthesized") {
+        return indent.delimit(printed, mode, "record");
+      }
+      return `(${indent.delimit(printed, mode, "record")})`;
+    }
+    case DynamicValueType.CAPABILITY:
+      assertCapnp(indent.readCapabilities, "UNSUPPORTED", NO_CAPABILITY_CONTEXT);
+      return "<external capability>";
+    case DynamicValueType.ANY_POINTER:
+      return OPAQUE_POINTER;
+  }
+}
+
+const OPAQUE_POINTER = "<opaque pointer>";
+
+const NO_CAPABILITY_CONTEXT =
+  "expected brokenCapFactory != nullptr [0 != nullptr]; Trying to read capabilities without " +
+  "ever having created a capability context.  To read capabilities from a message, you must " +
+  "imbue it with CapReaderContext, or use the Cap'n Proto RPC system.";
+
+/**
+ * C++ reads an `AnyPointer` field without following it, so the printer
+ * never touches the target of a corrupt pointer there.
+ */
+function printField(st: DynamicStructReader, field: StructField, indent: Indent): string {
+  const typeCode = whichFieldTypeCode(field);
+  if (typeCode === TypeKind.AnyPointer) return OPAQUE_POINTER;
+  return printDynamicValue(st.get(field), typeCode, indent.next(), "prefixed");
+}
+
+export type PrintableDynamic =
+  | DynamicValueReader
+  | DynamicValueBuilder
+  | DynamicStructReader
+  | DynamicStructBuilder
+  | DynamicListReader
+  | DynamicListBuilder
+  | DynamicEnum
+  | DynamicCapabilityClient;
+
+function normalizePrintable(v: PrintableDynamic): {
+  reader: DynamicValueReader;
+  defaultTypeCode: number;
+} {
+  if (v instanceof DynamicValueReader) {
+    return { reader: v, defaultTypeCode: TypeKind.Struct };
+  }
+  if (v instanceof DynamicValueBuilder) {
+    return { reader: v.asReader(), defaultTypeCode: TypeKind.Struct };
+  }
+  if (v instanceof DynamicStructReader) {
+    return {
+      reader: DynamicValueReader.fromStruct(v),
+      defaultTypeCode: TypeKind.Struct,
+    };
+  }
+  if (v instanceof DynamicStructBuilder) {
+    return {
+      reader: DynamicValueReader.fromStruct(v.asReader()),
+      defaultTypeCode: TypeKind.Struct,
+    };
+  }
+  if (v instanceof DynamicListReader) {
+    return {
+      reader: DynamicValueReader.fromList(v),
+      defaultTypeCode: TypeKind.List,
+    };
+  }
+  if (v instanceof DynamicListBuilder) {
+    return {
+      reader: DynamicValueReader.fromList(v.asReader()),
+      defaultTypeCode: TypeKind.List,
+    };
+  }
+  if (v instanceof DynamicEnum) {
+    return {
+      reader: DynamicValueReader.fromEnum(v),
+      defaultTypeCode: TypeKind.Enum,
+    };
+  }
+  return {
+    reader: DynamicValueReader.fromCapability(v),
+    defaultTypeCode: TypeKind.Interface,
+  };
+}
+
+/** Multi-line indented Cap'n Proto text output matching `capnp::prettyPrint`. */
+export function prettyPrint(
+  value:
+    | DynamicStructReader
+    | DynamicStructBuilder
+    | DynamicListReader
+    | DynamicListBuilder,
+): string {
+  const { reader, defaultTypeCode } = normalizePrintable(value);
+  return printedString(printDynamicValue(reader, defaultTypeCode, Indent.root(true, true), "bare"));
+}
+
+/** Single-line Cap'n Proto text output matching `kj::str(DynamicValue::Reader)`. */
+export function stringify(value: PrintableDynamic, type?: Type): string {
+  const { reader, defaultTypeCode } = normalizePrintable(value);
+  return printedString(
+    printDynamicValue(reader, type ? type.whichCode : defaultTypeCode, Indent.root(false, true), "bare"),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Text-format Lexer and Recursive-Descent Parser
+// ---------------------------------------------------------------------------
+
+type TextAst =
+  | { readonly kind: "ident"; readonly name: string }
+  /** `x.name` or `x(...)`, which capnp parses as a reference to a constant. */
+  | { readonly kind: "external" }
+  | { readonly kind: "import" }
+  | { readonly kind: "embed" }
+  /** A list item that failed to parse; its error is already reported. */
+  | { readonly kind: "unknown" }
+  | { readonly kind: "int"; readonly value: bigint }
+  | { readonly kind: "float"; readonly value: number }
+  | { readonly kind: "bytes"; readonly bytes: Uint8Array; readonly isHexBlob: boolean }
+  | { readonly kind: "list"; readonly items: readonly TextAst[] }
+  | {
+      readonly kind: "tuple";
+      readonly entries: readonly TextAstEntry[];
+    };
+
+interface TextAstEntry {
+  readonly name: string | null;
+  readonly value: TextAst;
+}
+
+/** Byte offsets of an expression or field name in the message text. */
+interface TextSpan {
+  readonly start: number;
+  readonly end: number;
+}
+
+function isHexDigit(c: number): boolean {
+  return (
+    (c >= 0x30 && c <= 0x39) ||
+    (c >= 0x41 && c <= 0x46) ||
+    (c >= 0x61 && c <= 0x66)
+  );
+}
+
+function hexVal(c: number): number {
+  if (c >= 0x30 && c <= 0x39) return c - 0x30;
+  if (c >= 0x41 && c <= 0x46) return c - 0x41 + 10;
+  if (c >= 0x61 && c <= 0x66) return c - 0x61 + 10;
+  throw new CapnpError("TEXT", "invalid hex digit");
+}
+
+function isIdentStart(c: number): boolean {
+  return (
+    (c >= 0x41 && c <= 0x5a) ||
+    (c >= 0x61 && c <= 0x7a) ||
+    c === 0x5f
+  );
+}
+
+function isIdentCont(c: number): boolean {
+  return isIdentStart(c) || (c >= 0x30 && c <= 0x39);
+}
+
+/**
+ * An error `capnp` does not recover from on text input. The `capnp` tool
+ * prints it as an uncaught kj exception and converts no further messages.
+ */
+export class TextFatalError extends CapnpError {
+  constructor(
+    readonly location: string,
+    readonly description: string,
+  ) {
+    super("TEXT", `${location}: failed: ${description}`);
+  }
+}
+
+const FAILED_TO_READ_INPUT = new TextFatalError(
+  "capnp/serialize-text.c++:107",
+  "Failed to read input.",
+);
+
+const EXTERNAL_CONSTANT = new TextFatalError(
+  "capnp/serialize-text.c++:69",
+  "External constants not allowed.",
+);
+
+const KJ_WHITESPACE = " \f\n\r\t\v";
+const OPERATOR_CHARS = "!$%&*+-./:<=>?@^|~";
+
+function isDigit(c: number): boolean {
+  return c >= 0x30 && c <= 0x39;
+}
+
+function isOctDigit(c: number): boolean {
+  return c >= 0x30 && c <= 0x37;
+}
+
+/** `notLookingAt(alpha.orAny("_."))` after a kj number. */
+function endsNumber(c: number): boolean {
+  return !(isIdentStart(c) || c === 0x2e);
+}
+
+type TextTokenKind = "ident" | "op" | "string" | "binary" | "int" | "float" | "paren" | "bracket";
+
+interface TextToken {
+  readonly kind: TextTokenKind;
+  readonly start: number;
+  readonly end: number;
+  readonly text?: string;
+  readonly bytes?: Uint8Array;
+  readonly int?: bigint;
+  readonly float?: number;
+  readonly items?: readonly (readonly TextToken[])[];
+}
+
+class TextLexFailure extends Error {}
+
+/**
+ * Port of the `capnp::compiler` lexer for one text message, over a string
+ * holding one byte per code unit. Any input it cannot lex fails as a whole,
+ * as in C++.
+ */
+class TextLexer {
+  private pos = 0;
+
+  constructor(
+    private readonly src: string,
+    private readonly report: (error: TextInputError) => void,
+  ) {}
+
+  get position(): number {
+    return this.pos;
+  }
+
+  lex(): TextToken[] {
+    const tokens = this.tokenSequence();
+    if (this.pos !== this.src.length) throw new TextLexFailure();
+    return tokens;
+  }
+
+  private code(i: number): number {
+    return this.src.charCodeAt(i);
+  }
+
+  private skipCommentsAndWhitespace(): void {
+    for (;;) {
+      const c = this.src[this.pos];
+      if (c === undefined) return;
+      if (KJ_WHITESPACE.includes(c)) {
+        this.pos++;
+      } else if (c === "\xef" && this.src[this.pos + 1] === "\xbb" && this.src[this.pos + 2] === "\xbf") {
+        this.pos += 3;
+      } else if (c === "#") {
+        const nl = this.src.indexOf("\n", this.pos);
+        this.pos = nl < 0 ? this.src.length : nl + 1;
+      } else {
+        return;
+      }
+    }
+  }
+
+  private tokenSequence(): TextToken[] {
+    const tokens: TextToken[] = [];
+    this.skipCommentsAndWhitespace();
+    for (;;) {
+      const token = this.token();
+      if (token === null) return tokens;
+      tokens.push(token);
+      this.skipCommentsAndWhitespace();
+    }
+  }
+
+  /** `null` where a token sequence may end; any other failure fails the lex. */
+  private token(): TextToken | null {
+    const start = this.pos;
+    const c = this.code(start);
+    if (Number.isNaN(c) || c === 0x2c || c === 0x29 || c === 0x5d) return null;
+    if (isIdentStart(c)) {
+      while (isIdentCont(this.code(this.pos))) this.pos++;
+      return { kind: "ident", start, end: this.pos, text: this.src.slice(start, this.pos) };
+    }
+    if (c === 0x22) return { kind: "string", start, bytes: this.quoted(), end: this.pos };
+    if (c === 0x60) {
+      this.pos++;
+      while (this.pos < this.src.length && this.src[this.pos] !== "\r" && this.src[this.pos] !== "\n") {
+        this.pos++;
+      }
+      const bytes = byteStringToBytes(`${this.src.slice(start + 1, this.pos)}\n`);
+      return { kind: "string", start, end: this.pos, bytes };
+    }
+    if (isDigit(c)) {
+      return this.hexBinary(start) ?? this.integer(start) ?? this.number(start);
+    }
+    if (OPERATOR_CHARS.includes(this.src[start]!)) {
+      while (this.pos < this.src.length && OPERATOR_CHARS.includes(this.src[this.pos]!)) this.pos++;
+      return { kind: "op", start, end: this.pos, text: this.src.slice(start, this.pos) };
+    }
+    if (c === 0x28 || c === 0x5b) {
+      this.pos++;
+      const items = this.commaDelimitedList();
+      if (this.code(this.pos) !== (c === 0x28 ? 0x29 : 0x5d)) throw new TextLexFailure();
+      this.pos++;
+      return { kind: c === 0x28 ? "paren" : "bracket", start, end: this.pos, items };
+    }
+    throw new TextLexFailure();
+  }
+
+  private commaDelimitedList(): TextToken[][] {
+    const first = this.tokenSequence();
+    const rest: TextToken[][] = [];
+    while (this.code(this.pos) === 0x2c) {
+      this.pos++;
+      rest.push(this.tokenSequence());
+    }
+    if (first.length === 0 && rest.length === 0) return [];
+    if (rest.length > 0 && rest[rest.length - 1]!.length === 0) rest.pop();
+    return [first, ...rest];
+  }
+
+  private quoted(): Uint8Array {
+    const out: number[] = [];
+    this.pos++;
+    for (;;) {
+      const c = this.code(this.pos);
+      if (Number.isNaN(c) || c === 0x0a) throw new TextLexFailure();
+      this.pos++;
+      if (c === 0x22) return Uint8Array.from(out);
+      if (c !== 0x5c) {
+        out.push(c);
+        continue;
+      }
+      const e = this.src[this.pos];
+      const simple = e === undefined ? -1 : "abfnrtv'\"\\?".indexOf(e);
+      if (simple >= 0) {
+        out.push([0x07, 0x08, 0x0c, 0x0a, 0x0d, 0x09, 0x0b, 0x27, 0x22, 0x5c, 0x3f][simple]!);
+        this.pos++;
+      } else if (e === "x" && isHexDigit(this.code(this.pos + 1)) && isHexDigit(this.code(this.pos + 2))) {
+        out.push((hexVal(this.code(this.pos + 1)) << 4) | hexVal(this.code(this.pos + 2)));
+        this.pos += 3;
+      } else if (isOctDigit(this.code(this.pos))) {
+        let v = 0;
+        for (let k = 0; k < 3 && isOctDigit(this.code(this.pos)); k++) {
+          v = v * 8 + this.code(this.pos) - 0x30;
+          this.pos++;
+        }
+        out.push(v & 0xff);
+      } else {
+        throw new TextLexFailure();
+      }
+    }
+  }
+
+  private hexBinary(start: number): TextToken | null {
+    if (this.src.slice(start, start + 3) !== '0x"') return null;
+    const bytes: number[] = [];
+    let p = start + 3;
+    for (;;) {
+      let q = p;
+      while (q < this.src.length && KJ_WHITESPACE.includes(this.src[q]!)) q++;
+      if (!isHexDigit(this.code(q)) || !isHexDigit(this.code(q + 1))) {
+        p = q;
+        break;
+      }
+      bytes.push((hexVal(this.code(q)) << 4) | hexVal(this.code(q + 1)));
+      p = q + 2;
+    }
+    if (bytes.length === 0 || this.code(p) !== 0x22) return null;
+    this.pos = p + 1;
+    return { kind: "binary", start, end: this.pos, bytes: Uint8Array.from(bytes) };
+  }
+
+  private integer(start: number): TextToken | null {
+    let p = start;
+    let digits: string;
+    if (this.src[p] === "0" && this.src[p + 1] === "x" && isHexDigit(this.code(p + 2))) {
+      p += 2;
+      while (isHexDigit(this.code(p))) p++;
+      digits = `0x${this.src.slice(start + 2, p)}`;
+    } else if (this.src[p] === "0") {
+      p++;
+      while (isOctDigit(this.code(p))) p++;
+      digits = `0o${this.src.slice(start, p)}`;
+    } else {
+      while (isDigit(this.code(p))) p++;
+      digits = this.src.slice(start, p);
+    }
+    if (!endsNumber(this.code(p))) return null;
+    this.pos = p;
+    return { kind: "int", start, end: p, int: BigInt.asUintN(64, BigInt(digits)) };
+  }
+
+  /** kj `p::number`: an exponent may have no digits, which `parseDouble` reports. */
+  private number(start: number): TextToken {
+    let p = start;
+    while (isDigit(this.code(p))) p++;
+    let literal = this.src.slice(start, p);
+    if (this.src[p] === ".") {
+      const from = p++;
+      while (isDigit(this.code(p))) p++;
+      literal += this.src.slice(from, p);
+    }
+    let bareExponent: string | null = null;
+    if (this.src[p] === "e" || this.src[p] === "E") {
+      p++;
+      const sign = this.src[p] === "+" || this.src[p] === "-" ? this.src[p++]! : "";
+      const from = p;
+      while (isDigit(this.code(p))) p++;
+      literal += `e${sign}${this.src.slice(from, p)}`;
+      if (p === from) bareExponent = `e${sign}`;
+    }
+    if (!endsNumber(this.code(p))) throw new TextLexFailure();
+    let value = Number(literal);
+    if (bareExponent !== null) {
+      this.report({
+        description:
+          `expected endPtr == s.end() [${bareExponent} == ]; ` +
+          `String does not contain valid floating number; s = ${literal}`,
+        location: "kj/string.c++:595",
+      });
+      value = 0;
+    }
+    this.pos = p;
+    return { kind: "float", start, end: p, float: value };
+  }
+}
+
+/** UTF-8 bytes of `s`, one per code unit: kj lexes bytes and counts byte offsets. */
+function utf8ByteString(s: string): string {
+  const bytes = UTF8_ENC.encode(s);
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 8192) {
+    out += String.fromCharCode(...bytes.subarray(i, i + 8192));
+  }
+  return out;
+}
+
+function byteStringToBytes(s: string): Uint8Array {
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+
+/** A kj parser input: `best` is one past the furthest token any parser looked at. */
+class TokenInput {
+  best = 0;
+
+  constructor(readonly tokens: readonly TextToken[]) {}
+
+  peek(i: number, kind: TextTokenKind, text?: string): TextToken | null {
+    const token = this.tokens[i];
+    if (token === undefined) return null;
+    this.best = Math.max(this.best, i + 1);
+    if (token.kind !== kind || (text !== undefined && token.text !== text)) return null;
+    return token;
+  }
+}
+
+interface Parsed<T> {
+  readonly value: T;
+  readonly end: number;
+}
+
+const UNKNOWN: TextAst = { kind: "unknown" };
+
+/**
+ * Port of `capnp::compiler::CapnpParser` expressions as `capnp::TextCodec`
+ * uses them. A list item that does not parse is reported and replaced by an
+ * unknown value, and the rest of the message is still translated.
+ */
+class TextParser {
+  /** Spans of parsed expressions, and of field names keyed by their entry. */
+  readonly spans = new WeakMap<object, TextSpan>();
+  readonly src: string;
+
+  constructor(
+    src: string,
+    private readonly report: (error: TextInputError) => void,
+  ) {
+    this.src = src;
+  }
+
+  /** The message's expression, or `null` when it does not parse at all. */
+  parseMessage(): TextAst | null {
+    const lexer = new TextLexer(this.src, this.report);
+    let tokens: TextToken[];
+    try {
+      tokens = lexer.lex();
+    } catch (e) {
+      if (!(e instanceof TextLexFailure)) throw e;
+      const at = lexer.position;
+      this.report(locateTextError(this.src, { start: at, end: at }, "Parse error."));
+      throw FAILED_TO_READ_INPUT;
+    }
+    if (tokens.length === 0) throw FAILED_TO_READ_INPUT;
+    const input = new TokenInput(tokens);
+    const parsed = this.expression(input, 0);
+    if (parsed === null) {
+      const best = tokens[input.best];
+      if (best === undefined) {
+        throw new TextFatalError("capnp/serialize-text.c++:101", "Premature end of input.");
+      }
+      this.report(locateTextError(this.src, best, "Parse error"));
+      return null;
+    }
+    if (parsed.end !== tokens.length) {
+      throw new TextFatalError(
+        "capnp/serialize-text.c++:95",
+        "expected parserInput.getPosition() == tokens.end() [(can't stringify) == (can't stringify)]; " +
+          "Extra tokens in input.",
+      );
+    }
+    return parsed.value;
+  }
+
+  private node<T extends object>(value: T, start: number, end: number): T {
+    this.spans.set(value, { start, end });
+    return value;
+  }
+
+  private listItems<T>(
+    list: TextToken,
+    item: (input: TokenInput) => Parsed<T> | null,
+  ): (T | null)[] {
+    return list.items!.map((tokens) => {
+      const input = new TokenInput(tokens);
+      const parsed = item(input);
+      if (parsed !== null && parsed.end === tokens.length) return parsed.value;
+      const best = tokens[input.best];
+      if (best !== undefined) {
+        this.reportSpan(best.start, tokens[tokens.length - 1]!.end, "Parse error.");
+      } else if (tokens.length > 0) {
+        this.reportSpan(tokens[0]!.start, tokens[tokens.length - 1]!.end, "Parse error.");
+      } else {
+        this.reportSpan(list.start, list.end, "Parse error: Empty list item.");
+      }
+      return null;
+    });
+  }
+
+  private reportSpan(start: number, end: number, message: string): void {
+    this.report(locateTextError(this.src, { start, end }, message));
+  }
+
+  private tupleElement = (input: TokenInput): Parsed<TextAstEntry> | null => {
+    const name = input.peek(0, "ident");
+    const named = name !== null && input.peek(1, "op", "=") !== null;
+    const value = this.expression(input, named ? 2 : 0);
+    if (value === null) return null;
+    const entry: TextAstEntry = { name: named ? name.text! : null, value: value.value };
+    if (named) this.spans.set(entry, { start: name.start, end: name.end });
+    return { value: entry, end: value.end };
+  };
+
+  private listElement = (input: TokenInput): Parsed<TextAst> | null => this.expression(input, 0);
+
+  private tuple(list: TextToken): TextAst {
+    const entries = this.listItems(list, this.tupleElement).map(
+      (entry) => entry ?? { name: null, value: UNKNOWN },
+    );
+    if (entries.length === 1 && entries[0]!.name === null) return entries[0]!.value;
+    return this.node({ kind: "tuple", entries }, list.start, list.end);
+  }
+
+  private expression(input: TokenInput, i: number): Parsed<TextAst> | null {
+    const base = this.base(input, i);
+    if (base === null) return null;
+    let { value, end } = base;
+    const start = this.spans.get(value)?.start ?? 0;
+    for (;;) {
+      let suffixEnd: number;
+      let name: TextToken | null = null;
+      if (input.peek(end, "op", ".") !== null && (name = input.peek(end + 1, "ident")) !== null) {
+        suffixEnd = name.end;
+        end += 2;
+      } else {
+        const params = input.peek(end, "paren");
+        if (params === null) break;
+        this.tuple(params);
+        suffixEnd = params.end;
+        end += 1;
+      }
+      value = this.node({ kind: "external" }, start, suffixEnd);
+    }
+    return { value, end };
+  }
+
+  private base(input: TokenInput, i: number): Parsed<TextAst> | null {
+    let t: TextToken | null;
+    const at = (value: TextAst, from: TextToken, to: TextToken, end: number) => ({
+      value: this.node(value, from.start, to.end),
+      end,
+    });
+    if ((t = input.peek(i, "int")) !== null) {
+      return at({ kind: "int", value: t.int! }, t, t, i + 1);
+    }
+    if (input.peek(i, "op", "-") !== null && (t = input.peek(i + 1, "int")) !== null) {
+      return at({ kind: "int", value: -t.int! }, t, t, i + 2);
+    }
+    if ((t = input.peek(i, "float")) !== null) {
+      return at({ kind: "float", value: t.float! }, t, t, i + 1);
+    }
+    if (input.peek(i, "op", "-") !== null && (t = input.peek(i + 1, "float")) !== null) {
+      return at({ kind: "float", value: -t.float! }, t, t, i + 2);
+    }
+    if (input.peek(i, "op", "-") !== null && (t = input.peek(i + 1, "ident", "inf")) !== null) {
+      return at({ kind: "float", value: -Infinity }, input.tokens[i]!, t, i + 2);
+    }
+    if ((t = input.peek(i, "string")) !== null) {
+      const chunks = [t.bytes!];
+      let j = i + 1;
+      let last = t;
+      for (let s: TextToken | null; (s = input.peek(j, "string")) !== null; j++) {
+        chunks.push(s.bytes!);
+        last = s;
+      }
+      return at({ kind: "bytes", bytes: concatChunks(chunks), isHexBlob: false }, t, last, j);
+    }
+    if ((t = input.peek(i, "binary")) !== null) {
+      return at({ kind: "bytes", bytes: t.bytes!, isHexBlob: true }, t, t, i + 1);
+    }
+    if ((t = input.peek(i, "bracket")) !== null) {
+      const items = this.listItems(t, this.listElement).map((item) => item ?? UNKNOWN);
+      return at({ kind: "list", items }, t, t, i + 1);
+    }
+    if ((t = input.peek(i, "paren")) !== null) {
+      return { value: this.tuple(t), end: i + 1 };
+    }
+    for (const keyword of ["import", "embed"] as const) {
+      if (input.peek(i, "ident", keyword) !== null && (t = input.peek(i + 1, "string")) !== null) {
+        return at({ kind: keyword }, input.tokens[i]!, t, i + 2);
+      }
+    }
+    if (input.peek(i, "op", ".") !== null && (t = input.peek(i + 1, "ident")) !== null) {
+      return at({ kind: "external" }, input.tokens[i]!, t, i + 2);
+    }
+    if ((t = input.peek(i, "ident")) !== null) {
+      return at({ kind: "ident", name: t.text! }, t, t, i + 1);
+    }
+    return null;
+  }
+}
+
+function concatChunks(chunks: readonly Uint8Array[]): Uint8Array {
+  if (chunks.length === 0) return new Uint8Array(0);
+  if (chunks.length === 1) return chunks[0]!;
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
+  return out;
+}
+
+/** A value compiled from text, waiting to be written into a message. */
+type TextValue =
+  | { readonly kind: "void" }
+  | { readonly kind: "bool"; readonly value: boolean }
+  | { readonly kind: "int"; readonly value: bigint }
+  | { readonly kind: "float"; readonly value: number }
+  | { readonly kind: "text"; readonly bytes: Uint8Array }
+  | { readonly kind: "data"; readonly bytes: Uint8Array }
+  | { readonly kind: "enum"; readonly value: DynamicEnum }
+  | { readonly kind: "list"; readonly schema: ListSchema; readonly items: readonly (TextValue | null)[] }
+  | { readonly kind: "struct"; readonly schema: StructSchema; readonly fields: readonly TextAssignment[] };
+
+type TextAssignment =
+  | { readonly field: StructField; readonly value: TextValue }
+  | { readonly field: StructField; readonly group: readonly TextAssignment[] };
+
+const INT_RANGE: Partial<Record<number, readonly [bigint, bigint]>> = {
+  [TypeKind.Int8]: [-0x80n, 0x7fn],
+  [TypeKind.Int16]: [-0x8000n, 0x7fffn],
+  [TypeKind.Int32]: [-0x8000_0000n, 0x7fff_ffffn],
+  [TypeKind.Int64]: [-0x8000_0000_0000_0000n, 0x7fff_ffff_ffff_ffffn],
+  [TypeKind.UInt8]: [0n, 0xffn],
+  [TypeKind.UInt16]: [0n, 0xffffn],
+  [TypeKind.UInt32]: [0n, 0xffff_ffffn],
+  [TypeKind.UInt64]: [0n, 0xffff_ffff_ffff_ffffn],
+};
+
+/** The type name `capnp` uses in "Type mismatch" errors. */
+function textTypeName(type: Type): string {
+  switch (type.whichCode) {
+    case TypeKind.Void: return "Void";
+    case TypeKind.Bool: return "Bool";
+    case TypeKind.Int8: return "Int8";
+    case TypeKind.Int16: return "Int16";
+    case TypeKind.Int32: return "Int32";
+    case TypeKind.Int64: return "Int64";
+    case TypeKind.UInt8: return "UInt8";
+    case TypeKind.UInt16: return "UInt16";
+    case TypeKind.UInt32: return "UInt32";
+    case TypeKind.UInt64: return "UInt64";
+    case TypeKind.Float32: return "Float32";
+    case TypeKind.Float64: return "Float64";
+    case TypeKind.Text: return "Text";
+    case TypeKind.Data: return "Data";
+    case TypeKind.List: return `List(${textTypeName(type.asList().getElementType())})`;
+    case TypeKind.Enum: return type.asEnum().getShortDisplayName();
+    case TypeKind.Struct: return type.asStruct().getShortDisplayName();
+    case TypeKind.Interface: return type.asInterface().getShortDisplayName();
+    default: return "AnyPointer";
+  }
+}
+
+/**
+ * An error `capnp` reports on text input and then recovers from: the value
+ * is left out and translation goes on. `description` starts with the
+ * columns of the bad value, counted from the newline before it as kj
+ * counts them, and `location` is what capnp prints as the code location.
+ */
+export interface TextInputError {
+  readonly description: string;
+  readonly location: string;
+}
+
+function locateTextError(src: string, span: TextSpan, message: string): TextInputError {
+  let line = 1;
+  let lineStart = 0;
+  for (let i = 0; i < span.start; i++) {
+    if (src.charCodeAt(i) === 0x0a) {
+      line++;
+      lineStart = i;
+    }
+  }
+  return {
+    description: `${span.start - lineStart}-${span.end - lineStart}: ${message}`,
+    location: `(capnp text input):${line}`,
+  };
+}
+
+/**
+ * Port of `capnp::compiler::ValueTranslator` for text input. Values are
+ * compiled first, reporting errors in the order capnp reports them, then
+ * written as capnp adopts them: a later assignment replaces an earlier one
+ * and setting a union member does not clear the others.
+ */
+class TextTranslator {
+  constructor(
+    private readonly parser: TextParser,
+    private readonly report: (error: TextInputError) => void,
+  ) {}
+
+  private error(node: object, message: string): void {
+    const span = this.parser.spans.get(node) ?? { start: 0, end: 0 };
+    this.report(locateTextError(this.parser.src, span, message));
+  }
+
+  compileStruct(schema: StructSchema, entries: readonly TextAstEntry[]): TextValue {
+    return { kind: "struct", schema, fields: this.compileAssignments(schema, entries) };
+  }
+
+  private compileAssignments(
+    schema: StructSchema,
+    entries: readonly TextAstEntry[],
+  ): TextAssignment[] {
+    const out: TextAssignment[] = [];
+    for (const entry of entries) {
+      if (entry.name === null) {
+        this.error(entry.value, "Missing field name.");
+        continue;
+      }
+      const field = schema.findFieldByName(entry.name);
+      if (field === null) {
+        this.error(entry, `Struct has no field named '${entry.name}'.`);
+        continue;
+      }
+      if (!field.isGroup()) {
+        const value = this.compileValue(entry.value, field.getType());
+        if (value !== null) out.push({ field, value });
+        continue;
+      }
+      // capnp initializes the group before it looks at the value.
+      const groupSchema = field.getType().asStruct();
+      if (entry.value.kind === "tuple") {
+        out.push({ field, group: this.compileAssignments(groupSchema, entry.value.entries) });
+        continue;
+      }
+      const value = this.compileValueInner(entry.value, field.getType());
+      const first = groupSchema.getFields()[0];
+      if (value === null) {
+        out.push({ field, group: [] });
+        continue;
+      }
+      const matched = first === undefined ? null : this.matchType(entry.value, first.getType(), value);
+      if (matched !== null) {
+        out.push({ field, group: [{ field: first!, value: matched }] });
+        continue;
+      }
+      this.error(entry.value, "Type mismatch; expected group.");
+      out.push({ field, group: [] });
+    }
+    return out;
+  }
+
+  compileValue(ast: TextAst, type: Type): TextValue | null {
+    if (type.isAnyPointer() && (type.getBrandParameter() !== null || type.getImplicitParameter() !== null)) {
+      this.error(
+        ast,
+        "Cannot interpret value because the type is a generic type parameter which is not " +
+          "yet bound. We don't know what type to expect here.",
+      );
+      return null;
+    }
+    const value = this.compileValueInner(ast, type);
+    if (value === null) return null;
+    const matched = this.matchType(ast, type, value);
+    if (matched !== null) return matched;
+    if (type.isStruct()) {
+      // capnp tries the value as the struct's first field.
+      const schema = type.asStruct();
+      const first = schema.getFields()[0];
+      if (first !== undefined) {
+        const inner = this.matchType(ast, first.getType(), value);
+        if (inner !== null) return { kind: "struct", schema, fields: [{ field: first, value: inner }] };
+      }
+    }
+    this.error(ast, `Type mismatch; expected ${textTypeName(type)}.`);
+    return null;
+  }
+
+  /** `matchesType`: the value if it fits `type`, clamping an out-of-range integer. */
+  private matchType(ast: TextAst, type: Type, value: TextValue): TextValue | null {
+    switch (value.kind) {
+      case "void":
+        return type.isVoid() ? value : null;
+      case "bool":
+        return type.whichCode === TypeKind.Bool ? value : null;
+      case "int": {
+        if (type.isFloat32() || type.isFloat64()) return value;
+        const range = INT_RANGE[type.whichCode];
+        if (range === undefined) return null;
+        const [min, max] = range;
+        if (value.value < min || value.value > max) {
+          this.error(ast, "Integer value out of range.");
+          return { ...value, value: value.value < min ? min : max };
+        }
+        return value;
+      }
+      case "float":
+        return type.isFloat32() || type.isFloat64() ? value : null;
+      case "text":
+        return type.isText() ? value : null;
+      case "data":
+        return type.isData() ? value : null;
+      case "list":
+        return type.isList() && type.asList() === value.schema ? value : null;
+      case "enum":
+        return type.isEnum() && type.asEnum() === value.value.getSchema() ? value : null;
+      case "struct":
+        return type.isStruct() && type.asStruct() === value.schema ? value : null;
+    }
+  }
+
+  private compileValueInner(ast: TextAst, type: Type): TextValue | null {
+    switch (ast.kind) {
+      case "ident": {
+        if (type.isEnum()) {
+          const enumerant = type.asEnum().findEnumerantByName(ast.name);
+          if (enumerant !== null) {
+            return { kind: "enum", value: DynamicEnum.fromEnumerant(enumerant) };
+          }
+        } else if (ast.name === "void") {
+          return { kind: "void" };
+        } else if (ast.name === "true" || ast.name === "false") {
+          return { kind: "bool", value: ast.name === "true" };
+        } else if (ast.name === "nan") {
+          return { kind: "float", value: Number.NaN };
+        } else if (ast.name === "inf") {
+          return { kind: "float", value: Number.POSITIVE_INFINITY };
+        }
+        // capnp resolves any other name as a constant, which text input forbids.
+        throw EXTERNAL_CONSTANT;
+      }
+      case "external":
+      case "import":
+        throw EXTERNAL_CONSTANT;
+      case "embed":
+        throw new TextFatalError("capnp/serialize-text.c++:74", "External embeds not allowed.");
+      case "unknown":
+        return null;
+      case "int":
+        if (ast.value < -0x8000_0000_0000_0000n) {
+          this.error(ast, "Integer is too big to be negative.");
+          return null;
+        }
+        return { kind: "int", value: ast.value };
+      case "float":
+        return { kind: "float", value: ast.value };
+      case "bytes":
+        if (ast.isHexBlob) {
+          if (!type.isData()) {
+            this.error(ast, `Type mismatch; expected ${textTypeName(type)}.`);
+            return null;
+          }
+          return { kind: "data", bytes: ast.bytes };
+        }
+        return type.isData() ? { kind: "data", bytes: ast.bytes } : { kind: "text", bytes: ast.bytes };
+      case "list": {
+        if (!type.isList()) {
+          this.error(ast, `Type mismatch; expected ${textTypeName(type)}.`);
+          return null;
+        }
+        const schema = type.asList();
+        const elementType = schema.getElementType();
+        return { kind: "list", schema, items: ast.items.map((item) => this.compileValue(item, elementType)) };
+      }
+      case "tuple":
+        if (!type.isStruct()) {
+          this.error(ast, `Type mismatch; expected ${textTypeName(type)}.`);
+          return null;
+        }
+        return this.compileStruct(type.asStruct(), ast.entries);
+    }
+  }
+}
+
+function scalarTextValue(value: TextValue, type: Type): DynamicValueReader {
+  switch (value.kind) {
+    case "void":
+      return DynamicValueReader.VOID;
+    case "bool":
+      return DynamicValueReader.fromBool(value.value);
+    case "int":
+      if (type.isFloat32() || type.isFloat64()) {
+        return DynamicValueReader.fromFloat(Number(value.value));
+      }
+      return value.value < 0n
+        ? DynamicValueReader.fromInt(value.value)
+        : DynamicValueReader.fromUInt(value.value);
+    case "float":
+      return DynamicValueReader.fromFloat(value.value);
+    case "text":
+      return DynamicValueReader.fromTextBytes(value.bytes);
+    case "data":
+      return DynamicValueReader.fromData(value.bytes);
+    case "enum":
+      return DynamicValueReader.fromEnum(value.value);
+    default:
+      throw new CapnpError("TEXT", `cannot write a ${value.kind} as a scalar`);
+  }
+}
+
+function writeTextStruct(output: DynamicStructBuilder, fields: readonly TextAssignment[]): void {
+  for (const assignment of fields) {
+    const { field } = assignment;
+    if ("group" in assignment) {
+      writeTextStruct(output.init(field).asStruct(), assignment.group);
+      continue;
+    }
+    const { value } = assignment;
+    if (value.kind === "struct") {
+      writeTextStruct(output.init(field).asStruct(), value.fields);
+    } else if (value.kind === "list") {
+      writeTextList(output.init(field, value.items.length).asList(), value.items);
+    } else {
+      output.set(field, scalarTextValue(value, field.getType()));
+    }
+  }
+}
+
+function writeTextList(output: DynamicListBuilder, items: readonly (TextValue | null)[]): void {
+  const elementType = output.getSchema().getElementType();
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item === null || item === undefined) continue;
+    if (item.kind === "struct") {
+      writeTextStruct(output.get(i).asStruct(), item.fields);
+    } else if (item.kind === "list") {
+      writeTextList(output.init(i, item.items.length).asList(), item.items);
+    } else {
+      output.set(i, scalarTextValue(item, elementType));
+    }
+  }
+}
+
+function throwTextInputError(error: TextInputError): never {
+  throw new CapnpError("TEXT", error.description);
+}
+
+/**
+ * Translate a parsed message into `output`. Errors capnp recovers from go
+ * to `report`; without one the first of them is thrown, as `capnp::TextCodec`
+ * throws when nothing catches recoverable exceptions.
+ */
+function fillStructFromText(
+  bytes: string,
+  output: DynamicStructBuilder,
+  report: (error: TextInputError) => void = throwTextInputError,
+): void {
+  const parser = new TextParser(bytes, report);
+  const ast = parser.parseMessage();
+  if (ast === null) return;
+  if (ast.kind !== "tuple") {
+    report({
+      description: "expected expression.isTuple(); Input does not contain a struct.",
+      location: "capnp/serialize-text.c++:134",
+    });
+    return;
+  }
+  const translator = new TextTranslator(parser, report);
+  const value = translator.compileStruct(output.getSchema(), ast.entries);
+  if (value.kind === "struct") writeTextStruct(output, value.fields);
+}
+
+/**
+ * Cap'n Proto text codec matching `capnp::TextCodec` (`capnp/serialize-text.h`).
+ */
+export class TextCodec {
+  private pretty: boolean;
+  private readonly readCapabilities: boolean;
+
+  /**
+   * With `readCapabilities: false`, printing a capability fails as it does in
+   * the `capnp` tool, which reads messages without a capability context.
+   */
+  constructor(opts?: { prettyPrint?: boolean; readCapabilities?: boolean }) {
+    this.pretty = opts?.prettyPrint ?? false;
+    this.readCapabilities = opts?.readCapabilities ?? true;
+  }
+
+  setPrettyPrint(enabled: boolean): void {
+    this.pretty = enabled;
+  }
+
+  private render(value: PrintableDynamic, type: Type | undefined): string {
+    const { reader, defaultTypeCode } = normalizePrintable(value);
+    const code = type ? type.whichCode : defaultTypeCode;
+    const caps = this.readCapabilities;
+    if (!this.pretty) {
+      return printDynamicValue(reader, code, Indent.root(false, caps), "bare");
+    }
+    if (
+      reader.getType() === DynamicValueType.STRUCT ||
+      reader.getType() === DynamicValueType.LIST
+    ) {
+      return printDynamicValue(reader, code, Indent.root(true, caps), "bare");
+    }
+    return printDynamicValue(reader, code, Indent.root(false, caps), "bare");
+  }
+
+  /**
+   * Encode to a string: the bytes `encodeBytes` returns, decoded as UTF-8
+   * with U+FFFD for each invalid sequence, as encodeJson decodes Text.
+   */
+  encode(value: PrintableDynamic, type?: Type): string {
+    return printedString(this.render(value, type));
+  }
+
+  /** Encode to the exact bytes capnp prints, invalid UTF-8 in Text included. */
+  encodeBytes(value: PrintableDynamic, type?: Type): Uint8Array {
+    return rawStringToBytes(this.render(value, type));
+  }
+
+  /**
+   * Errors capnp recovers from go to `report`, and the rest of the message
+   * is still translated; without `report` the first one is thrown.
+   */
+  decodeStruct(
+    input: string,
+    output: DynamicStructBuilder,
+    report?: (error: TextInputError) => void,
+  ): void {
+    fillStructFromText(utf8ByteString(input), output, report);
+  }
+
+  /** Like decodeStruct, but `input` holds one byte per UTF-16 code unit. */
+  decodeStructBytes(
+    input: string,
+    output: DynamicStructBuilder,
+    report?: (error: TextInputError) => void,
+  ): void {
+    fillStructFromText(input, output, report);
+  }
+
+  decode(
+    input: string,
+    schema: StructSchema,
+    builder: MessageBuilder = new MessageBuilder(),
+  ): DynamicStructReader {
+    const root = initDynamicRoot(builder, schema);
+    this.decodeStruct(input, root);
+    return root.asReader();
+  }
+
+  decodeValue(
+    input: string,
+    type: Type,
+    builder: MessageBuilder = new MessageBuilder(),
+  ): DynamicValueReader {
+    const parser = new TextParser(utf8ByteString(input), throwTextInputError);
+    const ast = parser.parseMessage()!;
+    const value = new TextTranslator(parser, throwTextInputError).compileValue(ast, type)!;
+    if (value.kind === "struct") {
+      const root = initDynamicRoot(builder, value.schema);
+      writeTextStruct(root, value.fields);
+      return DynamicValueReader.fromStruct(root.asReader());
+    }
+    if (value.kind === "list") {
+      const lb = DynamicListBuilder.allocateAtSlot(
+        builder,
+        builder.rootSlot(),
+        value.schema,
+        value.items.length,
+      );
+      writeTextList(lb, value.items);
+      return DynamicValueReader.fromList(lb.asReader());
+    }
+    return scalarTextValue(value, type);
+  }
+}
+
+/**
+ * Encode a DynamicStruct to Cap'n Proto text format (`pretty` defaults to
+ * true, like `capnp decode`). This is `encodeTextBytes` decoded as UTF-8:
+ * capnp writes Text bytes as they are, and a string cannot hold a byte that
+ * is not valid UTF-8, so each invalid sequence in Text shows as U+FFFD.
+ */
+export function encodeText(
+  value: DynamicStructReader | DynamicStructBuilder,
+  opts?: { pretty?: boolean },
+): string {
+  const codec = new TextCodec({ prettyPrint: opts?.pretty ?? true });
+  return codec.encode(value);
+}
+
+/**
+ * Encode text-format output as the exact bytes `capnp decode` prints,
+ * invalid UTF-8 in Text included. Use this rather than `encodeText` when
+ * the output must match capnp byte for byte.
+ */
+export function encodeTextBytes(
+  value: DynamicStructReader | DynamicStructBuilder,
+  opts?: { pretty?: boolean; readCapabilities?: boolean },
+): Uint8Array {
+  const codec = new TextCodec({
+    prettyPrint: opts?.pretty ?? true,
+    readCapabilities: opts?.readCapabilities,
+  });
+  return codec.encodeBytes(value);
+}
+
+/** Decode a single Cap'n Proto text struct literal into a stream-framed `Message`. */
+export function decodeText(input: string, schema: StructSchema): Message {
+  const builder = new MessageBuilder();
+  const root = initDynamicRoot(builder, schema);
+  new TextCodec().decodeStruct(input, root);
+  return Message.fromFlat(builder.toFlat());
+}
+
+/** Decode text-format bytes without replacing invalid UTF-8 sequences. */
+export function decodeTextBytes(input: string | Uint8Array, schema: StructSchema): Message {
+  const bytes = typeof input === "string" ? UTF8_ENC.encode(input) : input;
+  const source = Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
+  const builder = new MessageBuilder();
+  const root = initDynamicRoot(builder, schema);
+  new TextCodec().decodeStructBytes(source, root);
+  return Message.fromFlat(builder.toFlat());
+}
+
+/**
+ * Split a multi-message text stream into individual parenthesized message slices,
+ * matching `readOneText` in the `capnp` CLI. Text before the first message and
+ * after the last stays in the first and last slice, and input with no message
+ * at all is one slice, so whitespace or comments alone fail to parse as in C++.
+ */
+export function splitTextMessages(input: string): string[] {
+  const messages: string[] = [];
+  let state:
+    | "normal"
+    | "comment"
+    = "normal";
+  let depth = 0;
+  let sawClose = false;
+  let start = 0;
+
+  for (let i = 0; i < input.length; i++) {
+    const c = input[i]!;
+    switch (state) {
+      case "normal":
+        if (c === "#") {
+          state = "comment";
+        } else if (c === "(") {
+          if (depth === 0 && sawClose) {
+            messages.push(input.slice(start, i));
+            start = i;
+            sawClose = false;
+          }
+          depth++;
+        } else if (c === ")") {
+          if (depth > 0) {
+            depth--;
+            if (depth === 0) {
+              sawClose = true;
+            }
+          }
+        }
+        break;
+      case "comment":
+        if (c === "\n") state = "normal";
+        break;
+    }
+  }
+
+  if (start < input.length) messages.push(input.slice(start));
+  return messages;
+}

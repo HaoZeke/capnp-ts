@@ -48,6 +48,22 @@ Pre-1.0 minor releases may include breaking API changes.
   cancellation, streaming, membrane and persistence scenarios against
   capnp-C++ in both directions.
 - `docs/orgmode/rpc.org`.
+- `capnp-ts` CLI (`packages/runtime/bin/capnp-ts`, `@haozeke/capnp/cli`)
+  implementing `encode`, `decode`, `convert` across `binary`, `packed`, `flat`,
+  `flat-packed`, `canonical`, `text`, and `json`, plus `eval` for schema
+  constants, field defaults, and subscripted expressions.
+- Cap'n Proto compat JSON codec (`JsonCodec`, `encodeJson`, `decodeJson`,
+  `splitJsonMessages`) matching `capnp/compat/json.h` defaults and `$Json`
+  annotations (`name`, `flatten`, `discriminator`, `hex`, `base64`).
+- Cap'n Proto text-format encoder and decoder (`TextCodec`, `prettyPrint`,
+  `stringify`, `encodeText`, `decodeText`, `splitTextMessages`) matching
+  `capnp decode` pretty/short formatting and `capnp encode` input syntax.
+- Runtime schema reflection (`SchemaLoader`, `Schema`, `StructSchema`,
+  `EnumSchema`, `InterfaceSchema`, `ConstSchema`, `AnnotationSchema`,
+  `ListSchema`, `Type`, generic `Brand` substitution, annotation inspection) and
+  dynamic value API (`DynamicStruct`, `DynamicList`, `DynamicEnum`,
+  `DynamicCapability`, `DynamicValue`, `DynamicOrphan`) with full schema
+  defaults and evolution semantics.
 - `@haozeke/capnp-rpc` covers RPC level 3, both halves. `Provide` holds a
   capability under the recipient's nonce and `Accept` claims it; an
   `Accept` with `embargo` waits for `Disembargo` with `context.provide`.
@@ -127,4 +143,3 @@ Pre-1.0 minor releases may include breaking API changes.
 - Cross-width list demotion matrix beyond the covered upgrade/downgrade suite
 - Generated primitive/pointer-list element builders and group init wrappers
 - Live c-capnproto twin interop (Phase 2; offline sketch only)
-- Dynamic by-name reflection

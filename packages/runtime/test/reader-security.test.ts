@@ -360,7 +360,7 @@ describe("negative list index", () => {
     const b = new MessageBuilder();
     const root = b.initRoot(0, 2);
     root.initPrimList(0, ElemSize.Byte, 4, 1);
-    root.initPrimList(1, ElemSize.Bit, 8, 0); // itemBytes unused for bit path?
+    root.initPrimList(1, ElemSize.Bit, 8, 0);
     const msg = Message.fromFlat(b.toFlat());
     const bytes = msg.root().getP(0);
     const bits = msg.root().getP(1);

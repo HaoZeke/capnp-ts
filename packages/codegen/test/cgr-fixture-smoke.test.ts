@@ -5,7 +5,16 @@
  * CGRs (schema.capnp self-schema, rpc).
  */
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -15,6 +24,7 @@ import {
   summarizeViaHandWalk,
   walkCgr,
 } from "../src/index.ts";
+import { readTextHand } from "../src/cgr-walk.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixturesDir = join(here, "fixtures");
@@ -27,6 +37,10 @@ function listCgrFixtures(): string[] {
 
 function loadFixture(name: string): Uint8Array {
   return new Uint8Array(readFileSync(join(fixturesDir, name)));
+}
+
+function hasCapnp(): boolean {
+  return spawnSync("capnp", ["--version"], { encoding: "utf8" }).status === 0;
 }
 
 describe("CGR fixture smoke", () => {
@@ -105,6 +119,22 @@ describe("CGR fixture smoke", () => {
     expect(viaHand.requestedFilenames).toEqual(viaMessage.requestedFilenames);
   });
 
+  test.skipIf(!hasCapnp())("both paths keep a BOM at the start of a filename like capnp", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "capnp-bom-"));
+    try {
+      const name = "\ufeffb.capnp";
+      writeFileSync(join(dir, name), "@0xd2f3c8a1b4e5f601;\nstruct T { t @0 :Text; }\n");
+      const r = spawnSync("capnp", ["compile", "-o-", name], { cwd: dir });
+      expect(r.status).toBe(0);
+      const bytes = new Uint8Array(r.stdout);
+      expect(parseFramedSegments(bytes).length).toBe(1);
+      expect((await summarizeCgr(bytes)).requestedFilenames).toEqual([name]);
+      expect(summarizeViaHandWalk(bytes).requestedFilenames).toEqual([name]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("multi-segment large CGR still opens via Message (hand walk may not)", async () => {
     for (const name of ["schema.cgr.bin", "rpc.cgr.bin"] as const) {
       const bytes = loadFixture(name);
@@ -148,5 +178,59 @@ describe("CGR fixture smoke", () => {
     expect(src).not.toMatch(/^\s*(export\s+)?enum\s/m);
     // Union which on employment group.
     expect(src).toContain("Person_employment_which");
+  });
+
+  test("readTextHand rejects 0-byte, out-of-bounds, and non-NUL-terminated Text like layout.c++:2480", () => {
+    const listPtr = (offsetWords: number, count: number): bigint =>
+      1n | (BigInt(offsetWords & 0x3fffffff) << 2n) | (2n << 32n) | (BigInt(count) << 35n);
+
+    // Null pointer -> empty string
+    expect(readTextHand(new Uint8Array(16), 0, 0n)).toBe("");
+
+    // Valid empty (1-byte NUL) and non-empty Text
+    const valid = new Uint8Array(16);
+    valid.set([0x61, 0x62, 0x63, 0x00], 8);
+    expect(readTextHand(valid, 0, listPtr(0, 4))).toBe("abc");
+    const emptyText = new Uint8Array(16);
+    expect(readTextHand(emptyText, 0, listPtr(0, 1))).toBe("");
+
+    // 0-byte Text list pointer must be rejected
+    expect(() => readTextHand(new Uint8Array(16), 0, listPtr(0, 0))).toThrow(
+      /NUL-terminated/,
+    );
+
+    // Trailing NUL missing (last byte is non-zero) must be rejected
+    const missingNul = new Uint8Array(16);
+    missingNul.set([0x61, 0x62, 0x63, 0x78], 8);
+    expect(() => readTextHand(missingNul, 0, listPtr(0, 4))).toThrow(
+      /NUL-terminated/,
+    );
+
+    // Segment ends right before the NUL byte (body + count > seg.length, even though body + count - 1 === seg.length)
+    const truncAtNul = new Uint8Array(11);
+    truncAtNul.set([0x61, 0x62, 0x63], 8);
+    expect(() => readTextHand(truncAtNul, 0, listPtr(0, 4))).toThrow(
+      /overruns segment/,
+    );
+
+    // End-to-end through summarizeViaHandWalk: a non-NUL-terminated filename must be rejected (falling back to "")
+    const cgr = new Uint8Array(loadFixture("addressbook.cgr.bin"));
+    const needle = new TextEncoder().encode("addressbook.capnp");
+    let corrupted = 0;
+    for (let i = 0; i <= cgr.length - needle.length; i++) {
+      let ok = true;
+      for (let j = 0; j < needle.length; j++) {
+        if (cgr[i + j] !== needle[j]) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok && cgr[i + needle.length] === 0) {
+        cgr[i + needle.length] = 0x21; // corrupt trailing NUL to '!'
+        corrupted++;
+      }
+    }
+    expect(corrupted).toBeGreaterThan(0);
+    expect(summarizeViaHandWalk(cgr).requestedFilenames).toEqual([""]);
   });
 });

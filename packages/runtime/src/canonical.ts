@@ -13,9 +13,11 @@
 import { storeU64 } from "./endian.ts";
 import {
   CapnpError,
-  DEFAULT_DEPTH_LIMIT,
   ElemSize,
+  clearTrailingListBits,
+  exactProduct,
   listStepBits,
+  primitiveBodySize,
   PtrKind,
   WORD_BYTES,
 } from "./kinds.ts";
@@ -125,7 +127,7 @@ function copyPtrToWord(
   src: Ptr,
   depth: number,
 ): void {
-  if (depth > DEFAULT_DEPTH_LIMIT) {
+  if (depth > src.msg.depthLimit) {
     throw new CapnpError("DEPTH", "canonical copy depth exceeded");
   }
   if (src.kind === PtrKind.Null) {
@@ -178,7 +180,7 @@ function writeListToSlot(
   if (esize === ElemSize.Composite) {
     const { nd, np } = compositeTrim(list);
     const step = nd + np;
-    const content = n * step;
+    const content = exactProduct(n, step);
     const tagWord = b.alloc(1 + content);
     // Tag word reuses struct layout: offset field holds element count.
     b.storeWord(tagWord, wpMakeStruct(n, nd, np));
@@ -186,15 +188,18 @@ function writeListToSlot(
     // List count field = content words excluding tag.
     b.storeWord(slotWord, wpMakeList(off, ElemSize.Composite, content));
     const first = tagWord + 1;
-    for (let i = 0; i < n; i++) {
-      const el = list.listGetStruct(i);
-      writeStructBodyData(b, first + i * step, nd, el);
-      for (let k = 0; k < np; k++) {
-        const cslot = first + i * step + nd + k;
-        if (k < el.pwords) {
-          copyPtrToWord(b, cslot, el.getP(k), depth + 1);
-        } else {
-          b.storeWord(cslot, 0n);
+    // Zero-sized elements contribute no words. Walking `n` would amplify.
+    if (step > 0) {
+      for (let i = 0; i < n; i++) {
+        const el = list.listGetStruct(i);
+        writeStructBodyData(b, first + i * step, nd, el);
+        for (let k = 0; k < np; k++) {
+          const cslot = first + i * step + nd + k;
+          if (k < el.pwords) {
+            copyPtrToWord(b, cslot, el.getP(k), depth + 1);
+          } else {
+            b.storeWord(cslot, 0n);
+          }
         }
       }
     }
@@ -202,12 +207,7 @@ function writeListToSlot(
   }
 
   if (esize === ElemSize.Pointer) {
-    let listStart: number;
-    if (n > 0) {
-      listStart = b.alloc(n);
-    } else {
-      listStart = slotWord + 1;
-    }
+    const listStart = b.alloc(n);
     const off = listStart - slotWord - 1;
     b.storeWord(slotWord, wpMakeList(off, ElemSize.Pointer, n));
     for (let i = 0; i < n; i++) {
@@ -221,20 +221,16 @@ function writeListToSlot(
   if (stepBits < 0) {
     throw new CapnpError("KIND", `bad list esize ${esize}`);
   }
-  const bits = stepBits === 0 ? 0 : stepBits === 1 ? n : n * stepBits;
-  const nbytes = (bits + 7) >>> 3;
-  const nwords = (nbytes + 7) >>> 3;
-  let start: number;
+  const { nbytes, nwords } = primitiveBodySize(n, stepBits);
+  const start = b.alloc(nwords);
   if (nwords > 0) {
-    start = b.alloc(nwords);
     const seg = list.msg.segs[list.seg]!;
     const srcOff = list.word * WORD_BYTES;
     b.data.set(
       seg.data.subarray(srcOff, srcOff + nbytes),
       start * WORD_BYTES,
     );
-  } else {
-    start = slotWord + 1;
+    clearTrailingListBits(b.data, start * WORD_BYTES, n, stepBits);
   }
   const off = start - slotWord - 1;
   b.storeWord(slotWord, wpMakeList(off, esize, n));
@@ -244,10 +240,13 @@ function writeListToSlot(
  * Canonical bytes of a message's root object: one raw segment starting with
  * the root pointer (no segment table). Matches `capnp convert binary:canonical`.
  */
-export function canonicalize(message: Message): Uint8Array {
+export function canonicalize(
+  message: Message,
+  limits?: { traversalWords?: number; depthLimit?: number },
+): Uint8Array {
   // Fresh Message over the same segment bodies so traversal budget is full
   // and the caller's charge counter is left alone.
-  const fresh = Message.fromSegments(message.segments);
+  const fresh = Message.fromSegments(message.segments, limits);
   const root = fresh.root();
   const b = new CanonBuilder(Math.max(64, estimateWords(fresh)));
   const rootWord = b.alloc(1);
@@ -275,12 +274,15 @@ export function canonicalizeFlat(framed: Uint8Array): Uint8Array {
  * Wrap a raw single-segment payload (no stream table; word 0 is the root
  * pointer) as a Message for canonicalize / readers.
  */
-export function messageFromRawSegment(raw: Uint8Array): Message {
+export function messageFromRawSegment(
+  raw: Uint8Array,
+  limits?: { traversalWords?: number; depthLimit?: number },
+): Message {
   if (raw.byteLength % WORD_BYTES !== 0) {
     throw new CapnpError("FRAMING", "raw segment length not word-aligned");
   }
   if (raw.byteLength === 0) {
     throw new CapnpError("FRAMING", "empty raw segment");
   }
-  return Message.fromSegments([raw]);
+  return Message.fromSegments([raw], limits);
 }

@@ -24,7 +24,7 @@ npm packages:
 
 | Package | Role |
 |---------|------|
-| [`@haozeke/capnp`](packages/runtime) | Wire runtime (kinds, pointer, message, builder, packed, canonical) |
+| [`@haozeke/capnp`](packages/runtime) | Wire runtime, dynamic reflection, text/JSON codecs, `capnp-ts` CLI |
 | [`@haozeke/capnpc-ts`](packages/codegen) | `capnp compile -o` plugin (typed struct/enum/union emit) |
 
 Not a soft fork of the unmaintained `jdiaz5513/capnp-ts`, not a libcapnp /
@@ -47,6 +47,11 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
 - Stream segment-table serialize (`serializeToFlat` / `frameSegments`)
 - Multi-segment `MessageBuilder` arena with far / double-far pointer paths
 - Same-message orphan `disown` / `adopt`; cross-message `deepCopyPtr` / `structSetP`
+- Runtime schema reflection (`SchemaLoader`, `StructSchema`, `EnumSchema`,
+  `ListSchema`, `InterfaceSchema`, `ConstSchema`, `AnnotationSchema`, `Type`,
+  generic `Brand` substitution, annotation inspection) and dynamic value API
+  (`DynamicStruct`, `DynamicList`, `DynamicEnum`, `DynamicCapability`,
+  `DynamicOrphan`, schema-evolution defaults and list up/downgrade)
 - `capnpc-ts` emits schema `Field.defaultValue` into scalar and Text/Data
   getters; generated scalar setters use the same XOR defaults
 - Packed codec (`pack` / `unpack`) byte-identical to Cap'n C++ 1.4.0 on
@@ -54,6 +59,16 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
 - Canonical form (`canonicalize` / `canonicalizeFlat`) byte-identical to
   `capnp convert binary:canonical` on AddressBook
   (`canonicalizeFlat(addressbook.bin) == addressbook.canonical.bin`, 272 B)
+- Cap'n Proto text-format encoder and decoder (`TextCodec`, `prettyPrint`,
+  `stringify`, `encodeText`, `decodeText`, `splitTextMessages`) matching
+  `capnp decode` pretty/short output and `capnp encode` literal syntax
+- Cap'n Proto compat JSON codec (`JsonCodec`, `encodeJson`, `decodeJson`,
+  `splitJsonMessages`) matching `capnp/compat/json.h` defaults and `$Json`
+  annotations (`name`, `flatten`, `discriminator`, `hex`, `base64`)
+- `capnp-ts` CLI (`packages/runtime/bin/capnp-ts`, `@haozeke/capnp/cli`)
+  implementing `encode`, `decode`, `convert` across `binary`, `packed`, `flat`,
+  `flat-packed`, `canonical`, `text`, and `json`, plus `eval` for schema
+  constants and field defaults
 - Traversal word budget (8 Mi words) and nesting depth limit (64), matching
   Cap'n C++ reader defaults (`DEFAULT_TRAVERSAL_WORDS` / `DEFAULT_DEPTH_LIMIT`;
   far hops and `getP` / `listGetP` accumulate depth)
@@ -65,8 +80,7 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
   `which`, Text/Data setters, shape-aware struct and `List(Struct)` initializers,
   List(Text) via `listGetText`, u64probe-safe `getU64`/`bigint`)
 
-Current limits: generated primitive/pointer-list element builders and dynamic
-reflection.
+Current limits: generated primitive/pointer-list element builders.
 
 `@haozeke/capnp-rpc` is the vat: levels 1 and 3, the level 2 `Persistent`
 interface as capnp-C++ has it, and level 4 `Join`, with promises, pipelining,
@@ -128,6 +142,7 @@ and enforces it with `CAPNP_REQUIRE_PYCAPNP=1`):
 ```console
 $ python3 -m venv .venv-pycapnp
 $ .venv-pycapnp/bin/pip install --upgrade pip pycapnp
+$ .venv-pycapnp/bin/python scripts/pycapnp_interop.py check
 $ .venv-pycapnp/bin/python scripts/pycapnp_interop.py write-all
 $ CAPNP_REQUIRE_PYCAPNP=1 bun test --timeout 10000 packages/runtime/test/pycapnp-interop.test.ts
 ```
@@ -238,6 +253,31 @@ bytes as `x`. Pass `{ compactFramed: true }` to compact a stream-framed
 message into one segment first, which is what `capnp convert binary:packed`
 does. That option changes the unpacked bytes of a multi-segment frame.
 
+Dynamic reflection, text format, JSON codec, and `capnp-ts` CLI:
+
+```typescript
+import {
+  DynamicStruct,
+  Message,
+  SchemaLoader,
+  encodeJson,
+  encodeText,
+} from "@haozeke/capnp";
+
+const loader = SchemaLoader.fromCgr(cgrBytes);
+const bookSchema = loader.resolveStruct("AddressBook");
+const book = DynamicStruct.fromMessage(Message.fromFlat(bytes), bookSchema);
+
+console.log(encodeText(book)); // capnp decode format
+console.log(encodeJson(book)); // capnp/compat/json.h format
+```
+
+```console
+$ ./packages/runtime/bin/capnp-ts decode schema/addressbook.capnp AddressBook < packages/runtime/test/golden/addressbook.bin
+$ ./packages/runtime/bin/capnp-ts convert binary:json schema/addressbook.capnp AddressBook < packages/runtime/test/golden/addressbook.bin
+$ ./packages/runtime/bin/capnp-ts eval schema/dynamic-kitchen.capnp extremeConst.matrix[0][1]
+```
+
 Regenerate goldens (needs system `capnp` 1.4.*):
 
 ```console
@@ -274,7 +314,6 @@ examples/           pi-admit-harness (Message.fromFlat Alice/Bob dogfood)
 | Wrapping node-capnp / libcapnp | Pure TS only (Bun strip loaders and extension packs) |
 | Cap'n Web | Separate ecosystem |
 | Byte-identical *builder* output without documented alloc order | Semantic round-trip first; live twin is Phase 2 |
-| Full dynamic reflection | Optional later |
 
 ## Family
 
@@ -305,6 +344,6 @@ Tier A for this package means:
 3. Bidirectional interop with **pycapnp** (decode their frames; they decode our builder frames)
 4. Adversarial security fixes on reader/builder (depth, list charge, composite tag)
 
-Still not “full Cap'n C++”: not every schema-evolution demotion edge, no dynamic
-API, and generated list builders cover composite structs rather than every
-element kind. RPC ships separately as `@haozeke/capnp-rpc`.
+Still not “full Cap'n C++”: not every schema-evolution demotion edge, and
+generated list builders cover composite structs rather than every element
+kind. RPC ships separately as `@haozeke/capnp-rpc`.
