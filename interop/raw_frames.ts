@@ -43,6 +43,7 @@ const M = {
   slow: 4,
   resolveLater: 3,
   echoCap: 8,
+  fail: 9,
   brokenCap: 10,
   promiseOfHeld: 13,
   hold: 11,
@@ -130,6 +131,36 @@ function hold(q: number, id: number, kind = 1): Uint8Array {
   const table = payload.initCompositeList(1, 1, 1, 1);
   table.setU16(0, kind);
   table.setU32(4, id);
+  return b.toFlat();
+}
+
+/**
+ * A call whose params pointer 0 is capability `ref`, with a cap table of
+ * `[kind, id]` entries; kind 0 is `none`.
+ */
+function capCall(
+  q: number,
+  method: number,
+  target: (t: StructBuilder) => void,
+  entries: Array<[number, number]>,
+  ref = 0,
+): Uint8Array {
+  const b = new MessageBuilder();
+  const root = b.initRoot(1, 1);
+  root.setU16(0, Message.call);
+  const c = root.initStruct(0, 3, 3);
+  c.setU32(0, q);
+  c.setU64(8, ECHO);
+  c.setU16(4, method);
+  target(c.initStruct(0, 1, 1));
+  const payload = c.initStruct(1, 0, 2);
+  payload.initStruct(0, 1, 1).adopt(0, Orphan.cap(b, ref));
+  let entry = payload.initCompositeList(1, entries.length, 1, 1);
+  entries.forEach(([kind, id], i) => {
+    if (i > 0) entry = entry.nextElement();
+    entry.setU16(0, kind);
+    entry.setU32(4, id);
+  });
   return b.toFlat();
 }
 
@@ -318,6 +349,9 @@ const SCENARIOS: Record<string, Step[]> = {
     W(100),
     call({ q: 2, method: M.callHeld, target: (t) => targetAnswer(t, 0), params: (p) => p.setU32(0, 3) }),
   ],
+  // A capability in params that the method never keeps is released after the Return.
+  "unused-param-cap": [bootstrap(0), capCall(1, M.ping, (t) => targetAnswer(t, 0), [[1, 5]]), W(100)],
+  "unused-param-cap-failed": [bootstrap(0), capCall(1, M.fail, (t) => targetAnswer(t, 0), [[1, 5]]), W(100)],
   // A Resolve to `CapDescriptor.none`, written out and as a null descriptor.
   "resolve-none": [bootstrap(0), hold(1, 5, 2), W(100), resolveCap(5, 0)],
   "resolve-null-descriptor": [bootstrap(0), hold(1, 5, 2), W(100), resolveCap(5, null)],

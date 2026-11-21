@@ -1336,3 +1336,16 @@ describe("the null capability (capability.c++ newNullCap)", () => {
     });
   });
 });
+
+describe("a call's param capabilities (rpc.c++ RpcCallContext paramsCapTable)", () => {
+  test("are released after the call's Return", async () => {
+    for (const server of [ping, { dispatch: () => Promise.reject(new RpcError("no")) }]) {
+      const r = raw(server);
+      r.send(bootstrap(0));
+      r.take();
+      r.send(callWithCap(1, (t) => toAnswer(t, 0), CapDescriptor.senderHosted, 5));
+      await nextTurn();
+      expect(r.take().map((m) => m.which)).toEqual([Message.return, Message.release]);
+    }
+  });
+});

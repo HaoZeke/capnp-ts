@@ -1781,6 +1781,9 @@ export class RpcConnection implements RemoteHost {
     // As capnp-C++ passes the call's hints to `startCall`: a forwarded or
     // tail call goes out with `sendForPipeline()`.
     if (answer.onlyPromisePipeline) opts.onlyPromisePipeline = true;
+    // capnp-C++ keeps the params cap table in the call context, so the
+    // capabilities the call was given are released after its Return.
+    const paramCaps = caps.map((c) => c.addRef());
     const state = target.call(Call_getInterfaceId(call), Call_getMethodId(call), callPayload, opts);
     target.release();
     answer.call = state;
@@ -1788,7 +1791,13 @@ export class RpcConnection implements RemoteHost {
     this.callWordsInFlight += words;
     state.result.onSettled((s) => {
       this.callWordsInFlight -= words;
-      this.returnInOrder(() => this.completeAnswer(questionId, answer, s));
+      this.returnInOrder(() => {
+        try {
+          this.completeAnswer(questionId, answer, s);
+        } finally {
+          for (const c of paramCaps) c.release();
+        }
+      });
       this.maybeUnblockFlow();
     });
   }
