@@ -1379,8 +1379,8 @@ function emitInterface(
   const directSupers = (node.superclasses ?? [])
     .map((s) => ctx.byId.get(s.id))
     .filter((n): n is NodeAst => n !== undefined);
-  const singleSuper =
-    directSupers.length === 1 ? shortTypeName(directSupers[0]!.displayName) : "";
+  const singleNode = directSupers.length === 1 ? directSupers[0] : undefined;
+  const singleSuper = singleNode ? shortTypeName(singleNode.displayName) : "";
   const extendsClause = singleSuper ? ` extends ${singleSuper}Server` : "";
 
   // Server: dispatch an incoming Call to a named method.
@@ -1420,16 +1420,34 @@ function emitInterface(
   }
   lines.push(
     `        default:`,
-    "          throw Object.assign(new Error(`Method not implemented.; interfaceName = " +
-      node.displayName +
-      "; typeId = " +
-      node.id.toString() +
-      "; methodId = ${methodId}`), { type: \"unimplemented\" });",
+    unimplementedMethod(node),
     `      }`,
     `    }`,
   );
-  if (singleSuper) {
-    lines.push(`    super.dispatch(interfaceId, methodId, params, results);`);
+  if (singleNode) {
+    const checks = ancestors
+      .map((iface) => {
+        const ownerName = shortTypeName(iface.displayName);
+        return `interfaceId === ${upperSnake(ownerName)}_INTERFACE_ID`;
+      })
+      .join(" || ");
+    if (checks.length > 0) {
+      lines.push(
+        `    if (${checks}) {`,
+        `      super.dispatch(interfaceId, methodId, params, results);`,
+        `      return;`,
+        `    }`,
+      );
+    }
+    lines.push(
+      "    throw Object.assign(new Error(" +
+        JSON.stringify(
+          "Requested interface not implemented.; actualInterfaceName = " +
+            node.displayName +
+            "; requestedTypeId = ",
+        ) +
+        " + interfaceId), { type: \"unimplemented\" });",
+    );
   } else {
     for (const iface of ancestors) {
       const ownerName = shortTypeName(iface.displayName);
@@ -1448,22 +1466,36 @@ function emitInterface(
       }
       lines.push(
         `        default:`,
-        "          throw Object.assign(new Error(`Method not implemented.; interfaceName = " +
-          iface.displayName +
-          "; typeId = " +
-          iface.id.toString() +
-          "; methodId = ${methodId}`), { type: \"unimplemented\" });",
+        unimplementedMethod(iface),
         `      }`,
         `    }`,
       );
     }
     lines.push(
-      "    throw Object.assign(new Error(`Requested interface not implemented.; actualInterfaceName = " +
-        node.displayName +
-        "; requestedTypeId = ${interfaceId}`), { type: \"unimplemented\" });",
+      "    throw Object.assign(new Error(" +
+        JSON.stringify(
+          "Requested interface not implemented.; actualInterfaceName = " + node.displayName + "; requestedTypeId = ",
+        ) +
+        " + interfaceId), { type: \"unimplemented\" });",
     );
   }
   lines.push(`  }`, `}`, ``);
+}
+
+/** Unknown method, naming the interface the call addressed. */
+function unimplementedMethod(node: NodeAst): string {
+  const prefix = JSON.stringify(
+    "Method not implemented.; interfaceName = " +
+      node.displayName +
+      "; typeId = " +
+      node.id.toString() +
+      "; methodId = ",
+  );
+  return (
+    "          throw Object.assign(new Error(" +
+    prefix +
+    " + methodId), { type: \"unimplemented\" });"
+  );
 }
 
 /** Zero a group's slots so a union switch does not keep the previous arm. */

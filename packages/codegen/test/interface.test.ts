@@ -102,13 +102,17 @@ describe("interface stubs", () => {
   test("an unknown method or interface is unimplemented, as capnp-C++", () => {
     const id = 0xea01e10cbc414411n.toString();
     expect(src).toContain(
-      "`Method not implemented.; interfaceName = adder.capnp:Adder; typeId = " +
-        id +
-        "; methodId = ${methodId}`",
+      JSON.stringify(
+        "Method not implemented.; interfaceName = adder.capnp:Adder; typeId = " +
+          id +
+          "; methodId = ",
+      ) + " + methodId",
     );
     expect(src).toContain('{ type: "unimplemented" }');
     expect(src).toContain(
-      "`Requested interface not implemented.; actualInterfaceName = adder.capnp:Adder; requestedTypeId = ${interfaceId}`",
+      JSON.stringify(
+        "Requested interface not implemented.; actualInterfaceName = adder.capnp:Adder; requestedTypeId = ",
+      ) + " + interfaceId",
     );
     expect(src).not.toContain("${Adder}");
   });

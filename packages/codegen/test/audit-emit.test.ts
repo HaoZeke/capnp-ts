@@ -145,6 +145,16 @@ describe.skipIf(!hasCapnp())("audit emit", () => {
     const multi = src.slice(multiStart, multiEnd > multiStart ? multiEnd : src.length);
     expect(multi).toContain("BASE_INTERFACE_ID");
     expect(multi).toContain("EXTRA_INTERFACE_ID");
+    expect(multi).toContain("audit.capnp:Multi");
+    expect(multi).toContain("audit.capnp:Child");
+    expect(multi).toContain("audit.capnp:Extra");
+    const grandServerStart = src.indexOf("export abstract class GrandChildServer");
+    const grandServerEnd = src.indexOf("export abstract class", grandServerStart + 10);
+    const grandServer = src.slice(
+      grandServerStart,
+      grandServerEnd > grandServerStart ? grandServerEnd : src.length,
+    );
+    expect(grandServer).toContain("audit.capnp:GrandChild");
     expect(src).toContain("ptr.setU16(");
 
     const out = join(import.meta.dir, `.audit-emit-${process.pid}.ts`);
@@ -155,6 +165,9 @@ describe.skipIf(!hasCapnp())("audit emit", () => {
       Choice_ug_nested_discriminantOffset: number;
       Choice_initUg: (root: unknown) => void;
       Choice_ug_nested_which: (root: unknown) => number;
+      GrandChildServer: new () => {
+        dispatch(interfaceId: bigint, methodId: number, params: unknown, results: unknown): void;
+      };
     };
     try {
       mod = await import(out);
@@ -168,5 +181,13 @@ describe.skipIf(!hasCapnp())("audit emit", () => {
     mod.Choice_initUg(root);
     const read = Message.fromFlat(b.toFlat()).root();
     expect(mod.Choice_ug_nested_which(read)).toBe(0);
+
+    class Impl extends mod.GrandChildServer {
+      ping(): void {}
+      pong(): void {}
+    }
+    const params = new MessageBuilder().initRoot(0, 0);
+    const results = new MessageBuilder().initRoot(0, 0);
+    expect(() => new Impl().dispatch(1n, 0, params, results)).toThrow(/audit\.capnp:GrandChild/);
   });
 });
