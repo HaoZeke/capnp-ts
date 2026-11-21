@@ -349,7 +349,7 @@ function readWord(m: Message, seg: number, word: number): bigint {
 function chargeWords(m: Message, words: number | bigint): void {
   const w = typeof words === "bigint" ? words : BigInt(words);
   assertCapnp(w >= 0n, "BOUNDS");
-  if (w > BigInt(m.traversalLeft)) {
+  if (m.traversalLeft !== Infinity && w > BigInt(m.traversalLeft)) {
     throw new CapnpError("TRAVERSAL");
   }
   m.charge(Number(w));

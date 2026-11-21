@@ -8,7 +8,6 @@
 
 import {
   CapnpError,
-  DEFAULT_DEPTH_LIMIT,
   ElemSize,
   PtrKind,
   WORD_BYTES,
@@ -47,7 +46,7 @@ export function deepCopyPtrToSlot(
   src: Ptr,
   depth = 0,
 ): void {
-  if (depth > DEFAULT_DEPTH_LIMIT) {
+  if (depth > src.msg.depthLimit) {
     throw new CapnpError("DEPTH", "deep-copy depth exceeded");
   }
   if (src.kind === PtrKind.Null) {

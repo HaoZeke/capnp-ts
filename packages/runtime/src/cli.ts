@@ -49,6 +49,9 @@ export type WireFormat =
   | "text"
   | "json";
 
+/** `capnp` lifts the traversal and nesting limits, being a debug tool. */
+const CLI_READ_LIMITS = { traversalWords: Infinity, depthLimit: Infinity };
+
 const VALID_FORMATS = new Set<string>([
   "binary",
   "packed",
@@ -131,10 +134,7 @@ function* iterateFramedMessages(input: Uint8Array): Generator<Message> {
       "FRAMING",
       "truncated segment body in stream",
     );
-    yield Message.fromFlat(input.subarray(offset, offset + frameBytes), {
-      traversalWords: 1_073_741_824,
-      depthLimit: 256,
-    });
+    yield Message.fromFlat(input.subarray(offset, offset + frameBytes), CLI_READ_LIMITS);
     offset += frameBytes;
   }
 }
@@ -454,16 +454,13 @@ function* iterateMessagesInFormat(
       const wordBytes = (input.byteLength >>> 3) * WORD_BYTES;
       assertCapnp(wordBytes > 0, "FRAMING", "flat input shorter than one word");
       yield {
-        message: Message.fromSegments([input.subarray(0, wordBytes)], {
-          traversalWords: 1_073_741_824,
-          depthLimit: 256,
-        }),
+        message: Message.fromSegments([input.subarray(0, wordBytes)], CLI_READ_LIMITS),
       };
       return;
     }
     case "flat-packed": {
       const raw = unpack(input, { maxWords: 1_073_741_824 });
-      yield { message: messageFromRawSegment(raw) };
+      yield { message: messageFromRawSegment(raw, CLI_READ_LIMITS) };
       return;
     }
     case "canonical": {
@@ -473,11 +470,8 @@ function* iterateMessagesInFormat(
         "CANONICAL",
         "canonical input must be non-empty and word-aligned",
       );
-      const msg = Message.fromSegments([input], {
-        traversalWords: 1_073_741_824,
-        depthLimit: 256,
-      });
-      const recanon = canonicalize(msg);
+      const msg = Message.fromSegments([input], CLI_READ_LIMITS);
+      const recanon = canonicalize(msg, CLI_READ_LIMITS);
       assertCapnp(
         bytesEqual(recanon, input),
         "CANONICAL",
@@ -502,7 +496,7 @@ function* iterateMessagesInFormat(
           root,
           opts?.recover ? (e) => { error ??= e; } : undefined,
         );
-        yield { message: Message.fromFlat(builder.toFlat()), error };
+        yield { message: Message.fromFlat(builder.toFlat(), CLI_READ_LIMITS), error };
       }
       return;
     }
@@ -514,7 +508,14 @@ function* iterateMessagesInFormat(
       );
       const source = Array.from(input, (byte) => String.fromCharCode(byte)).join("");
       for (const slice of splitJsonMessages(source)) {
-        yield { message: decodeJson(Uint8Array.from(slice, (ch) => ch.charCodeAt(0)), rootSchema) };
+        // `decodeJson` builds with a fresh reader, so library defaults (8Mi
+        // words, depth 64) would apply. `capnp` reads the built message with
+        // the lifted limits from capnp.c++ (builder arena is unlimited).
+        const decoded = decodeJson(
+          Uint8Array.from(slice, (ch) => ch.charCodeAt(0)),
+          rootSchema,
+        );
+        yield { message: Message.fromSegments(decoded.segments, CLI_READ_LIMITS) };
       }
       return;
     }
@@ -574,17 +575,14 @@ export function writeMessageInFormat(
     case "flat-packed":
       return pack(buildFlatSingleSegment(msg));
     case "canonical":
-      return canonicalize(msg);
+      return canonicalize(msg, CLI_READ_LIMITS);
     case "text": {
       assertCapnp(
         rootSchema !== undefined,
         "ARG",
         "text format requires <schema> and <type>",
       );
-      const fresh = Message.fromSegments(msg.segments, {
-        traversalWords: 1_073_741_824,
-        depthLimit: 256,
-      });
+      const fresh = Message.fromSegments(msg.segments, CLI_READ_LIMITS);
       fresh.onRecoverable = msg.onRecoverable;
       const reader = DynamicStruct.fromMessage(fresh, rootSchema);
       const text = encodeTextBytes(reader, { pretty, readCapabilities: false });
@@ -599,10 +597,7 @@ export function writeMessageInFormat(
         "ARG",
         "json format requires <schema> and <type>",
       );
-      const fresh = Message.fromSegments(msg.segments, {
-        traversalWords: 1_073_741_824,
-        depthLimit: 256,
-      });
+      const fresh = Message.fromSegments(msg.segments, CLI_READ_LIMITS);
       fresh.onRecoverable = msg.onRecoverable;
       const reader = DynamicStruct.fromMessage(fresh, rootSchema);
       const json = encodeJsonBytes(reader, {
@@ -921,10 +916,7 @@ export function formatEvaluatedValue(
   const st: DynamicStructReader = value.asStruct();
   const b = new MessageBuilder();
   setDynamicRoot(b, st);
-  const msg = Message.fromFlat(b.toFlat(), {
-    traversalWords: 1_073_741_824,
-    depthLimit: 256,
-  });
+  const msg = Message.fromFlat(b.toFlat(), CLI_READ_LIMITS);
   return writeMessageInFormat(msg, format, st.getSchema(), opts);
 }
 

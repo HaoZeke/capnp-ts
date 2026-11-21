@@ -13,7 +13,6 @@
 import { storeU64 } from "./endian.ts";
 import {
   CapnpError,
-  DEFAULT_DEPTH_LIMIT,
   ElemSize,
   exactProduct,
   listStepBits,
@@ -127,7 +126,7 @@ function copyPtrToWord(
   src: Ptr,
   depth: number,
 ): void {
-  if (depth > DEFAULT_DEPTH_LIMIT) {
+  if (depth > src.msg.depthLimit) {
     throw new CapnpError("DEPTH", "canonical copy depth exceeded");
   }
   if (src.kind === PtrKind.Null) {
@@ -239,10 +238,13 @@ function writeListToSlot(
  * Canonical bytes of a message's root object: one raw segment starting with
  * the root pointer (no segment table). Matches `capnp convert binary:canonical`.
  */
-export function canonicalize(message: Message): Uint8Array {
+export function canonicalize(
+  message: Message,
+  limits?: { traversalWords?: number; depthLimit?: number },
+): Uint8Array {
   // Fresh Message over the same segment bodies so traversal budget is full
   // and the caller's charge counter is left alone.
-  const fresh = Message.fromSegments(message.segments);
+  const fresh = Message.fromSegments(message.segments, limits);
   const root = fresh.root();
   const b = new CanonBuilder(Math.max(64, estimateWords(fresh)));
   const rootWord = b.alloc(1);
@@ -270,12 +272,15 @@ export function canonicalizeFlat(framed: Uint8Array): Uint8Array {
  * Wrap a raw single-segment payload (no stream table; word 0 is the root
  * pointer) as a Message for canonicalize / readers.
  */
-export function messageFromRawSegment(raw: Uint8Array): Message {
+export function messageFromRawSegment(
+  raw: Uint8Array,
+  limits?: { traversalWords?: number; depthLimit?: number },
+): Message {
   if (raw.byteLength % WORD_BYTES !== 0) {
     throw new CapnpError("FRAMING", "raw segment length not word-aligned");
   }
   if (raw.byteLength === 0) {
     throw new CapnpError("FRAMING", "empty raw segment");
   }
-  return Message.fromSegments([raw]);
+  return Message.fromSegments([raw], limits);
 }

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1259,6 +1260,142 @@ describe("capabilities without a capability context like capnp 1.4.0", () => {
     expect(live.code).toBe(1);
     expect(live.stderr).toContain(noContext.slice("capnp-ts: ".length));
   });
+});
+
+describe("read limits lifted like the capnp tool", () => {
+  const ksCgr = join(goldenDir, "dynamic-kitchen.cgr.bin");
+  const sha256 = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
+
+  // `KitchenSink.voids` claims 400 million elements in a 10-word message.
+  async function amplifiedVoids(): Promise<Uint8Array> {
+    const enc = await execCliInMemory(
+      ["encode", ksCgr, "KitchenSink"],
+      new TextEncoder().encode("(voids = [void])"),
+    );
+    const msg = enc.stdout.slice();
+    const view = new DataView(msg.buffer);
+    for (let at = 8; at + 8 <= msg.byteLength; at += 8) {
+      if ((view.getUint32(at, true) & 3) === 1 && view.getUint32(at + 4, true) === 1 << 3) {
+        view.setUint32(at + 4, (400_000_000 << 3) >>> 0, true);
+      }
+    }
+    return msg;
+  }
+
+  // `Envelope.payload` holds a chain of 300 single-pointer structs.
+  function deepEnvelope(): Uint8Array {
+    const words = [0x0003000000000000n, 0n, 0x0001000000000004n, 0n];
+    for (let i = 0; i < 300; i++) words.push(i < 299 ? 0x0001000000000000n : 0n);
+    const out = new Uint8Array(8 + words.length * 8);
+    const view = new DataView(out.buffer);
+    view.setUint32(4, words.length, true);
+    words.forEach((w, i) => view.setBigUint64(8 + i * 8, w, true));
+    return out;
+  }
+
+  const cases: [string, () => Promise<Uint8Array> | Uint8Array, string, string, string][] = [
+    ["amplified List(Void)", amplifiedVoids, "KitchenSink", "canonical", "38668259e8b36651451cfb5a6c1206d6b477b3cc064b9c089dddd097d3550a6f"],
+    ["amplified List(Void)", amplifiedVoids, "KitchenSink", "flat", "c14d72acd808e8b0a20de8f487858b8bf2709c812ef39f6f59cc6f48ccdc9641"],
+    ["300-level nesting", deepEnvelope, "Envelope", "canonical", "0aabe8c9cd1ce081327c4e9010c066ee0d083879a630cf049076dd5ac409c6d0"],
+    ["300-level nesting", deepEnvelope, "Envelope", "flat", "fe25555763090c8c6913c871a58c18696e57d76d1210a47bd84accae1fc25cab"],
+    ["300-level nesting", deepEnvelope, "Envelope", "binary", "455cb8367961c7e17ae3c542b64225db1f15267c4f96e045879f61448c86b611"],
+    ["300-level nesting", deepEnvelope, "Envelope", "text", "f47cb8241e8f38828db086379153fe9cdaaa5e37831fb18903cdda2d2fbad48a"],
+  ];
+
+  for (const [name, input, type, to, digest] of cases) {
+    test(`${name} converts to ${to} as capnp writes it`, async () => {
+      const r = await execCliInMemory(["convert", `binary:${to}`, ksCgr, type], await input());
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(sha256(r.stdout)).toBe(digest);
+    });
+  }
+
+  test.skipIf(!hasCapnp)("digests match live capnp", async () => {
+    const schemaPath = join(repoRoot, "schema", "dynamic-kitchen.capnp");
+    for (const [, input, type, to, digest] of cases) {
+      const live = execCapnp(["convert", `binary:${to}`, schemaPath, type], await input());
+      expect({ to, code: live.code, digest: sha256(live.stdout) }).toEqual({ to, code: 0, digest });
+    }
+  });
+
+  // Deepest `Expression` chain `capnp` 1.4.0 accepts as JSON (codec nesting
+  // 64). `KitchenSink.voids` of 8Mi+1 nulls is a List(Void) whose read passes
+  // the default 8Mi traversal budget only when the CLI lifts it.
+  function expressionChain(levels: number): Uint8Array {
+    let body = '{"literal":1.5}';
+    for (let i = 0; i < levels; i++) body = `{"op":"add","params":[${body}]}`;
+    return new TextEncoder().encode(body);
+  }
+
+  function amplifiedVoidJson(): Uint8Array {
+    const count = 8 * 1024 * 1024 + 1;
+    const chunks: string[] = ['{"voids":['];
+    const block = "null,".repeat(100_000);
+    let left = count;
+    while (left > 1) {
+      const take = Math.min(100_000, left - 1);
+      chunks.push(take === 100_000 ? block : "null,".repeat(take));
+      left -= take;
+    }
+    chunks.push("null]}");
+    return new TextEncoder().encode(chunks.join(""));
+  }
+
+  const jsonInputs: {
+    name: string;
+    tsSchema: string;
+    cppSchema: string;
+    type: string;
+    input: () => Uint8Array;
+    digests: { flat: string; binary: string };
+  }[] = [
+    {
+      name: "31-level struct chain",
+      tsSchema: join(repoRoot, "schema", "calculator.capnp"),
+      cppSchema: join(repoRoot, "schema", "calculator.capnp"),
+      type: "Expression",
+      input: () => expressionChain(31),
+      digests: {
+        flat: "85b7815b61808d717438a5a71314e14c3b7b80744c19e6a9f701b6349fb8a1a6",
+        binary: "95c299b163278d5972f92c5698b7413379b8db11ca5a2c1bbb99cdca17d72e45",
+      },
+    },
+    {
+      name: "amplified List(Void)",
+      tsSchema: ksCgr,
+      cppSchema: join(repoRoot, "schema", "dynamic-kitchen.capnp"),
+      type: "KitchenSink",
+      input: amplifiedVoidJson,
+      digests: {
+        flat: "d77e360f32d07807581e0cfab5de07e822f7a81b59e338f0773ed7f75fc6c728",
+        binary: "b1da323db5dea1b90b05ecee4552dece93911ec0852419ad5142d72bce726ea1",
+      },
+    },
+  ];
+
+  for (const spec of jsonInputs) {
+    for (const to of ["flat", "binary"] as const) {
+      test(`${spec.name} json input converts to ${to} as capnp writes it`, async () => {
+        const stdin = spec.input();
+        const r = await execCliInMemory(
+          ["convert", `json:${to}`, spec.tsSchema, spec.type],
+          stdin,
+        );
+        expect(r.stderr).toBe("");
+        expect(r.code).toBe(0);
+        expect(sha256(r.stdout)).toBe(spec.digests[to]);
+        if (hasCapnp) {
+          const live = execCapnp(
+            ["convert", `json:${to}`, spec.cppSchema, spec.type],
+            stdin,
+          );
+          expect(live.code).toBe(0);
+          expect(Buffer.from(r.stdout)).toEqual(Buffer.from(live.stdout));
+        }
+      }, 60_000);
+    }
+  }
 });
 
 describe("JSON array size limit like capnp 1.4.0", () => {
