@@ -533,13 +533,22 @@ export class RpcConnection implements RemoteHost {
   private gone: RpcError | undefined;
 
   private readonly windowGetter: WindowGetter;
+  private flowLimit: number;
+  /** Words of incoming calls not yet complete, as capnp-C++ `callWordsInFlight`. */
+  private callWordsInFlight = 0;
+  private flowBlocked = false;
 
   constructor(
     private readonly transport: Transport,
     bootstrap?: RpcServer | Client,
     vat?: Vat,
-    options: { streamWindow?: number | (() => number) | WindowGetter } = {},
+    options: {
+      streamWindow?: number | (() => number) | WindowGetter;
+      /** Words of incoming calls in flight past which no more messages are read. Unlimited by default. */
+      flowLimit?: number;
+    } = {},
   ) {
+    this.flowLimit = options.flowLimit ?? Infinity;
     this.vat = vat ?? new Vat();
     this.twoParty = vat === undefined;
     const w = options.streamWindow;
@@ -589,6 +598,12 @@ export class RpcConnection implements RemoteHost {
 
   /** Handle one pending message. Returns false when none was waiting. */
   pumpOnce(): boolean {
+    // As capnp-C++ `messageLoop`: past the flow limit, wait for calls to
+    // complete before reading more.
+    if (this.callWordsInFlight > this.flowLimit && this.gone === undefined) {
+      this.flowBlocked = true;
+      return false;
+    }
     const frame = this.transport.receive();
     if (frame === null) {
       if (this.transport.closed) this.disconnect(new RpcError("transport closed", "disconnected"));
@@ -620,7 +635,7 @@ export class RpcConnection implements RemoteHost {
         this.handleBootstrap(body(Message_getBootstrap));
         break;
       case Message.call:
-        this.handleCall(body(Message_getCall));
+        this.handleCall(body(Message_getCall), frame.length / 8);
         break;
       case Message.finish:
         this.handleFinish(body(Message_getFinish));
@@ -1649,7 +1664,21 @@ export class RpcConnection implements RemoteHost {
     this.transport.send(b.toFlat());
   }
 
-  private handleCall(call: Ptr): void {
+  /** As capnp-C++ `RpcSystem::setFlowLimit`. */
+  setFlowLimit(words: number): void {
+    this.flowLimit = words;
+    this.maybeUnblockFlow();
+  }
+
+  private maybeUnblockFlow(): void {
+    if (!this.flowBlocked || this.callWordsInFlight >= this.flowLimit) return;
+    this.flowBlocked = false;
+    afterQueuedWork(() => {
+      if (this.gone === undefined) this.pump();
+    });
+  }
+
+  private handleCall(call: Ptr, words: number): void {
     const questionId = Call_getQuestionId(call);
     if (this.answers.has(questionId)) {
       this.abort(new RpcError(`call reuses question id ${questionId} still in use`));
@@ -1708,7 +1737,12 @@ export class RpcConnection implements RemoteHost {
     target.release();
     answer.call = state;
     state.onError = onError;
-    state.result.onSettled((s) => this.completeAnswer(questionId, answer, s));
+    this.callWordsInFlight += words;
+    state.result.onSettled((s) => {
+      this.callWordsInFlight -= words;
+      this.completeAnswer(questionId, answer, s);
+      this.maybeUnblockFlow();
+    });
   }
 
   /**

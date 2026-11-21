@@ -787,3 +787,52 @@ describe("incoming frame size (serialize-async.c++ readEntireMessage)", () => {
     expect(() => frameLength(header(100), 64)).toThrow("[101 <= 64]");
   });
 });
+
+describe("incoming flow limit (rpc.c++ messageLoop, setFlowLimit)", () => {
+  const gated = (): { server: RpcServer; seen: number[]; open: () => void } => {
+    const seen: number[] = [];
+    let open!: () => void;
+    const gate = new Promise<void>((res) => (open = res));
+    return {
+      seen,
+      open: () => open(),
+      server: {
+        dispatch(_i, _m, params) {
+          seen.push(params.getU32(0));
+          return gate;
+        },
+      },
+    };
+  };
+
+  const twoCalls = (flowLimit?: number) => {
+    const g = gated();
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.a, g.server, undefined, { flowLimit });
+    pair.b.send(bootstrap(0));
+    pair.b.send(call(1, (t) => toAnswer(t, 0), undefined, (p) => p.setU32(0, 1)));
+    pair.b.send(call(2, (t) => toAnswer(t, 0), undefined, (p) => p.setU32(0, 2)));
+    vat.pump();
+    return { ...g, vat };
+  };
+
+  test("calls past the limit wait until earlier calls complete", async () => {
+    const { seen, open } = twoCalls(1);
+    expect(seen).toEqual([1]);
+    open();
+    await nextTurn();
+    await nextTurn();
+    expect(seen).toEqual([1, 2]);
+  });
+
+  test("without a limit every call is read", () => {
+    expect(twoCalls().seen).toEqual([1, 2]);
+  });
+
+  test("raising the limit reads what was held back", async () => {
+    const { seen, vat } = twoCalls(1);
+    vat.setFlowLimit(1 << 20);
+    await nextTurn();
+    expect(seen).toEqual([1, 2]);
+  });
+});
