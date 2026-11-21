@@ -578,7 +578,8 @@ describe("tail calls (rpc.c++ directTailCall)", () => {
     const ret = r.take()[1]!.body;
     expect(Return_which(ret)).toBe(Return.exception);
     expect(Exception_getReason(Return_getException(ret))).toBe(
-      "Can't call tailCall() after initializing the results struct.",
+      "expected response == nullptr [(can't stringify) == nullptr]; " +
+        "Can't call tailCall() after initializing the results struct.",
     );
   });
 
@@ -763,7 +764,8 @@ describe("Disembargo senderLoopback (rpc.c++ handleDisembargo)", () => {
     const out = r.take();
     expect(out.map((m) => m.which)).toEqual([Message.abort]);
     expect(Exception_getReason(out[0]!.body)).toBe(
-      "'Disembargo' of type 'senderLoopback' sent to an object that does not point back to the sender.",
+      "expected target->getBrand() == this [0 == 1]; " +
+        "'Disembargo' of type 'senderLoopback' sent to an object that does not point back to the sender.",
     );
   });
 });

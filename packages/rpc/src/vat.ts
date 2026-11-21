@@ -2260,9 +2260,11 @@ export class RpcConnection implements RemoteHost {
           const inner = innermost(resolved);
           if (inner.brand !== this) {
             resolved.release();
+            // capnp-C++ prints the two pointer addresses; 0 and 1 stand in for them.
             this.abort(
               new RpcError(
-                "'Disembargo' of type 'senderLoopback' sent to an object that does not point back to the sender.",
+                "expected target->getBrand() == this [0 == 1]; " +
+                  "'Disembargo' of type 'senderLoopback' sent to an object that does not point back to the sender.",
               ),
             );
             return;

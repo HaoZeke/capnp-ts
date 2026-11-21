@@ -221,7 +221,8 @@ describe("disembargo", () => {
     const reply = CapnpMessage.fromFlat(frame!).root();
     expect(Message_which(reply)).toBe(Message.abort);
     expect(vat.disconnected?.message).toBe(
-      "'Disembargo' of type 'senderLoopback' sent to an object that does not point back to the sender.",
+      "expected target->getBrand() == this [0 == 1]; " +
+        "'Disembargo' of type 'senderLoopback' sent to an object that does not point back to the sender.",
     );
   });
 
