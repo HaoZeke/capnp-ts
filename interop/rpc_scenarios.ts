@@ -462,11 +462,18 @@ const scenarios: Record<string, () => Promise<void>> = {
       }
     };
     const call = echo(M.makeCounter);
-    const early = outcome(() => inc(call.pipeline(0), 1));
+    const piped = call.pipeline(0);
+    const earlyP = inc(piped, 1);
+    const early = outcome(() => earlyP);
     const results = await call;
     console.log(`read: ${await outcome(() => results.getCap(results.content.getP(0)))}`);
     console.log(`after: ${await outcome(() => inc(call.pipeline(0), 2))}`);
     console.log(`early: ${await early}`);
+    // The request objects are done. Drop them so Finish is written before
+    // the socket closes, in the same order capnp-C++ destroys them.
+    earlyP.release();
+    piped.release();
+    call.release();
   },
 };
 
