@@ -233,6 +233,53 @@ describe("canonical form against capnp 1.4.0", () => {
     expect(isCanonical(Message.fromSegments([words(wpMakeStruct(-1, 0, 0))]))).toBe(true);
   });
 
+  test("isCanonical charges the root, structs, and list bodies", () => {
+    const at = (w: bigint[], lim: number) => () =>
+      isCanonical(Message.fromSegments([words(...w)], { traversalWords: lim }));
+    const st = [wpMakeStruct(0, 9, 0), ...new Array<bigint>(8).fill(0n), 1n];
+    expect(at(st, 10)()).toBe(true);
+    expect(at(st, 9)).toThrow(/traversal limit/);
+    const pl = [
+      wpMakeStruct(0, 0, 1),
+      wpMakeList(0, ElemSize.Pointer, 3),
+      wpMakeStruct(2, 1, 0),
+      wpMakeStruct(2, 1, 0),
+      wpMakeStruct(2, 1, 0),
+      1n,
+      2n,
+      3n,
+    ];
+    expect(at(pl, 8)()).toBe(true);
+    expect(at(pl, 7)).toThrow(/traversal limit/);
+    const il = [wpMakeStruct(0, 0, 1), wpMakeList(0, ElemSize.FourBytes, 6), 1n, 2n, 3n];
+    expect(at(il, 5)()).toBe(true);
+    expect(at(il, 4)).toThrow(/traversal limit/);
+    const cl = [
+      wpMakeStruct(0, 0, 1),
+      wpMakeList(0, ElemSize.Composite, 2),
+      wpMakeStruct(2, 1, 0),
+      1n,
+      2n,
+    ];
+    expect(at(cl, 5)()).toBe(true);
+    expect(at(cl, 4)).toThrow(/traversal limit/);
+  });
+
+  test("isCanonical charges zero-size composite elements before layout checks", () => {
+    const at = (w: bigint[], lim?: number) => () =>
+      isCanonical(Message.fromSegments([words(...w)], lim ? { traversalWords: lim } : {}));
+    const moved = [
+      wpMakeStruct(0, 0, 1),
+      wpMakeList(1, ElemSize.Composite, 0),
+      0n,
+      wpMakeStruct(10_000_000, 0, 0),
+    ];
+    expect(at(moved)).toThrow(/traversal limit/);
+    const padded = [wpMakeStruct(0, 0, 1), wpMakeList(0, ElemSize.Composite, 1), wpMakeStruct(3, 0, 0), 0n];
+    expect(at(padded, 7)()).toBe(false);
+    expect(at(padded, 6)).toThrow(/traversal limit/);
+  });
+
   test("C-03 a null root canonicalizes to the empty-struct pointer", () => {
     const out = canonicalize(Message.fromSegments([words(0n)]));
     expect(out).toEqual(words(wpMakeStruct(-1, 0, 0)));
@@ -255,7 +302,7 @@ describe("canonical form with empty trailing segments", () => {
     ]);
     expect(isCanonical(valid)).toBe(true);
     const bad = Message.fromSegments([
-      words(wpMakeList(0, ElemSize.Composite, 1), wpMakeStruct(3, 0, 0)),
+      words(wpMakeList(0, ElemSize.Composite, 1), wpMakeStruct(3, 0, 0), 0n),
     ]);
     expect(isCanonical(bad)).toBe(false);
     // In-bounds: list claims 1 content word, tag has 0-word elements, next field uses word 4.
@@ -525,5 +572,25 @@ describe("reader sentences against capnp 1.4.0", () => {
     ]);
     const root = Message.fromFlat(flat).root();
     expect(() => root.getP(0, "copy")).toThrow("Unexpected FAR pointer.");
+  });
+});
+
+describe("isCanonical throws where capnp 1.4.0 throws", () => {
+  function raw(hex: string): Message {
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    return Message.fromSegments([{ data: bytes, words: bytes.length / 8 }]);
+  }
+
+  test("composite overrun, non-struct tag, and pointer-list OOB throw", () => {
+    expect(() =>
+      isCanonical(raw("0000000000000100010000000f00000028000000010000000000000000000000")),
+    ).toThrow(/elements overrun its word count/);
+    expect(() =>
+      isCanonical(raw("0000000000000100010000000f000000010000000a0000000000000000000000")),
+    ).toThrow(/lists of non-STRUCT type are not supported/);
+    expect(() => isCanonical(raw("0000000000000100010000002e0000000000000000000000"))).toThrow(
+      /boundsCheck\(segment, ptr, wordCount\)/,
+    );
   });
 });
