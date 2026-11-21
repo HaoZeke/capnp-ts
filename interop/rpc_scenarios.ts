@@ -379,21 +379,6 @@ const scenarios: Record<string, () => Promise<void>> = {
     keep.release();
   },
 
-  async levels() {
-    // capnp-C++ implements neither the level 3 handoff nor level 4 Join, and
-    // answers them Unimplemented.
-    const provide = conn.sendProvide(0, { vineId: 0, host: "127.0.0.1", port: 1 }, 5n);
-    const accept = conn.sendAccept(6n);
-    const join = conn.sendJoin(0, 1, 1, 0);
-    for (let i = 0; i < 50 && !(conn.isAnswered(provide) && conn.isAnswered(accept) && conn.isAnswered(join)); i++) {
-      await wait(10);
-    }
-    for (const [name, q] of [["provide", provide], ["accept", accept], ["join", join]] as const) {
-      assert.ok(conn.isFailed(q), `${name} did not fail`);
-      assert.equal(conn.answerError(q)?.type, "unimplemented", `${name}: ${conn.answerError(q)?.message}`);
-    }
-  },
-
   async membrane() {
     // A membrane around the C++ peer's bootstrap capability.
     const policy = new RevocablePolicy();
@@ -438,6 +423,21 @@ const scenarios: Record<string, () => Promise<void>> = {
     await u32(echo(M.unblock));
     // The peer is still usable through the unwrapped capability.
     assert.equal(await u32(echo(M.ping, arg(5), 1, 0)), 6);
+  },
+
+  async levels() {
+    // A two-party peer echoes Provide. Receiving that echo aborts, as
+    // capnp-C++ does for a message it requires. A second connection is
+    // used so the abort does not end the other scenarios.
+    const extra = await dial(20);
+    const other = attach(extra);
+    other.sendProvide(0, { vineId: 0, host: "127.0.0.1", port: 1 }, 5n);
+    for (let i = 0; i < 50 && other.disconnected === undefined; i++) await wait(10);
+    assert.match(
+      other.disconnected?.message ?? "",
+      /Peer did not implement required RPC message type\.; \(uint\)message\.which\(\) = 10/,
+    );
+    extra.destroy();
   },
 
   async disconnect() {
