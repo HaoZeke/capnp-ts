@@ -525,6 +525,12 @@ describe("packed round trips against capnp 1.4.0", () => {
     expect(unpack(new Uint8Array([0x00, 0x05]))).toEqual(new Uint8Array(48));
     expect(unpack(new Uint8Array([0x00, 0x84]))).toEqual(new Uint8Array(1064));
     expect(unpack(pack(new Uint8Array(48)))).toEqual(new Uint8Array(48));
+    // Segment 0 is empty and a later segment has a word. The framed read
+    // hits a segment boundary; the raw words are still the result.
+    const later = unpack(new Uint8Array([0x01, 0x01, 0x01, 0x01, 0x00, 0x05]));
+    expect(later.length).toBe(64);
+    expect(later[0]).toBe(1);
+    expect(later[8]).toBe(1);
   });
 
   test("concatenated frames pack and unpack piece by piece", () => {

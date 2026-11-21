@@ -195,15 +195,13 @@ export function pack(input: Uint8Array, opts?: PackOptions): Uint8Array {
 }
 
 /**
- * True when the unpacked words open with a stream frame that carries at
- * least one word. Raw word buffers that only start with zeros do not.
+ * The hard packed-frame error stays on the message-reader path.
+ * The raw fallback applies unless segment 0 has at least one word.
  */
 function startsWithFrame(flat: Uint8Array): boolean {
   const ends = frameEnds(flat, 0, Infinity);
   if (ends === null || ends.length < 2) return false;
-  // A segment of zero words is how a raw buffer of leading zeros looks.
-  // A stream frame that carries payload ends past its segment table.
-  return ends[ends.length - 1]! > ends[0]!;
+  return ends[1]! > ends[0]!;
 }
 
 class PackedReader {
