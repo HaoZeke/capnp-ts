@@ -1383,6 +1383,45 @@ describe("refcount cases", () => {
     expect(param.disposed).toBe(1);
   });
 
+  test("Return.releaseParamCaps keeps a param cap the results echo back", async () => {
+    const param = new Counter();
+    const pair = new MemoryTransportPair();
+    const a = new RpcConnection(pair.a);
+    const params = new CallBuilder(0, 1);
+    params.setCap(params.root, 0, Client.local(param).hook);
+    const call = a.sendCallTo(
+      (t) => {
+        t.setU16(4, MessageTarget.importedCap);
+        t.setU32(0, 0);
+      },
+      IFACE,
+      0,
+      params.toPayload(),
+    );
+    pair.b.receive();
+    expect(a.liveExports()).toEqual([0]);
+    const b = new MessageBuilder();
+    const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+    root.setU16(0, Message.return);
+    const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+    ret.setU32(0, 0);
+    ret.setU16(6, Return.results);
+    const payload = ret.initStruct(0, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+    payload.initStruct(0, 0, 1).adopt(0, Orphan.cap(b, 0));
+    const entry = payload.initCompositeList(1, 1, CAP_DESCRIPTOR_DWORDS, CAP_DESCRIPTOR_PWORDS);
+    entry.setU16(0, CapDescriptor.receiverHosted);
+    entry.setU32(4, 0);
+    pair.b.send(b.toFlat());
+    a.pump();
+    expect(a.disconnected).toBeUndefined();
+    const reply = await call.result.promise;
+    const echoed = new Client(reply.getCap(reply.content.getP(0)));
+    const r = await echoed.call(IFACE, 0, arg(41));
+    expect(r.content.getU32(0)).toBe(42);
+    expect(param.seen).toEqual([41]);
+    expect(a.liveExports()).toEqual([]);
+  });
+
   test("an Unimplemented echo of a call aborts and releases its parameter caps", () => {
     const param = new Counter();
     const pair = new MemoryTransportPair();

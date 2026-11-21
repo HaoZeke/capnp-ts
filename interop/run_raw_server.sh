@@ -11,6 +11,13 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 port() { echo $((RANDOM % 20000 + 30000)); }
 
+client_for() {
+  case $1 in
+    return-echo-param) echo echolocal ;;
+    *) echo returncaps ;;
+  esac
+}
+
 # One client run: the client's outcome lines, then the frames it sent.
 # A dial that exits before `read:` is a missed startup, so try a new port.
 side() {
@@ -31,7 +38,7 @@ side() {
       sleep 0.05
     done
     if [ "$up" = 1 ]; then
-      "$@" "$P" returncaps >"$CLIENT" 2>&1 || true
+      "$@" "$P" "$(client_for "$scenario")" >"$CLIENT" 2>&1 || true
     fi
     wait "$SERVER" || true
     outcomes=$(grep -E '^(read|after|early): ' "$CLIENT" || true)
@@ -47,7 +54,7 @@ side() {
 }
 
 LIST=("$@")
-[ ${#LIST[@]} -gt 0 ] || LIST=(return-none return-out-of-range return-non-cap)
+[ ${#LIST[@]} -gt 0 ] || LIST=(return-none return-out-of-range return-non-cap return-echo-param)
 FAIL=0
 for s in "${LIST[@]}"; do
   C=$(side "$s" "$PEER" client)

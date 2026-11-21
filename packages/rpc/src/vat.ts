@@ -1574,12 +1574,19 @@ export class RpcConnection implements RemoteHost {
     const which = Return_which(ret);
     q.failed = which !== Return.results;
 
-    if (Return_getReleaseParamCaps(ret)) {
-      for (const id of q.paramExports) this.releaseExport(id, 1);
-    }
+    // Released last, as the C++ `KJ_DEFER`, so a result can still name a
+    // param cap as `receiverHosted`.
+    const releaseIds = Return_getReleaseParamCaps(ret) ? q.paramExports : [];
     q.paramExports = [];
     if (Return_getNoFinishNeeded(ret)) q.skipFinish = true;
+    try {
+      this.settleReturn(answerId, q, ret, which);
+    } finally {
+      for (const id of releaseIds) this.releaseExport(id, 1);
+    }
+  }
 
+  private settleReturn(answerId: number, q: QuestionState, ret: Ptr, which: number): void {
     switch (which) {
       case Return.results: {
         if (q.isTailCall) {

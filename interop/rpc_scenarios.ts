@@ -61,6 +61,14 @@ const inc = (c: Client, n: number) => c.call(COUNTER_INTERFACE_ID, 0, arg(n), 1,
 const u32 = async (p: PromiseLike<{ content: { getU32(o: number): number } }>, off = 0) =>
   (await p).content.getU32(off);
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const outcome = async (f: () => unknown): Promise<string> => {
+  try {
+    await f();
+    return "ok";
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+};
 
 const scenarios: Record<string, () => Promise<void>> = {
   async ping() {
@@ -453,14 +461,6 @@ const scenarios: Record<string, () => Promise<void>> = {
   // Against interop/raw_server.ts only: makeCounter's results name a
   // capability the cap table cannot give.
   async returncaps() {
-    const outcome = async (f: () => unknown): Promise<string> => {
-      try {
-        await f();
-        return "ok";
-      } catch (e) {
-        return e instanceof Error ? e.message : String(e);
-      }
-    };
     const call = echo(M.makeCounter);
     const piped = call.pipeline(0);
     const earlyP = inc(piped, 1);
@@ -475,9 +475,34 @@ const scenarios: Record<string, () => Promise<void>> = {
     piped.release();
     call.release();
   },
+
+  // Against interop/raw_server.ts only: the results name our param cap
+  // as `receiverHosted`.
+  async echolocal() {
+    let n = 0;
+    const read = await outcome(async () => {
+      const local = Client.local(new CounterImpl());
+      const call = echo(
+        M.echoCap,
+        ((p: StructBuilder, b: { setCap(s: StructBuilder, i: number, h: unknown): void }) =>
+          b.setCap(p, 0, local.hook.addRef())) as never,
+        0,
+        1,
+      );
+      const results = await call;
+      const back = new Client(results.getCap(results.content.getP(0)));
+      const r = inc(back, 41);
+      n = await u32(r);
+      r.release();
+      back.release();
+      call.release();
+      local.release();
+    });
+    console.log(`read: ${read} n=${n}`);
+  },
 };
 
-const explicitOnly = new Set(["returncaps"]);
+const explicitOnly = new Set(["returncaps", "echolocal"]);
 
 let failed = false;
 for (const [name, run] of Object.entries(scenarios)) {

@@ -11,9 +11,13 @@
  */
 import { createServer } from "node:net";
 
-import { Message as CapnpMessage, MessageBuilder, Orphan, type StructBuilder } from "@haozeke/capnp";
+import { Message as CapnpMessage, MessageBuilder, Orphan, type Ptr, type StructBuilder } from "@haozeke/capnp";
 
-import { Message, Message_which } from "../packages/rpc/src/rpc.capnp.ts";
+import {
+  Message,
+  Message_which,
+  Payload_getCapTableAt,
+} from "../packages/rpc/src/rpc.capnp.ts";
 import { describe, need } from "./raw_frames.ts";
 
 /** Fills the results Payload of the scenario's Return. */
@@ -33,6 +37,28 @@ const RESULTS: Record<string, Results> = {
   // Results pointer 0 is a struct where a capability is expected.
   "return-non-cap": (_b, payload) => {
     payload.initStruct(0, 0, 1).initStruct(0, 1, 0).setU32(0, 7);
+  },
+  "return-echo-param": () => {},
+};
+
+type Reply = (f: Uint8Array) => void;
+
+/** Answers a call on the bootstrap capability. False leaves it to the default. */
+const CALLS: Record<string, (body: Ptr, reply: Reply) => boolean> = {
+  // `echoCap` names the param cap as `receiverHosted`, with
+  // `releaseParamCaps` left at true.
+  "return-echo-param": (body, reply) => {
+    if (body.getU16(4) !== 8) return false;
+    const id = Payload_getCapTableAt(body.getP(1), 0).getU32(4);
+    reply(
+      returnResults(body.getU32(0), (b, payload) => {
+        payload.initStruct(0, 0, 1).adopt(0, Orphan.cap(b, 0));
+        const entry = payload.initCompositeList(1, 1, 1, 1);
+        entry.setU16(0, 3);
+        entry.setU32(4, id);
+      }),
+    );
+    return true;
   },
 };
 
@@ -101,6 +127,7 @@ const server = createServer((sock) => {
         case Message.call: {
           const t = body.getP(0);
           const onBootstrap = t.getU16(4) === 0 ? t.getU32(0) === 0 : bootstraps.has(t.getP(0).getU32(0));
+          if (onBootstrap && CALLS[name]?.(body, (r) => sock.write(r))) break;
           if (onBootstrap) sock.write(returnResults(body.getU32(0), results));
           else sock.write(returnException(body.getU32(0), "pipelined call reached the server"));
           break;

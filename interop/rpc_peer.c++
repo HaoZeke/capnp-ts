@@ -579,7 +579,18 @@ void runClient(const std::string &addr, const std::vector<std::string> &only) {
 		std::cout << "early: " << outcome([&]() { earlyP.wait(ws); }) << std::endl;
 		ok("returncaps");
 	}
-	if (named(only, "returncaps")) {
+	if (named(only, "echolocal")) {
+		uint32_t n = 0;
+		std::cout << "read: " << outcome([&]() {
+			auto req = echo.echoCapRequest();
+			req.setCap(kj::heap<CounterImpl>());
+			auto r = req.send().wait(ws);
+			auto inc = r.getCap().incRequest();
+			inc.setN(41);
+			n = inc.send().wait(ws).getN();
+		}) << " n=" << n << std::endl;
+	}
+	if (named(only, "returncaps") || named(only, "echolocal")) {
 		// The request objects' destructors queue Finish. Pump it onto the
 		// socket before EzRpcClient is destroyed, or the write is dropped.
 		{
