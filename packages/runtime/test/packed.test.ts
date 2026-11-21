@@ -262,6 +262,14 @@ describe("packed codec", () => {
     expect(frame.length).toBeGreaterThan(unpack(expected).length);
   });
 
+  test("a raw buffer of leading zeros round-trips", () => {
+    const raw = new Uint8Array(48);
+    expect([...unpack(pack(raw))]).toEqual([...raw]);
+    const leading = new Uint8Array(16);
+    leading[8] = 1;
+    expect([...unpack(pack(leading))]).toEqual([...leading]);
+  });
+
   test("unpack rejects packed amplification bomb with PACKED", () => {
     // Each 0x00 0xff expands to 256 zero words (tag word + 255 more).
     // With a tight maxWords, a short packed stream must not allocate huge.

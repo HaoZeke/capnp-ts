@@ -199,10 +199,11 @@ export function pack(input: Uint8Array, opts?: PackOptions): Uint8Array {
  * least one word. Raw word buffers that only start with zeros do not.
  */
 function startsWithFrame(flat: Uint8Array): boolean {
-  // A segment of zero words is still a frame. Its packed body must end on
-  // that boundary, which a zero-word segment 0 makes immediate.
   const ends = frameEnds(flat, 0, Infinity);
-  return ends !== null;
+  if (ends === null || ends.length < 2) return false;
+  // A segment of zero words is how a raw buffer of leading zeros looks.
+  // A stream frame that carries payload ends past its segment table.
+  return ends[ends.length - 1]! > ends[0]!;
 }
 
 class PackedReader {
