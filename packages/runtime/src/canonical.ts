@@ -22,7 +22,7 @@ import {
   WORD_BYTES,
   WireKind,
 } from "./kinds.ts";
-import { Message, nonStructPointerMessage, type Ptr } from "./message.ts";
+import { Message, nonStructPointerMessage, pointerFieldIsNull, type Ptr } from "./message.ts";
 import {
   wpCompositeElementCount,
   wpKind,
@@ -364,7 +364,11 @@ function pointerCanonical(
   if (kind === WireKind.Far || kind === WireKind.Cap) return false;
   if (depth >= m.depthLimit) throw new CapnpError("DEPTH");
   const off = wpOffset(w);
-  const target = word + 1 + off;
+  // `SegmentReader::checkOffset` lands an out-of-range offset on the segment
+  // end, so a zero-sized object there still passes.
+  const raw = word + 1 + off;
+  const limit = m.segWords(seg);
+  const target = raw >= 0 && raw <= limit ? raw : limit;
   if (kind === WireKind.Struct) {
     const dw = wpStructDwords(w);
     const pw = wpStructPwords(w);
@@ -401,7 +405,8 @@ function structCanonical(
     return { ok: false, dataTrunc: false, ptrTrunc: false };
   }
   const dataTrunc = dw === 0 || m.readWord(seg, loc + dw - 1) !== 0n;
-  const ptrTrunc = pw === 0 || m.readWord(seg, loc + dw + pw - 1) !== 0n;
+  // `getPointerField().isNull()` follows fars, so a corrupt last pointer throws.
+  const ptrTrunc = pw === 0 || !pointerFieldIsNull(m, seg, loc + dw + pw - 1);
   read.at = loc + dw + pw;
   for (let i = 0; i < pw; i++) {
     if (!pointerCanonical(m, seg, loc + dw + i, ptrHead, depth + 1)) {

@@ -499,6 +499,55 @@ function readWord(m: Message, seg: number, word: number): bigint {
 }
 
 /**
+ * `PointerReader::isNull`: a zero word is null. A far pointer is followed,
+ * and a bad landing throws the same text as `followFars` / `getPointerType`.
+ */
+export function pointerFieldIsNull(m: Message, seg: number, word: number): boolean {
+  let w = readWord(m, seg, word);
+  if (w === 0n) return true;
+  if (wpKind(w) === WireKind.Far) {
+    const tseg = wpFarSeg(w);
+    const toff = wpFarOff(w);
+    if (wpFarTwo(w)) {
+      boundsWord(m, tseg, toff, FAR_OOB, FAR_UNKNOWN);
+      boundsWord(m, tseg, toff + 1, FAR_OOB, FAR_UNKNOWN);
+      m.charge(2);
+      const pad = readWord(m, tseg, toff);
+      const cseg = wpFarSeg(pad);
+      assertCapnp(
+        cseg >= 0 && cseg < m.segs.length && m.segs[cseg]!.words > 0,
+        "SEGMENT",
+        DOUBLE_FAR_UNKNOWN,
+      );
+      assertCapnp(
+        wpKind(pad) === WireKind.Far,
+        "KIND",
+        kjExpected(
+          "pad->kind() == WirePointer::FAR",
+          "Second word of double-far pad must be far pointer.",
+          `${wpKind(pad)} == 2`,
+        ),
+      );
+      w = readWord(m, tseg, toff + 1);
+    } else {
+      if (tseg < 0 || tseg >= m.segs.length || m.segs[tseg]!.words === 0) {
+        throw new CapnpError("SEGMENT", FAR_UNKNOWN);
+      }
+      boundsWord(m, tseg, toff, FAR_OOB, FAR_UNKNOWN);
+      m.charge(1);
+      w = readWord(m, tseg, toff);
+    }
+    if (wpKind(w) === WireKind.Far) {
+      throw new CapnpError("KIND", "far pointer not followed?");
+    }
+  }
+  if (wpKind(w) === WireKind.Cap && ((w >> 2n) & 0x3fff_ffffn) !== 0n) {
+    throw new CapnpError("KIND", "expected ptr->isCapability(); unknown pointer type");
+  }
+  return false;
+}
+
+/**
  * Charge `words` against the traversal budget. Rejects non-finite / negative
  * sizes before mutating the budget (no under-charge via wrap).
  */
