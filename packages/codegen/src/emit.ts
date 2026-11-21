@@ -13,6 +13,7 @@
  */
 
 import type {
+  AppliedAnnotation,
   BrandAst,
   CgrAst,
   FieldAst,
@@ -463,27 +464,52 @@ function ptrTypeForInterface(
  * Otherwise inherit them from the method brand or implicit parameters that
  * name this struct as its params or results type.
  */
+function scopeParamNames(node: NodeAst, ctx: ModuleEmitContext): string[] {
+  const out: string[] = [];
+  const seen = new Set<bigint>();
+  let scope = node.scopeId;
+  while (scope !== 0n && !seen.has(scope)) {
+    seen.add(scope);
+    const parent = ctx.byId.get(scope);
+    if (!parent) break;
+    for (const name of paramNames(parent)) {
+      if (name && !out.includes(name)) out.push(name);
+    }
+    scope = parent.scopeId;
+  }
+  return out;
+}
+
 function effectiveParamNames(node: NodeAst, ctx: ModuleEmitContext): string[] {
   const own = paramNames(node);
-  if (own.length > 0) return own;
-  const extra: string[] = [];
+  const names: string[] = [];
   const add = (name: string): void => {
-    if (name && !extra.includes(name)) extra.push(name);
+    if (name && !names.includes(name)) names.push(name);
   };
+  // Enclosing scopes and the interface that generated this struct come
+  // before the struct's own parameters (often a method's implicit ones).
+  for (const name of scopeParamNames(node, ctx)) add(name);
+  const implicit: string[] = [];
   for (const other of ctx.byId.values()) {
     for (const m of other.methods ?? []) {
       const isParam = m.paramStructType === node.id;
       const isResult = m.resultStructType === node.id;
       if (!isParam && !isResult) continue;
+      for (const name of paramNames(other)) add(name);
       const brand = isParam ? m.paramBrand : m.resultBrand;
       for (const scope of brand?.scopes ?? []) {
         if (scope.which !== "inherit") continue;
         for (const name of paramNames(ctx.byId.get(scope.scopeId))) add(name);
       }
-      for (const raw of m.implicitParameters ?? []) add(ident(raw) || raw);
+      for (const raw of m.implicitParameters ?? []) {
+        const name = ident(raw) || raw;
+        if (name && !implicit.includes(name)) implicit.push(name);
+      }
     }
   }
-  return extra;
+  for (const name of own) add(name);
+  for (const name of implicit) add(name);
+  return names;
 }
 
 function nodeWithParams(node: NodeAst, names: string[]): NodeAst {
@@ -606,6 +632,10 @@ function emitEnum(node: NodeAst, lines: string[]): void {
     `export type ${name} = (typeof ${name})[keyof typeof ${name}];`,
   );
   lines.push(``);
+  emitApplied(upperSnake(name), node.appliedAnnotations, lines);
+  for (const e of enumerants) {
+    emitApplied(`${upperSnake(name)}_${upperSnake(ident(e.name))}`, e.appliedAnnotations, lines);
+  }
 }
 
 function isPointerValue(v: ValueAst): boolean {
@@ -633,6 +663,64 @@ function fieldPointerDefaultBytes(field: FieldAst): number[] | undefined {
   return undefined;
 }
 
+/** `as const` is rejected on these expressions (TS1355). */
+function constAssertion(expr: string): string {
+  if (
+    expr === "undefined" ||
+    expr === "NaN" ||
+    expr === "Infinity" ||
+    expr === "-Infinity"
+  ) {
+    return "";
+  }
+  return " as const";
+}
+
+function annotationValueLiteral(v: ValueAst): string | undefined {
+  switch (v.which) {
+    case "void":
+      return undefined;
+    case "bool":
+      return v.value ? "true" : "false";
+    case "int8":
+    case "int16":
+    case "int32":
+    case "uint8":
+    case "uint16":
+    case "uint32":
+    case "float32":
+    case "float64":
+      return jsNumberLiteral(v.value);
+    case "int64":
+    case "uint64":
+      return `${v.value}n`;
+    case "text":
+      return JSON.stringify(v.value);
+    case "data":
+      return `new Uint8Array([${Array.from(v.value).join(", ")}])`;
+    case "enum":
+      return String(v.value);
+    default:
+      return undefined;
+  }
+}
+
+function emitApplied(
+  name: string,
+  applied: AppliedAnnotation[] | undefined,
+  lines: string[],
+): void {
+  if (!applied || applied.length === 0) return;
+  const body = applied
+    .map((a) => {
+      const id = `0x${a.id.toString(16)}n`;
+      const value = annotationValueLiteral(a.value);
+      return value === undefined ? `{ id: ${id} }` : `{ id: ${id}, value: ${value} }`;
+    })
+    .join(", ");
+  lines.push(`export const ${name}_APPLIED_ANNOTATIONS = [${body}] as const;`, ``);
+}
+
 function emitConst(node: NodeAst, lines: string[]): void {
   const c = node.const;
   if (!c) return;
@@ -642,32 +730,50 @@ function emitConst(node: NodeAst, lines: string[]): void {
     `/** Const ${node.displayName}: ${formatType(c.type)}. */`,
   );
   switch (v.which) {
-    case "void":
-      lines.push(`export const ${name} = undefined as const;`, ``);
+    case "void": {
+      const expr = "undefined";
+      lines.push(`export const ${name} = ${expr}${constAssertion(expr)};`, ``);
+      emitApplied(upperSnake(name), node.appliedAnnotations, lines);
       return;
-    case "bool":
-      lines.push(`export const ${name} = ${v.value ? "true" : "false"} as const;`, ``);
+    }
+    case "bool": {
+      const expr = v.value ? "true" : "false";
+      lines.push(`export const ${name} = ${expr}${constAssertion(expr)};`, ``);
+      emitApplied(upperSnake(name), node.appliedAnnotations, lines);
       return;
+    }
     case "int8":
     case "int16":
     case "int32":
     case "uint8":
     case "uint16":
     case "uint32":
-    case "enum":
-      lines.push(`export const ${name} = ${jsNumberLiteral(v.value)} as const;`, ``);
+    case "enum": {
+      const expr = jsNumberLiteral(v.value);
+      lines.push(`export const ${name} = ${expr}${constAssertion(expr)};`, ``);
+      emitApplied(upperSnake(name), node.appliedAnnotations, lines);
       return;
+    }
     case "int64":
-    case "uint64":
-      lines.push(`export const ${name} = ${v.value}n as const;`, ``);
+    case "uint64": {
+      const expr = `${v.value}n`;
+      lines.push(`export const ${name} = ${expr}${constAssertion(expr)};`, ``);
+      emitApplied(upperSnake(name), node.appliedAnnotations, lines);
       return;
+    }
     case "float32":
-    case "float64":
-      lines.push(`export const ${name} = ${jsNumberLiteral(v.value)} as const;`, ``);
+    case "float64": {
+      const expr = jsNumberLiteral(v.value);
+      lines.push(`export const ${name} = ${expr}${constAssertion(expr)};`, ``);
+      emitApplied(upperSnake(name), node.appliedAnnotations, lines);
       return;
-    case "text":
-      lines.push(`export const ${name} = ${JSON.stringify(v.value)} as const;`, ``);
+    }
+    case "text": {
+      const expr = JSON.stringify(v.value);
+      lines.push(`export const ${name} = ${expr}${constAssertion(expr)};`, ``);
+      emitApplied(upperSnake(name), node.appliedAnnotations, lines);
       return;
+    }
     case "data":
       lines.push(
         `export const ${name} = new Uint8Array([${Array.from(v.value).join(", ")}]);`,
@@ -680,6 +786,7 @@ function emitConst(node: NodeAst, lines: string[]): void {
     case "anyPointer": {
       if (!v.pointerBytes || v.pointerBytes.length === 0) {
         lines.push(`export const ${name} = null as const;`, ``);
+        emitApplied(upperSnake(name), node.appliedAnnotations, lines);
         return;
       }
       const base = upperSnake(name);
@@ -689,6 +796,7 @@ function emitConst(node: NodeAst, lines: string[]): void {
         `export const ${name}: Ptr = ${base}_PTR;`,
         ``,
       );
+      emitApplied(upperSnake(name), node.appliedAnnotations, lines);
       return;
     }
     default:
@@ -707,6 +815,7 @@ function emitAnnotation(node: NodeAst, lines: string[]): void {
     `export const ${base}_ANNOTATION_TYPE = ${JSON.stringify(formatType(a.type))} as const;`,
     ``,
   );
+  emitApplied(base, node.appliedAnnotations, lines);
 }
 
 function emitFieldGetter(
@@ -1126,6 +1235,24 @@ function emitFieldSetter(
  * parameter and result structs are ordinary generated structs, found by
  * id, so the stub only has to carry their dimensions.
  */
+/** Every superclass, direct ones first, then each of their ancestors. */
+function ancestorInterfaces(node: NodeAst, ctx: ModuleEmitContext): NodeAst[] {
+  const out: NodeAst[] = [];
+  const seen = new Set<bigint>();
+  const walk = (n: NodeAst): void => {
+    for (const s of n.superclasses ?? []) {
+      if (seen.has(s.id)) continue;
+      seen.add(s.id);
+      const iface = ctx.byId.get(s.id);
+      if (!iface) continue;
+      out.push(iface);
+      walk(iface);
+    }
+  };
+  walk(node);
+  return out;
+}
+
 function emitInterface(
   node: NodeAst,
   ctx: ModuleEmitContext,
@@ -1172,10 +1299,15 @@ function emitInterface(
         ` resultBrand: ${brandLiteral(m.resultBrand)},` +
         ` implicitParameters: [${(m.implicitParameters ?? [])
           .map((name) => JSON.stringify(name))
-          .join(", ")}] },`,
+          .join(", ")}],` +
+        ` streaming: ${m.streaming === true || m.resultStructType === 0x995f9a3377c0b16en} },`,
     );
   }
   lines.push(`} as const;`, ``);
+  for (const m of methods) {
+    emitApplied(`${upper}_${upperSnake(ident(m.name))}`, m.appliedAnnotations, lines);
+  }
+  emitApplied(upper, node.appliedAnnotations, lines);
 
   // Client: one method per schema method, sending on a connection.
   lines.push(
@@ -1196,14 +1328,29 @@ function emitInterface(
     `  ) {}`,
     ``,
   );
-  for (const m of methods) {
+  const ancestors = ancestorInterfaces(node, ctx);
+  const ownNames = new Set(methods.map((m) => m.name));
+  const seenInherited = new Set<string>(ownNames);
+  const inherited: Array<{ iface: NodeAst; method: MethodAst }> = [];
+  for (const iface of ancestors) {
+    for (const method of iface.methods ?? []) {
+      if (seenInherited.has(method.name)) continue;
+      seenInherited.add(method.name);
+      inherited.push({ iface, method });
+    }
+  }
+  const emitCall = (
+    ownerName: string,
+    ifaceUpper: string,
+    methodName: string,
+  ): void => {
     lines.push(
-      `  /** Send ${typeName}.${m.name}; returns the questionId. */`,
-      `  ${m.name}(fillParams?: (params: StructBuilder) => void): number {`,
-      `    const m = ${typeName}_methods.${m.name};`,
+      `  /** Send ${ownerName}.${methodName}; returns the questionId. */`,
+      `  ${methodName}(fillParams?: (params: StructBuilder) => void): number {`,
+      `    const m = ${ownerName}_methods.${methodName};`,
       `    return this.conn.sendCall(`,
       `      this.importedCapId,`,
-      `      ${upper}_INTERFACE_ID,`,
+      `      ${ifaceUpper}_INTERFACE_ID,`,
       `      m.ordinal,`,
       `      fillParams,`,
       `      m.paramsDwords,`,
@@ -1212,26 +1359,36 @@ function emitInterface(
       `  }`,
       ``,
     );
+  };
+  for (const m of methods) emitCall(typeName, upper, m.name);
+  for (const { iface, method } of inherited) {
+    const ownerName = shortTypeName(iface.displayName);
+    emitCall(ownerName, upperSnake(ownerName), method.name);
   }
   lines.push(`}`, ``);
+
+  const directSupers = (node.superclasses ?? [])
+    .map((s) => ctx.byId.get(s.id))
+    .filter((n): n is NodeAst => n !== undefined);
+  const singleSuper =
+    directSupers.length === 1 ? shortTypeName(directSupers[0]!.displayName) : "";
+  const extendsClause = singleSuper ? ` extends ${singleSuper}Server` : "";
 
   // Server: dispatch an incoming Call to a named method.
   lines.push(
     `/** Implement ${typeName} by extending this and overriding its methods. */`,
-    `export abstract class ${typeName}Server {`,
+    `export abstract class ${typeName}Server${extendsClause} {`,
   );
-  for (const m of methods) {
-    const clause = methodTypeParamClause(m, node, ctx);
-    const paramsType = structAliasType(
-      m.paramStructType,
-      m.paramBrand,
-      ctx,
-      node,
-      m,
-    );
+  const declareMethod = (m: MethodAst, owner: NodeAst): void => {
+    const clause = methodTypeParamClause(m, owner, ctx);
+    const paramsType = structAliasType(m.paramStructType, m.paramBrand, ctx, owner, m);
     lines.push(
       `  abstract ${m.name}${clause}(params: ${paramsType}, results: StructBuilder): void;`,
     );
+  };
+  for (const m of methods) declareMethod(m, node);
+  if (!singleSuper) {
+    for (const { iface, method } of inherited) declareMethod(method, iface);
   }
   lines.push(
     ``,
@@ -1242,26 +1399,107 @@ function emitInterface(
     `    params: Ptr,`,
     `    results: StructBuilder,`,
     `  ): void {`,
-    `    if (interfaceId !== ${upper}_INTERFACE_ID) {`,
-    '      throw new Error(`' + typeName + ': wrong interface ${interfaceId}`);',
-    `    }`,
-    `    switch (methodId) {`,
+    `    if (interfaceId === ${upper}_INTERFACE_ID) {`,
+    `      switch (methodId) {`,
   );
   for (const m of methods) {
     lines.push(
-      `      case ${m.ordinal}:`,
-      `        this.${m.name}(params, results);`,
-      `        return;`,
+      `        case ${m.ordinal}:`,
+      `          this.${m.name}(params, results);`,
+      `          return;`,
     );
   }
   lines.push(
-    `      default:`,
-    '        throw new Error(`' + typeName + ': no method ${methodId}`);',
+    `        default:`,
+    "          throw new Error(`" + typeName + ": no method ${methodId}`);",
+    `      }`,
     `    }`,
-    `  }`,
-    `}`,
-    ``,
   );
+  if (singleSuper) {
+    lines.push(`    super.dispatch(interfaceId, methodId, params, results);`);
+  } else {
+    for (const iface of ancestors) {
+      const ownerName = shortTypeName(iface.displayName);
+      const ifaceUpper = upperSnake(ownerName);
+      const mine = iface.methods ?? [];
+      lines.push(
+        `    if (interfaceId === ${ifaceUpper}_INTERFACE_ID) {`,
+        `      switch (methodId) {`,
+      );
+      for (const m of mine) {
+        lines.push(
+          `        case ${m.ordinal}:`,
+          `          this.${m.name}(params, results);`,
+          `          return;`,
+        );
+      }
+      lines.push(
+        `        default:`,
+        "          throw new Error(`" + ownerName + ": no method ${methodId}`);",
+        `      }`,
+        `    }`,
+      );
+    }
+    lines.push(
+      "    throw new Error(`" + typeName + ": wrong interface ${interfaceId}`);",
+    );
+  }
+  lines.push(`  }`, `}`, ``);
+}
+
+/** Zero a group's slots so a union switch does not keep the previous arm. */
+function groupZeroLines(typeId: bigint, ctx: ModuleEmitContext): string[] {
+  const struct = ctx.byId.get(typeId)?.struct;
+  const fields = struct?.fields ?? [];
+  const lines: string[] = [];
+  // A nested union's discriminant lives in the parent struct. Zero it with the group.
+  if (struct !== undefined && struct.discriminantCount > 0) {
+    lines.push(`  ptr.setU16(${struct.discriminantOffset * 2}, 0);`);
+  }
+  for (const field of fields) {
+    if (field.group) {
+      lines.push(...groupZeroLines(field.group.typeId, ctx));
+      continue;
+    }
+    const slot = field.slot;
+    if (!slot) continue;
+    const which = slot.type.which;
+    const byte = dataByteOffset(which, slot.offset);
+    switch (which) {
+      case "void":
+        break;
+      case "bool":
+        lines.push(`  ptr.setBool(${slot.offset}, false, false);`);
+        break;
+      case "int8":
+      case "uint8":
+        lines.push(`  ptr.setU8(${byte}, 0);`);
+        break;
+      case "int16":
+      case "uint16":
+      case "enum":
+        lines.push(`  ptr.setU16(${byte}, 0);`);
+        break;
+      case "int32":
+      case "uint32":
+        lines.push(`  ptr.setU32(${byte}, 0);`);
+        break;
+      case "float32":
+        lines.push(`  ptr.setF32(${byte}, 0);`);
+        break;
+      case "int64":
+      case "uint64":
+        lines.push(`  ptr.setU64(${byte}, 0n);`);
+        break;
+      case "float64":
+        lines.push(`  ptr.setF64(${byte}, 0);`);
+        break;
+      default:
+        lines.push(`  ptr.clearPointer(${slot.offset});`);
+        break;
+    }
+  }
+  return lines;
 }
 
 function emitStruct(
@@ -1347,6 +1585,7 @@ function emitStruct(
           : [];
       const recvType =
         names.length > 0 ? `${typeName}_Ptr<${names.join(", ")}>` : "Ptr";
+      const cleared = groupZeroLines(f.group.typeId, ctx);
       lines.push(
         `/** Group field \`${f.name}\` — same wire Ptr as parent; see group node helpers. */`,
         `export function ${typeName}_get${gName[0]!.toUpperCase()}${gName.slice(1)}${ownerGenericClause(owner)}(ptr: ${recvType}): ${recvType} {`,
@@ -1354,6 +1593,7 @@ function emitStruct(
         `}`,
         ``,
         `export function ${initFn}(ptr: StructBuilder): StructBuilder {`,
+        ...cleared,
         ...selectGroup,
         `  return ptr;`,
         `}`,
@@ -1363,7 +1603,13 @@ function emitStruct(
     }
     emitFieldGetter(owner, typeName, f, ctx, lines);
     emitFieldSetter(owner, typeName, f, discriminantByte, ctx, lines);
+    emitApplied(`${upper}_${upperSnake(ident(f.name))}`, f.appliedAnnotations, lines);
   }
+  for (const f of s.fields) {
+    if (!f.group) continue;
+    emitApplied(`${upper}_${upperSnake(ident(f.name))}`, f.appliedAnnotations, lines);
+  }
+  emitApplied(upper, node.appliedAnnotations, lines);
 }
 
 /**
@@ -1533,6 +1779,8 @@ export function emitModuleSource(
     `} as const;`,
     ``,
   );
+  const fileNode = ast.nodes.find((n) => n.id === resolvedId && n.which === "file");
+  emitApplied("FILE", fileNode?.appliedAnnotations, lines);
   const needsBrandHelpers =
     needsLocalGenericAlias ||
     nodes.some((n) => (n.parameters?.length ?? 0) > 0 || nodeMentionsBrand(n));

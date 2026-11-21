@@ -82,7 +82,7 @@ describe("interface stubs", () => {
     // Two Int64 arguments are two data words; one word would drop the
     // second argument on the wire without complaint.
     expect(src).toContain(
-      "add: { ordinal: 0, paramsDwords: 2, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] }",
+      "add: { ordinal: 0, paramsDwords: 2, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false }",
     );
   });
 

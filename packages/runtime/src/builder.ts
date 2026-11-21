@@ -686,6 +686,12 @@ export class StructBuilder {
     deepCopyPtrToSlot(this.builder, this.slot(ptrIndex), src, 0);
   }
 
+  /** Write a null pointer into slot `ptrIndex`. */
+  clearPointer(ptrIndex: number): void {
+    const slot = this.slot(ptrIndex);
+    this.builder.storeW(slot.seg, slot.word, 0n);
+  }
+
   initStruct(ptrIndex: number, dwords: number, pwords: number): StructBuilder {
     return this.builder.initStructAt(this.slot(ptrIndex), dwords, pwords);
   }
