@@ -764,3 +764,26 @@ describe("RPC frames are flat arrays (serialize-async.c++ BufferedMessageStream)
     expect(CapnpMessage.fromFlat(withSegments(bootstrap(0), 512)).segmentCount).toBe(512);
   });
 });
+
+describe("incoming frame size (serialize-async.c++ readEntireMessage)", () => {
+  const header = (words: number): Uint8Array => {
+    const h = new Uint8Array(8);
+    new DataView(h.buffer).setUint32(4, words, true);
+    return h;
+  };
+
+  test("a frame over the traversal limit is refused from its segment table", () => {
+    expect(() => frameLength(header(8 * 1024 * 1024 + 1))).toThrow(
+      "expected expectedSizeInWords <= options.traversalLimitInWords [8388610 <= 8388608]; " +
+        "incoming RPC message exceeds size limit",
+    );
+  });
+
+  test("a frame at the limit waits for its body", () => {
+    expect(frameLength(header(8 * 1024 * 1024 - 1))).toBe(0);
+  });
+
+  test("the limit can be set", () => {
+    expect(() => frameLength(header(100), 64)).toThrow("[101 <= 64]");
+  });
+});

@@ -8,13 +8,17 @@
  */
 import type { Transport } from "./transport.ts";
 
+/** capnp-C++ `ReaderOptions::traversalLimitInWords` by default. */
+const TRAVERSAL_LIMIT_WORDS = 8 * 1024 * 1024;
+
 /**
  * Bytes the frame starting at `buf[0]` occupies, or 0 if incomplete.
  *
- * As capnp-C++ `BufferedMessageStream` reads RPC frames, any segment
- * count is accepted.
+ * As capnp-C++ `BufferedMessageStream` reads RPC frames: any segment
+ * count is accepted, and a frame whose segment table so far promises more
+ * words than the traversal limit is refused before its body arrives.
  */
-export function frameLength(buf: Uint8Array): number {
+export function frameLength(buf: Uint8Array, traversalLimitWords = TRAVERSAL_LIMIT_WORDS): number {
   if (buf.length < 8) return 0;
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const first = view.getUint32(0, true);
@@ -26,6 +30,12 @@ export function frameLength(buf: Uint8Array): number {
   const known = Math.min(nsegs, Math.floor(buf.length / 8) * 2 - 1);
   let words = tableWords;
   for (let i = 0; i < known; i++) words += view.getUint32(4 + i * 4, true);
+  if (words > traversalLimitWords) {
+    throw new Error(
+      `expected expectedSizeInWords <= options.traversalLimitInWords [${words} <= ${traversalLimitWords}]; ` +
+        "incoming RPC message exceeds size limit",
+    );
+  }
   if (known < nsegs) return 0;
   const total = words * 8;
   return buf.length < total ? 0 : total;
