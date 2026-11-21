@@ -30,7 +30,7 @@ import {
   type JsonAnnotationMode,
   splitJsonMessages,
 } from "./json.ts";
-import { Message } from "./message.ts";
+import { Message, type RecoverableReadError } from "./message.ts";
 import { pack, unpack } from "./packed.ts";
 import { SchemaLoader, StructSchema, Type } from "./schema.ts";
 import {
@@ -585,6 +585,7 @@ export function writeMessageInFormat(
         traversalWords: 1_073_741_824,
         depthLimit: 256,
       });
+      fresh.onRecoverable = msg.onRecoverable;
       const reader = DynamicStruct.fromMessage(fresh, rootSchema);
       const text = encodeTextBytes(reader, { pretty });
       const out = new Uint8Array(text.byteLength + 1);
@@ -602,6 +603,7 @@ export function writeMessageInFormat(
         traversalWords: 1_073_741_824,
         depthLimit: 256,
       });
+      fresh.onRecoverable = msg.onRecoverable;
       const reader = DynamicStruct.fromMessage(fresh, rootSchema);
       const json = encodeJsonBytes(reader, {
         pretty,
@@ -631,12 +633,18 @@ function writeConvertedStream(
   writeErr: (message: string) => void,
 ): number {
   let status = 0;
-  for (const { message, error } of iterateMessagesInFormat(input, from, rootSchema, {
+  for (const { message, error: inputError } of iterateMessagesInFormat(input, from, rootSchema, {
     quiet: opts.quiet,
     warn: writeErr,
     recover: true,
   })) {
+    let readError: RecoverableReadError | undefined;
+    message.onRecoverable = (e) => {
+      readError ??= e;
+    };
     writeOut(writeMessageInFormat(message, to, rootSchema, opts));
+    message.onRecoverable = undefined;
+    const error = inputError ?? readError;
     if (error !== undefined) {
       writeErr(
         "*** ERROR CONVERTING PREVIOUS MESSAGE ***\n" +

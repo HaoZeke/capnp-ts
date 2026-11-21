@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { canonicalizeFlat, loadU32, unpack } from "../src/index.ts";
+import { Message, canonicalizeFlat, loadU32, unpack } from "../src/index.ts";
 import {
   type WireFormat,
   formatNeedsSchema,
@@ -1075,6 +1075,112 @@ describe("text output of corrupt AnyPointer fields", () => {
     );
     expect(live.code).toBe(0);
     expect(new TextDecoder().decode(live.stdout)).toBe(expected);
+  });
+});
+
+describe("pointer null checks like capnp 1.4.0", () => {
+  const ksCgr = join(goldenDir, "dynamic-kitchen.cgr.bin");
+  const outOfBounds =
+    "This usually indicates that the input data was corrupted, used a different encoding " +
+    "than specified (e.g. packed vs. non-packed), or was not a Cap'n Proto message to begin " +
+    "with. Note that this error is NOT due to a schema mismatch; the input is invalid " +
+    "regardless of schema.";
+
+  // An `Envelope` root whose `payload` pointer word is `payload`; word 4 can
+  // serve as a far pointer landing pad.
+  function envelope(payload: bigint, pad = 0n): Uint8Array {
+    const words = [0x0003000000000000n, 0n, payload, 0n, pad, 0n];
+    const out = new Uint8Array(8 + words.length * 8);
+    const view = new DataView(out.buffer);
+    view.setUint32(4, words.length, true);
+    words.forEach((w, i) => view.setBigUint64(8 + i * 8, w, true));
+    return out;
+  }
+
+  const recovered: [string, Uint8Array, string, number][] = [
+    [
+      "an unknown other pointer",
+      envelope(0x67n),
+      "expected ptr->isCapability(); unknown pointer type",
+      2779,
+    ],
+    [
+      "a far pointer to an unknown segment",
+      envelope(0x500000002n),
+      "expected segment != nullptr [0 != nullptr]; Message contains far pointer to unknown segment.",
+      580,
+    ],
+    [
+      "an out-of-bounds far pointer",
+      envelope(0x1f42n),
+      `expected boundsCheck(segment, ptr, padWords); Message contains out-of-bounds far pointer. ${outOfBounds}`,
+      587,
+    ],
+    [
+      "a double-far pad in an unknown segment",
+      envelope(0x26n, 0x500000002n),
+      "expected newSegment != nullptr [0 != nullptr]; Message contains double-far pointer to unknown segment.",
+      606,
+    ],
+    [
+      "a double-far pad that is no far pointer",
+      envelope(0x26n),
+      "expected pad->kind() == WirePointer::FAR [0 == 2]; Second word of double-far pad must be far pointer.",
+      610,
+    ],
+    ["a far pointer landing on a far pointer", envelope(0x12n), "far pointer not followed?", 2773],
+  ];
+
+  for (const [name, input, description, line] of recovered) {
+    test(`${name} prints as null, then reports the error`, async () => {
+      const r = await execCliInMemory(["convert", "binary:text", ksCgr, "Envelope"], input);
+      expect(r.code).toBe(1);
+      expect(new TextDecoder().decode(r.stdout)).toBe("()\n");
+      expect(r.stderr).toBe(
+        "*** ERROR CONVERTING PREVIOUS MESSAGE ***\n" +
+          "The following error occurred while converting the message above.\n" +
+          "This probably means the input data is invalid/corrupted.\n" +
+          `Exception description: ${description}\n` +
+          `Code location: capnp/layout.c++:${line}\n` +
+          "*** END ERROR ***",
+      );
+    });
+  }
+
+  for (const [name, input] of [
+    ["a capability", envelope(3n)],
+    ["a far pointer landing on a zero word", envelope(0x22n)],
+  ] as [string, Uint8Array][]) {
+    test(`${name} is not null`, async () => {
+      const r = await execCliInMemory(["convert", "binary:text", ksCgr, "Envelope"], input);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(new TextDecoder().decode(r.stdout)).toBe("( payload = <opaque pointer> )\n");
+    });
+  }
+
+  test("a reader without a handler throws", () => {
+    const msg = Message.fromFlat(envelope(0x67n));
+    expect(() => msg.root().isNullP(1)).toThrow("unknown pointer type");
+  });
+
+  test.skipIf(!hasCapnp)("matches live capnp", async () => {
+    const schemaPath = join(repoRoot, "schema", "dynamic-kitchen.capnp");
+    const inputs = [...recovered.map((c) => c[1]), envelope(3n), envelope(0x22n)];
+    for (const to of ["text", "json"]) {
+      for (const input of inputs) {
+        const live = execCapnp(["convert", `binary:${to}`, schemaPath, "Envelope"], input);
+        const ours = await execCliInMemory(["convert", `binary:${to}`, ksCgr, "Envelope"], input);
+        expect({ to, code: ours.code, stdout: [...ours.stdout] }).toEqual({
+          to,
+          code: live.code,
+          stdout: [...live.stdout],
+        });
+        if (live.stderr.startsWith("*** ERROR CONVERTING")) {
+          expect(`${ours.stderr}\n`).toBe(live.stderr);
+        }
+      }
+    }
   });
 });
 
