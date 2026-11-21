@@ -12,7 +12,9 @@ import {
   ElemSize,
   PtrKind,
   WORD_BYTES,
+  exactProduct,
   listStepBits,
+  primitiveBodySize,
 } from "./kinds.ts";
 import type { Ptr } from "./message.ts";
 import {
@@ -124,7 +126,7 @@ function copyList(
     const step = list.stepWords || list.dwords + list.pwords;
     const nd = list.dwords;
     const np = list.pwords;
-    const contentWords = n * step;
+    const contentWords = exactProduct(n, step);
     const need = 1 + contentWords;
     const { seg: tagSeg, word: tagWord } = builder.allocWords(need);
     builder.storeW(tagSeg, tagWord, wpMakeStruct(n | 0, nd, np));
@@ -136,16 +138,19 @@ function copyList(
       ElemSize.Composite,
       contentWords,
     );
-    for (let i = 0; i < n; i++) {
-      const el = list.listGetStruct(i);
-      const elWord = tagWord + 1 + i * step;
-      copyStructData(builder, tagSeg, elWord, el, nd);
-      for (let k = 0; k < np; k++) {
-        const cslot = new BuilderPointer(builder, tagSeg, elWord + nd + k);
-        if (k < el.pwords) {
-          deepCopyPtrToSlot(builder, cslot, el.getP(k), depth + 1);
-        } else {
-          builder.storeW(tagSeg, elWord + nd + k, 0n);
+    // Zero-sized elements have no body. C++ totalSize does not walk them.
+    if (step > 0) {
+      for (let i = 0; i < n; i++) {
+        const el = list.listGetStruct(i);
+        const elWord = tagWord + 1 + i * step;
+        copyStructData(builder, tagSeg, elWord, el, nd);
+        for (let k = 0; k < np; k++) {
+          const cslot = new BuilderPointer(builder, tagSeg, elWord + nd + k);
+          if (k < el.pwords) {
+            deepCopyPtrToSlot(builder, cslot, el.getP(k), depth + 1);
+          } else {
+            builder.storeW(tagSeg, elWord + nd + k, 0n);
+          }
         }
       }
     }
@@ -158,8 +163,7 @@ function copyList(
     if (n > 0) {
       ({ seg: listSeg, word: listStart } = builder.allocWords(n));
     } else {
-      listSeg = slot.seg;
-      listStart = slot.word + 1;
+      ({ seg: listSeg, word: listStart } = builder.emptyListTarget(slot.seg));
     }
     builder.writeListPtr(
       slot.seg,
@@ -183,9 +187,7 @@ function copyList(
   // Primitive lists (void / bit / byte / two / four / eight): raw payload copy.
   const stepBits = listStepBits(esize);
   if (stepBits < 0) throw new CapnpError("KIND", `bad list esize ${esize}`);
-  const bits = stepBits === 0 ? 0 : stepBits === 1 ? n : n * stepBits;
-  const nbytes = (bits + 7) >>> 3;
-  const nwords = (nbytes + 7) >>> 3;
+  const { nbytes, nwords } = primitiveBodySize(n, stepBits);
   let startSeg: number;
   let startWord: number;
   if (nwords > 0) {
@@ -200,8 +202,7 @@ function copyList(
       startWord * WORD_BYTES,
     );
   } else {
-    startSeg = slot.seg;
-    startWord = slot.word + 1;
+    ({ seg: startSeg, word: startWord } = builder.emptyListTarget(slot.seg));
   }
   builder.writeListPtr(slot.seg, slot.word, startSeg, startWord, esize, n);
 }

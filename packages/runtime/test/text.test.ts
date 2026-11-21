@@ -1,0 +1,883 @@
+import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  CapnpError,
+  DynamicCapability,
+  DynamicEnum,
+  DynamicStruct,
+  DynamicValue,
+  Message,
+  MessageBuilder,
+  SchemaLoader,
+  TextCodec,
+  type TextInputError,
+  canonicalize,
+  canonicalizeFlat,
+  decodeText,
+  decodeTextBytes,
+  encodeCEscapeTextBytes,
+  encodeText,
+  encodeTextBytes,
+  formatKjFloat32,
+  formatKjFloat64,
+  initDynamicRoot,
+  prettyPrint,
+  splitTextMessages,
+  stringify,
+} from "../src/index.ts";
+import { convertStream, readMessagesInFormat } from "../src/cli.ts";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const repoRoot = join(here, "..", "..", "..");
+const goldenDir = join(here, "golden");
+const hasCapnp = spawnSync("capnp", ["--version"]).status === 0;
+
+function readGolden(name: string): Uint8Array {
+  return new Uint8Array(readFileSync(join(goldenDir, name)));
+}
+
+describe("Cap'n Proto text-format encoder and decoder", () => {
+  test("matches exact AddressBook pretty and short text and round-trips to canonical bytes", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin"));
+    const bookSchema = loader.resolveStruct("AddressBook");
+    const book = DynamicStruct.fromMessage(
+      Message.fromFlat(readGolden("addressbook.bin")),
+      bookSchema,
+    );
+
+    const expectedPretty = [
+      "( people = [",
+      "    ( id = 123,",
+      '      name = "Alice",',
+      '      email = "alice@example.com",',
+      "      phones = [",
+      '        (number = "555-1212", type = mobile) ],',
+      '      employment = (school = "MIT") ),',
+      "    ( id = 456,",
+      '      name = "Bob",',
+      '      email = "bob@example.com",',
+      "      phones = [",
+      '        (number = "555-4567", type = home),',
+      '        (number = "555-7654", type = work) ],',
+      "      employment = (unemployed = void) ) ] )",
+    ].join("\n");
+
+    const expectedShort =
+      '(people = [(id = 123, name = "Alice", email = "alice@example.com", phones = [(number = "555-1212", type = mobile)], employment = (school = "MIT")), (id = 456, name = "Bob", email = "bob@example.com", phones = [(number = "555-4567", type = home), (number = "555-7654", type = work)], employment = (unemployed = void))])';
+
+    expect(prettyPrint(book)).toBe(expectedPretty);
+    expect(stringify(book)).toBe(expectedShort);
+
+    const decodedFromPretty = decodeText(expectedPretty, bookSchema);
+    const decodedFromShort = decodeText(expectedShort, bookSchema);
+    const canonGolden = readGolden("addressbook.canonical.bin");
+    expect(canonicalize(decodedFromPretty)).toEqual(canonGolden);
+    expect(canonicalize(decodedFromShort)).toEqual(canonGolden);
+  });
+
+  test("round-trips KitchenSink extremes, escapes, comments, hex/octal literals, and unknown enums", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const sinkSchema = loader.resolveStruct("KitchenSink");
+    const prioSchema = loader.resolve("Priority").asEnum();
+
+    const extremeBytes = readGolden("dynamic-kitchen-extreme.bin");
+    const extremeReader = DynamicStruct.fromMessage(
+      Message.fromFlat(extremeBytes),
+      sinkSchema,
+    );
+    const pretty = encodeText(extremeReader, { pretty: true });
+    const short = encodeText(extremeReader, { pretty: false });
+
+    expect(canonicalize(decodeText(pretty, sinkSchema))).toEqual(
+      canonicalizeFlat(extremeBytes),
+    );
+    expect(canonicalize(decodeText(short, sinkSchema))).toEqual(
+      canonicalizeFlat(extremeBytes),
+    );
+
+    // Rich literal syntax: comments, hex ints, octal ints, string chains, backtick, 0x"..." with spaces
+    const richText = `
+      # Leading comment
+      (
+        flag = true,
+        i32 = -0x20,
+        u16 = 0755,
+        f32 = -0.0,
+        f64 = inf,
+        title = "part1-" "part2-" \`raw line
+        ,
+        raw = 0x"de ad\nbe ef",
+        matrix = [[1, 2,], [],],
+      ) # trailing comment
+    `;
+    const msg = decodeText(richText, sinkSchema);
+    const parsed = DynamicStruct.fromMessage(msg, sinkSchema);
+    expect(parsed.get("i32").asInt32()).toBe(-32);
+    expect(parsed.get("u16").asUInt16()).toBe(0o755);
+    expect(Object.is(parsed.get("f32").asFloat32(), -0)).toBe(true);
+    expect(parsed.get("f64").asFloat64()).toBe(Infinity);
+    expect(parsed.get("title").asText()).toBe("part1-part2-raw line\n");
+    expect(parsed.get("raw").asData()).toEqual(
+      new Uint8Array([0xde, 0xad, 0xbe, 0xef]),
+    );
+    expect(stringify(new DynamicEnum(prioSchema, 77))).toBe("(77)");
+    // capnp prints an unknown enumerant as `(77)` but cannot parse it back.
+    expect(() => decodeText("(priority = (77))", sinkSchema)).toThrow(CapnpError);
+
+    // Stream splitting with comments and parens inside strings
+    const stream = `
+      # msg 1
+      (title = "(not a new message)")
+      # msg 2
+      (title = "second", i32 = 9)
+    `;
+    const parts = splitTextMessages(stream);
+    expect(parts.length).toBe(2);
+    expect(
+      DynamicStruct.fromMessage(decodeText(parts[0]!, sinkSchema), sinkSchema)
+        .get("title")
+        .asText(),
+    ).toBe("(not a new message)");
+    expect(
+      DynamicStruct.fromMessage(decodeText(parts[1]!, sinkSchema), sinkSchema)
+        .get("i32")
+        .asInt32(),
+    ).toBe(9);
+
+    // Rejections matching capnp encode
+    expect(() => decodeText("(unknownField = 1)", sinkSchema)).toThrow(
+      CapnpError,
+    );
+    // capnp encode lets a later union member or a repeated field win.
+    const lastWins = (src: string) =>
+      DynamicStruct.fromMessage(decodeText(src, sinkSchema), sinkSchema);
+    expect(lastWins('(none = void, note = "both")').which()?.name).toBe("note");
+    expect(lastWins('(none = void, note = "both")').get("note").asText()).toBe("both");
+    expect(lastWins('(note = "both", none = void)').which()?.name).toBe("none");
+    expect(lastWins("(i8 = 1, i8 = 2)").get("i8").asInt8()).toBe(2);
+    expect(() => decodeText("(i8 = 999)", sinkSchema)).toThrow(CapnpError);
+    for (const badText of [
+      "(i8 = +1)",
+      "(f64 = +1.5)",
+      "(f64 = +inf)",
+      "(f64 = +nan)",
+      "(f64 = -nan)",
+      "(f64 = .5)",
+      "(f64 = -.5)",
+    ]) {
+      expect(() => decodeText(badText, sinkSchema)).toThrow(CapnpError);
+    }
+
+    const invalidUtf8 = DynamicStruct.fromMessage(
+      decodeText('(title = "\\377")', sinkSchema),
+      sinkSchema,
+    );
+    expect([...invalidUtf8.get("title").asTextBytes()]).toEqual([0xff]);
+    expect(formatKjFloat32(1.401298464324817e-45)).toBe("1.4012985e-45");
+  });
+
+
+  test.skipIf(!hasCapnp)("a parenthesized value is that value, like capnp convert text", () => {
+    const schemaPath = join(repoRoot, "schema/dynamic-kitchen.capnp");
+    const ks = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin")).resolveStruct("KitchenSink");
+    const mismatches: string[] = [];
+    for (const input of [
+      '((title = "a"))',
+      '(((title = "a")))',
+      '(title = ("a"))',
+      "(i32 = (5), f64 = ((inf)))",
+      "(i32 = (-5))",
+      "(matrix = ([[1, (2)], ([])]))",
+      "(priority = (high))",
+      "(())",
+      "()",
+      "(priority = (77))",
+      "(i32 = (5, 6))",
+      '((title = "a"), (title = "b"))',
+      '((title = "a") (title = "b"))',
+      "(5)",
+    ]) {
+      const cpp = spawnSync(
+        "capnp",
+        ["convert", "--quiet", "text:canonical", schemaPath, "KitchenSink"],
+        { input },
+      );
+      let ts: Uint8Array | null;
+      try {
+        ts = canonicalize(decodeText(input, ks));
+      } catch {
+        ts = null;
+      }
+      if ((cpp.status === 0) !== (ts !== null)) {
+        mismatches.push(`${input}: cpp_ok=${cpp.status === 0} ts_ok=${ts !== null}`);
+      } else if (ts !== null && Buffer.compare(Buffer.from(ts), Buffer.from(cpp.stdout)) !== 0) {
+        mismatches.push(`${input}: bytes differ`);
+      }
+    }
+    expect(mismatches).toEqual([]);
+  });
+
+  test.skipIf(!hasCapnp)("text streams with no message fail like capnp convert text", () => {
+    const schemaPath = join(repoRoot, "schema/addressbook.capnp");
+    const person = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin")).resolveStruct("Person");
+    const mismatches: string[] = [];
+    for (const input of [
+      " ",
+      "\n\n",
+      "#c\n",
+      " # c\n # d",
+      '(name = "a")\n# trailing\n',
+      '# lead\n(name = "a") (name = "b")\n\n',
+    ]) {
+      const cpp = spawnSync(
+        "capnp",
+        ["convert", "--quiet", "text:canonical", schemaPath, "Person"],
+        { input },
+      );
+      let ts: Uint8Array | null;
+      try {
+        ts = Buffer.concat(
+          splitTextMessages(input).map((s) => canonicalize(decodeText(s, person))),
+        );
+      } catch {
+        ts = null;
+      }
+      if ((cpp.status === 0) !== (ts !== null)) {
+        mismatches.push(`${JSON.stringify(input)}: cpp_ok=${cpp.status === 0} ts_ok=${ts !== null}`);
+      } else if (ts !== null && Buffer.compare(Buffer.from(ts), Buffer.from(cpp.stdout)) !== 0) {
+        mismatches.push(`${JSON.stringify(input)}: bytes differ`);
+      }
+    }
+    expect(mismatches).toEqual([]);
+  });
+
+  test("string and hex blob literals follow the capnp 1.4.0 lexer", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const sinkSchema = loader.resolveStruct("KitchenSink");
+    const read = (input: string) =>
+      DynamicStruct.fromMessage(decodeText(input, sinkSchema), sinkSchema);
+    for (const badText of [
+      '(raw = 0x"")',
+      "(raw = 0x'ff')",
+      '(raw = 0X"ff")',
+      '(raw = 0x"f")',
+      '(raw = 0x"f f")',
+      '(raw = 0x"a\vb")',
+      '(raw = 0x"aa" 0x"bb")',
+      "(title = 'single')",
+      '(title = "a\nb")',
+    ]) {
+      expect(() => decodeText(badText, sinkSchema)).toThrow(CapnpError);
+    }
+    expect([...read('(raw = 0x" ab\tcd\nef\r01\v23\f45 ")').get("raw").asData()]).toEqual([
+      0xab, 0xcd, 0xef, 0x01, 0x23, 0x45,
+    ]);
+    expect([...read('(title = "a\rb")').get("title").asTextBytes()]).toEqual([0x61, 0x0d, 0x62]);
+  });
+
+  test("octal text escapes keep the low byte like capnp 1.4.0", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const sinkSchema = loader.resolveStruct("KitchenSink");
+    const title = (input: string) => [
+      ...DynamicStruct.fromMessage(decodeText(input, sinkSchema), sinkSchema)
+        .get("title")
+        .asTextBytes(),
+    ];
+    expect(title('(title = "\\623")')).toEqual([0x93]);
+    expect(title('(title = "\\777x")')).toEqual([0xff, 0x78]);
+    expect(title('(title = "\\400")')).toEqual([0x00]);
+  });
+
+  test("text streams split on parentheses only, even inside strings, like capnp 1.4.0", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const sinkSchema = loader.resolveStruct("KitchenSink");
+    const stream = (text: string) =>
+      readMessagesInFormat(new TextEncoder().encode(text), "text", sinkSchema);
+    expect(splitTextMessages("(title = \"it's\")(i32 = 2)")).toEqual([
+      '(title = "it\'s")',
+      "(i32 = 2)",
+    ]);
+    expect(stream("(title = \"it's\")(i32 = 2)").length).toBe(2);
+    expect(() => stream('(title = "B)\\0(")')).toThrow(CapnpError);
+    expect(() => stream('(title = "a)b(")')).toThrow(CapnpError);
+  });
+
+  test("string printers decode non-UTF-8 Text with U+FFFD, not an escape, and keep a BOM", () => {
+    const person = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin")).resolveStruct("Person");
+    const cases: Array<[string, string]> = [
+      ["a\\377b", "a\ufffdb"],
+      ["a\\342\\202c", "a\ufffdc"],
+      ["\\300\\257", "\ufffd\ufffd"],
+      ["\\355\\240\\200", "\ufffd\ufffd\ufffd"],
+      ["ab\\303\\251\\377x", "ab\u00e9\ufffdx"],
+      ["\\357\\273\\277x", "\ufeffx"],
+      ["\\t\\\"\\177", "\\t\\\"\\177"],
+    ];
+    for (const [raw, shown] of cases) {
+      const reader = DynamicStruct.fromMessage(decodeText(`(name = "${raw}")`, person), person);
+      for (const printed of [
+        encodeText(reader, { pretty: false }),
+        encodeText(reader),
+        stringify(reader),
+        prettyPrint(reader),
+        new TextCodec({ prettyPrint: false }).encode(reader),
+      ]) {
+        expect(printed).toContain(`name = "${shown}"`);
+      }
+    }
+    expect(encodeCEscapeTextBytes(Uint8Array.of(0xff))).toBe("\ufffd");
+    expect(encodeCEscapeTextBytes(Uint8Array.of(0xc3, 0xa9))).toBe("\u00e9");
+  });
+
+  test.skipIf(!hasCapnp)("string printers equal capnp decode output decoded as UTF-8", () => {
+    const schemaPath = join(repoRoot, "schema/addressbook.capnp");
+    const person = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin")).resolveStruct("Person");
+    const lossy = (bytes: Uint8Array) =>
+      new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes).replace(/\n$/, "");
+    for (const raw of ["a\\377b", "a\\342\\202c", "\\300\\257", "\\355\\240\\200", "\\357\\273\\277x", "\\177\\001\\377"]) {
+      const bin = spawnSync("capnp", ["encode", schemaPath, "Person"], { input: `(name = "${raw}")` });
+      expect(bin.status).toBe(0);
+      const reader = DynamicStruct.fromMessage(Message.fromFlat(new Uint8Array(bin.stdout)), person);
+      const short = spawnSync("capnp", ["decode", "--short", schemaPath, "Person"], { input: bin.stdout });
+      const pretty = spawnSync("capnp", ["decode", schemaPath, "Person"], { input: bin.stdout });
+      expect(short.status).toBe(0);
+      expect(pretty.status).toBe(0);
+      for (const printed of [
+        encodeText(reader, { pretty: false }),
+        stringify(reader),
+        new TextCodec({ prettyPrint: false }).encode(reader),
+      ]) {
+        expect(printed).toBe(lossy(short.stdout));
+      }
+      expect(encodeText(reader)).toBe(lossy(pretty.stdout));
+      expect(prettyPrint(reader)).toBe(lossy(pretty.stdout));
+    }
+  });
+
+  test.skipIf(!hasCapnp)("encodeTextBytes writes raw Text bytes like capnp decode", () => {
+    const schemaPath = join(repoRoot, "schema/addressbook.capnp");
+    const book = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin")).resolveStruct("AddressBook");
+    const names = [
+      "\\377",
+      "\\xc3",
+      "ab\\303\\251\\377x",
+      "\\300\\257",
+      "\\355\\240\\200",
+      "\\357\\273\\277bom",
+      "a\\000b",
+      "\\377".repeat(30),
+      `${"x".repeat(40)}${"\\377".repeat(12)}`,
+      "\\377".repeat(10),
+    ];
+    for (const name of names) {
+      const input = `(people = [(id = 1, name = "${name}", email = "e"), (id = 2, name = "${name}", phones = [(number = "${name.slice(0, 40)}", type = mobile)])])`;
+      const bin = spawnSync("capnp", ["encode", schemaPath, "AddressBook"], { input });
+      expect(bin.status).toBe(0);
+      const reader = DynamicStruct.fromMessage(Message.fromFlat(new Uint8Array(bin.stdout)), book);
+      for (const pretty of [true, false]) {
+        const args = ["decode", ...(pretty ? [] : ["--short"]), schemaPath, "AddressBook"];
+        const cpp = spawnSync("capnp", args, { input: bin.stdout });
+        expect(cpp.status).toBe(0);
+        const ts = Buffer.concat([encodeTextBytes(reader, { pretty }), Buffer.from("\n")]);
+        expect(ts.toString("hex")).toBe(Buffer.from(cpp.stdout).toString("hex"));
+        // The string printers return these bytes decoded as UTF-8, line breaks included.
+        const decoded = new TextDecoder("utf-8", { ignoreBOM: true }).decode(cpp.stdout);
+        expect(`${encodeText(reader, { pretty })}\n`).toBe(decoded);
+        expect(`${new TextCodec({ prettyPrint: pretty }).encode(reader)}\n`).toBe(decoded);
+        expect(`${pretty ? prettyPrint(reader) : stringify(reader)}\n`).toBe(decoded);
+      }
+    }
+  });
+
+  test.skipIf(!hasCapnp)("decodeTextBytes keeps raw Text bytes like capnp encode", () => {
+    const schemaPath = join(repoRoot, "schema/addressbook.capnp");
+    const person = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin")).resolveStruct("Person");
+    const ascii = (text: string) => new TextEncoder().encode(text);
+    const inputs = [
+      Buffer.concat([ascii('(name = "'), Buffer.of(0xff, 0x80, 0x61), ascii('")')]),
+      Buffer.concat([ascii('(name = "'), Buffer.of(0xc3, 0xa9, 0xed, 0xa0, 0x80), ascii('")')]),
+      Buffer.concat([ascii("(name = `"), Buffer.of(0xfe, 0x0d), ascii("\n)")]),
+      Buffer.concat([ascii('(name = "a" "'), Buffer.of(0xc0, 0xaf), ascii('", email = "\\377")')]),
+    ];
+    for (const input of inputs) {
+      const cpp = spawnSync("capnp", ["encode", schemaPath, "Person"], { input });
+      expect(cpp.status).toBe(0);
+      expect(canonicalize(decodeTextBytes(input, person))).toEqual(
+        canonicalize(Message.fromFlat(new Uint8Array(cpp.stdout))),
+      );
+    }
+    // `capnp encode` rejects a leading BOM before parsing, so parse these
+    // with `convert --quiet`, which skips that check.
+    const quietEncode = (input: Uint8Array) =>
+      spawnSync("capnp", ["convert", "--quiet", "text:binary", schemaPath, "Person"], { input });
+    for (const input of [
+      Buffer.concat([Buffer.of(0xef, 0xbb, 0xbf), ascii('(name = "a")')]),
+      Buffer.concat([ascii(" "), Buffer.of(0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf), ascii('# c\n(name = "a")')]),
+      Buffer.concat([ascii("(name"), Buffer.of(0xef, 0xbb, 0xbf), ascii(' = "a")'), Buffer.of(0xef, 0xbb, 0xbf)]),
+    ]) {
+      const cpp = quietEncode(input);
+      expect(cpp.status).toBe(0);
+      expect(canonicalize(decodeTextBytes(input, person))).toEqual(
+        canonicalize(Message.fromFlat(new Uint8Array(cpp.stdout))),
+      );
+    }
+    const partialBom = Buffer.concat([Buffer.of(0xef, 0xbb), ascii('(name = "a")')]);
+    expect(quietEncode(partialBom).status).not.toBe(0);
+    expect(() => decodeTextBytes(partialBom, person)).toThrow(CapnpError);
+    const name = (input: string | Uint8Array) => [
+      ...DynamicStruct.fromMessage(decodeTextBytes(input, person), person).get("name").asTextBytes(),
+    ];
+    for (const text of ["é", "€", "😀"]) {
+      expect(name(`(name = "${text}")`)).toEqual([...new TextEncoder().encode(text)]);
+    }
+    expect(name(`(name = "${String.fromCharCode(0xdc97)}")`)).toEqual([0xef, 0xbf, 0xbd]);
+    for (const raw of ["\\377", "ab\\303\\251\\377x", "\\355\\240\\200", "a\\000b"]) {
+      const msg = decodeText(`(name = "${raw}")`, person);
+      const printed = encodeTextBytes(DynamicStruct.fromMessage(msg, person), { pretty: false });
+      expect(canonicalize(decodeTextBytes(printed, person))).toEqual(canonicalize(msg));
+    }
+  });
+
+  test("formatKjFloat32 tries 6 then 8 significant digits like kj::FloatToBuffer", () => {
+    expect(formatKjFloat32(Math.fround(1.0000040531158447))).toBe("1.0000041");
+    expect(formatKjFloat32(Math.fround(-9851.2763671875))).toBe("-9851.2764");
+    expect(formatKjFloat32(Math.fround(9048322736128))).toBe("9.0483227e12");
+    expect(formatKjFloat32(Math.fround(9080.787109375))).toBe("9080.7871");
+    expect(formatKjFloat32(Math.fround(0.00007064244709908962))).toBe("7.0642447e-05");
+    expect(formatKjFloat32(Math.fround(0.1))).toBe("0.1");
+    expect(formatKjFloat32(16777216)).toBe("16777216");
+  });
+
+  test.skipIf(!hasCapnp)("Float32 text output matches capnp decode", () => {
+    const ksLoader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const ks = ksLoader.resolveStruct("KitchenSink");
+    const ksFile = join(repoRoot, "schema/dynamic-kitchen.capnp");
+    const values = [
+      1.0000040531158447,
+      -9851.2763671875,
+      9048322736128,
+      9080.787109375,
+      0.00007064244709908962,
+      -3.375497066137641e-29,
+      5.963763791567561e-26,
+      -2.7288819052287613e36,
+      61558331801600,
+      0.1,
+      16777216,
+      1e-45,
+    ];
+    for (const v of values) {
+      const cliEnc = spawnSync("capnp", ["encode", ksFile, "KitchenSink"], {
+        input: Buffer.from(`(f32 = ${v})`, "utf-8"),
+      });
+      expect(cliEnc.status).toBe(0);
+      const cliDec = spawnSync("capnp", ["decode", "--short", ksFile, "KitchenSink"], {
+        input: cliEnc.stdout,
+        encoding: "utf8",
+      });
+      const m = /f32 = ([^,)]*)/.exec(cliDec.stdout);
+      const reader = DynamicStruct.fromMessage(Message.fromFlat(new Uint8Array(cliEnc.stdout)), ks);
+      expect(formatKjFloat32(reader.get("f32").asFloat32())).toBe(m![1]!);
+    }
+  });
+
+  test("float output rounds exact decimal ties to even like printf", () => {
+    expect(formatKjFloat32(2910510.25)).toBe("2910510.2");
+    expect(formatKjFloat32(-576302.625)).toBe("-576302.62");
+    expect(formatKjFloat32(4175634.25)).toBe("4175634.2");
+    expect(formatKjFloat32(-388997.625)).toBe("-388997.62");
+    expect(formatKjFloat64(-49202031784.94531)).toBe("-49202031784.945312");
+    expect(formatKjFloat64(0.5)).toBe("0.5");
+  });
+
+  test.skipIf(!hasCapnp)("float ties print like capnp decode", () => {
+    const ksLoader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const ks = ksLoader.resolveStruct("KitchenSink");
+    const ksFile = join(repoRoot, "schema/dynamic-kitchen.capnp");
+    const f32s = [2910510.25, -576302.625, 4175634.25, -388997.625];
+    const f64s = [-49202031784.94531, -843794949303690.1, -893966297318091.6];
+    for (const [field, values] of [
+      ["f32", f32s],
+      ["f64", f64s],
+    ] as const) {
+      for (const v of values) {
+        const cliEnc = spawnSync("capnp", ["encode", ksFile, "KitchenSink"], {
+          input: Buffer.from(`(${field} = ${v})`, "utf-8"),
+        });
+        expect(cliEnc.status).toBe(0);
+        const cliDec = spawnSync("capnp", ["decode", "--short", ksFile, "KitchenSink"], {
+          input: cliEnc.stdout,
+          encoding: "utf8",
+        });
+        const m = new RegExp(`${field} = ([^,)]*)`).exec(cliDec.stdout);
+        const reader = DynamicStruct.fromMessage(
+          Message.fromFlat(new Uint8Array(cliEnc.stdout)),
+          ks,
+        );
+        const got =
+          field === "f32"
+            ? formatKjFloat32(reader.get(field).asFloat32())
+            : formatKjFloat64(reader.get(field).asFloat64());
+        expect(got).toBe(m![1]!);
+      }
+    }
+  });
+
+  test.skipIf(!hasCapnp)(
+    "Text escapes that are not UTF-8 keep their raw bytes like capnp encode",
+    () => {
+      const abLoader = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin"));
+      const person = abLoader.resolveStruct("Person");
+      const abFile = join(repoRoot, "schema/addressbook.capnp");
+      const samples = [
+        '(name = "\\377")',
+        '(name = "\\xc3")',
+        '(name = "ab\\303\\251\\377x")',
+        '(name = "a\\000b")',
+        '(name = "\\377", phones = [(number = "\\376\\375")])',
+        '(employment = (employer = "\\200\\277"))',
+      ];
+      for (const sample of samples) {
+        const cliEnc = spawnSync("capnp", ["encode", abFile, "Person"], {
+          input: Buffer.from(sample, "utf-8"),
+        });
+        expect(cliEnc.status).toBe(0);
+        const cliBin = new Uint8Array(cliEnc.stdout);
+
+        const tsMsg = decodeText(sample, person);
+        expect(canonicalize(tsMsg)).toEqual(canonicalizeFlat(cliBin));
+
+        // Copying a Text field from a wire reader keeps the raw bytes too.
+        const name = DynamicStruct.fromMessage(Message.fromFlat(cliBin), person).get("name");
+        const copy = new MessageBuilder();
+        DynamicStruct.initRoot(copy, person).set("name", name);
+        const copied = DynamicStruct.fromMessage(Message.fromFlat(copy.toFlat()), person);
+        expect(copied.get("name").asTextBytes()).toEqual(name.asTextBytes());
+      }
+    },
+  );
+
+  test.skipIf(!hasCapnp)(
+    "Text defaults and consts keep raw non-UTF-8 bytes from the schema",
+    () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), "capnp-rawtext-"));
+      try {
+        const schemaPath = join(tmpDir, "raw.capnp");
+        writeFileSync(
+          schemaPath,
+          [
+            "@0x8123456789abcde9;",
+            'const rawConst :Text = "\\377\\200";',
+            'struct RawText { t @0 :Text = "\\377"; }',
+          ].join("\n"),
+        );
+        const cgr = spawnSync("capnp", ["compile", "-o-", schemaPath]);
+        expect(cgr.status).toBe(0);
+        const loader = SchemaLoader.fromCgr(new Uint8Array(cgr.stdout));
+        const rawConst = loader.getConst(
+          loader.findRootSymbol("rawConst", 0x8123456789abcde9n),
+        );
+        expect([...DynamicValue.fromConst(rawConst).asTextBytes()]).toEqual([
+          0xff, 0x80,
+        ]);
+
+        const rawStruct = loader.resolveStruct("RawText");
+        const empty = new MessageBuilder();
+        DynamicStruct.initRoot(empty, rawStruct);
+        const reader = DynamicStruct.fromMessage(
+          Message.fromFlat(empty.toFlat()),
+          rawStruct,
+        );
+        expect([...reader.get("t").asTextBytes()]).toEqual([0xff]);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(!hasCapnp)(
+    "1000 raw Text and Data values match capnp encode and decode bytes",
+    () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), "capnp-raw-text-diff-"));
+      try {
+        const schemaPath = join(tmpDir, "raw.capnp");
+        writeFileSync(schemaPath, "@0xa9c4f1e2d3b45679; struct Raw { t @0 :Text; d @1 :Data; }");
+        const cgr = spawnSync("capnp", ["compile", "-o-", schemaPath]);
+        expect(cgr.status).toBe(0);
+        const schema = SchemaLoader.fromCgr(new Uint8Array(cgr.stdout)).resolveStruct("Raw");
+        let state = 0x9e3779b9;
+        const nextByte = (): number => {
+          state ^= state << 13;
+          state ^= state >>> 17;
+          state ^= state << 5;
+          return state & 0xff;
+        };
+        const octal = (bytes: Uint8Array): string =>
+          Array.from(bytes, (byte) => `\\${byte.toString(8).padStart(3, "0")}`).join("");
+        const hex = (bytes: Uint8Array): string =>
+          Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(" ");
+        const rows: string[] = [];
+        for (let i = 0; i < 1000; i++) {
+          const text = Uint8Array.from({ length: 1 + (nextByte() % 31) }, nextByte);
+          const data = Uint8Array.from({ length: 1 + (nextByte() % 31) }, nextByte);
+          rows.push(`(t = "${octal(text)}", d = 0x"${hex(data)}")`);
+        }
+        const input = new TextEncoder().encode(rows.join("\n"));
+        const cppBinary = spawnSync("capnp", ["convert", "text:binary", schemaPath, "Raw"], { input });
+        expect(cppBinary.status).toBe(0);
+        const tsBinary = convertStream(input, "text", "binary", schema);
+        expect(tsBinary).toEqual(new Uint8Array(cppBinary.stdout));
+        const cppText = spawnSync("capnp", ["convert", "binary:text", schemaPath, "Raw"], { input: cppBinary.stdout });
+        expect(cppText.status).toBe(0);
+        expect(convertStream(tsBinary, "binary", "text", schema)).toEqual(new Uint8Array(cppText.stdout));
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(!hasCapnp)(
+    "differential text-exact and byte-exact parity against capnp decode and encode",
+    () => {
+      const abLoader = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin"));
+      const abSchema = abLoader.resolveStruct("AddressBook");
+      const abFile = join(repoRoot, "schema/addressbook.capnp");
+      const abBin = readGolden("addressbook.bin");
+
+      const cliAbPretty = spawnSync("capnp", ["decode", abFile, "AddressBook"], {
+        input: abBin,
+      });
+      const cliAbShort = spawnSync(
+        "capnp",
+        ["decode", "--short", abFile, "AddressBook"],
+        { input: abBin },
+      );
+      expect(cliAbPretty.status).toBe(0);
+      expect(cliAbShort.status).toBe(0);
+
+      const abReader = DynamicStruct.fromMessage(
+        Message.fromFlat(abBin),
+        abSchema,
+      );
+      expect(`${encodeText(abReader, { pretty: true })}\n`).toBe(
+        cliAbPretty.stdout.toString("utf-8"),
+      );
+      expect(`${encodeText(abReader, { pretty: false })}\n`).toBe(
+        cliAbShort.stdout.toString("utf-8"),
+      );
+
+      // KitchenSink differential matrix
+      const ksLoader = SchemaLoader.fromCgr(
+        readGolden("dynamic-kitchen.cgr.bin"),
+      );
+      const ksSchema = ksLoader.resolveStruct("KitchenSink");
+      const ksFile = join(repoRoot, "schema/dynamic-kitchen.capnp");
+      const codecPretty = new TextCodec({ prettyPrint: true });
+      const codecShort = new TextCodec({ prettyPrint: false });
+
+      const textSamples = [
+        "()",
+        '(flag = true, f32 = -0.0, f64 = -0.0, title = "café 🚀", raw = 0x"000708090a0b0c0d1f2022275c7f80ff")',
+        "(f32 = 1e-5, f64 = 1e-5)",
+        "(f32 = 1e-4, f64 = 1e-4)",
+        "(f32 = 1e6, f64 = 1e15)",
+        "(f32 = 3.14159265, f64 = 3.141592653589793)",
+        "(f32 = nan, f64 = inf, i64 = -9223372036854775808, u64 = 18446744073709551615)",
+        '(note = "", source = (uri = ""))',
+        '(detail = (detailId = 7, detailName = "x"), meta = (author = "Bob", nested = (ok = false, score = -inf)))',
+      ];
+
+      for (const sample of textSamples) {
+        const cliEnc = spawnSync("capnp", ["encode", ksFile, "KitchenSink"], {
+          input: Buffer.from(sample, "utf-8"),
+        });
+        expect(cliEnc.status).toBe(0);
+        const cliBin = new Uint8Array(cliEnc.stdout);
+
+        const tsMsg = decodeText(sample, ksSchema);
+        expect(canonicalize(tsMsg)).toEqual(canonicalizeFlat(cliBin));
+
+        const cliPretty = spawnSync("capnp", ["decode", ksFile, "KitchenSink"], {
+          input: cliBin,
+        });
+        const cliShort = spawnSync(
+          "capnp",
+          ["decode", "--short", ksFile, "KitchenSink"],
+          { input: cliBin },
+        );
+        expect(cliPretty.status).toBe(0);
+        expect(cliShort.status).toBe(0);
+
+        const reader = DynamicStruct.fromMessage(
+          Message.fromFlat(cliBin),
+          ksSchema,
+        );
+        expect(`${codecPretty.encode(reader)}\n`).toBe(
+          cliPretty.stdout.toString("utf-8"),
+        );
+        expect(`${codecShort.encode(reader)}\n`).toBe(
+          cliShort.stdout.toString("utf-8"),
+        );
+      }
+
+      // Also check extremeConst binary golden character-for-character against capnp decode
+      const extBin = readGolden("dynamic-kitchen-extreme.bin");
+      const extCliPretty = spawnSync("capnp", ["decode", ksFile, "KitchenSink"], {
+        input: extBin,
+      });
+      const extCliShort = spawnSync(
+        "capnp",
+        ["decode", "--short", ksFile, "KitchenSink"],
+        { input: extBin },
+      );
+      const extReader = DynamicStruct.fromMessage(
+        Message.fromFlat(extBin),
+        ksSchema,
+      );
+      expect(`${codecPretty.encode(extReader)}\n`).toBe(
+        extCliPretty.stdout.toString("utf-8"),
+      );
+      expect(`${codecShort.encode(extReader)}\n`).toBe(
+        extCliShort.stdout.toString("utf-8"),
+      );
+
+      // Unknown enum formatting differential check
+      const unkBuilder = new MessageBuilder();
+      const unkRoot = DynamicStruct.initRoot(unkBuilder, ksSchema);
+      unkRoot.set(
+        "priority",
+        new DynamicEnum(ksLoader.resolve("Priority").asEnum(), 123),
+      );
+      const unkFlat = unkBuilder.toFlat();
+      const unkCliShort = spawnSync(
+        "capnp",
+        ["decode", "--short", ksFile, "KitchenSink"],
+        { input: unkFlat },
+      );
+      expect(`${codecShort.encode(unkRoot.asReader())}\n`).toBe(
+        unkCliShort.stdout.toString("utf-8"),
+      );
+
+      // AnyPointer, AnyStruct, AnyList, Capability, List(Interface), and union disc-0 edges
+      const tmpDir = mkdtempSync(join(tmpdir(), "capnp-text-edge-"));
+      try {
+        const edgePath = join(tmpDir, "edge.capnp");
+        writeFileSync(
+          edgePath,
+          [
+            "@0xabcdef0123456791;",
+            "interface MyCap { ping @0 () -> (); }",
+            "struct Sub { a @0 :Int32 = 5; b @1 :Text = \"hi\"; }",
+            "struct Edge {",
+            "  anyP @0 :AnyPointer;",
+            "  anyS @1 :AnyStruct;",
+            "  anyL @2 :AnyList;",
+            "  cap @3 :MyCap;",
+            "  anyCap @4 :Capability;",
+            "  listCap @5 :List(MyCap);",
+            "  uGrp :union { g :group { x @6 :Int32; } v @7 :Void; }",
+            "  uVal :union { dflt @8 :Int32 = 42; other @9 :Text; }",
+            "  uPtr :union { t @10 :Text = \"dflt\"; n @11 :Int32; }",
+            "}",
+          ].join("\n"),
+        );
+        const cgr = spawnSync("capnp", ["compile", "-o-", edgePath]);
+        expect(cgr.status).toBe(0);
+        const eLoader = SchemaLoader.fromCgr(new Uint8Array(cgr.stdout));
+        const edgeSchema = eLoader.resolveStruct("Edge");
+        const subSchema = eLoader.resolveStruct("Sub");
+        const capSchema = eLoader.resolve("MyCap").asInterface();
+
+        const b = new MessageBuilder();
+        const r = DynamicStruct.initRoot(b, edgeSchema);
+        const subMsg = new MessageBuilder();
+        DynamicStruct.initRoot(subMsg, subSchema).set("a", 99);
+        r.set("anyP", DynamicStruct.fromMessage(Message.fromFlat(subMsg.toFlat()), subSchema));
+        r.set("anyS", DynamicStruct.fromMessage(Message.fromFlat(subMsg.toFlat()), subSchema));
+        const listMsg = new MessageBuilder();
+        const listRoot = listMsg.initRoot(0, 1);
+        listRoot.initPrimList(0, 4, 2, 4, new Uint8Array([1, 0, 0, 0, 2, 0, 0, 0]));
+        r.set("anyL", Message.fromFlat(listMsg.toFlat()).root().getP(0));
+        r.init("listCap", 0);
+
+        const edgeFlat = b.toFlat();
+        const cliEdgePretty = spawnSync("capnp", ["decode", edgePath, "Edge"], {
+          input: edgeFlat,
+        });
+        const cliEdgeShort = spawnSync("capnp", ["decode", "--short", edgePath, "Edge"], {
+          input: edgeFlat,
+        });
+        expect(cliEdgePretty.status).toBe(0);
+        expect(cliEdgeShort.status).toBe(0);
+
+        const dynEdge = DynamicStruct.fromMessage(Message.fromFlat(edgeFlat), edgeSchema);
+        expect(`${codecPretty.encode(dynEdge)}\n`).toBe(
+          cliEdgePretty.stdout.toString("utf-8"),
+        );
+        expect(`${codecShort.encode(dynEdge)}\n`).toBe(
+          cliEdgeShort.stdout.toString("utf-8"),
+        );
+
+        // Capability and List(MyCap) with non-null caps match C++ prettyPrint output
+        r.set("cap", new DynamicCapability.Client(capSchema, 0));
+        r.set("anyCap", new DynamicCapability.Client(capSchema, 1));
+        const lc = r.init("listCap", 2).asList();
+        lc.set(0, new DynamicCapability.Client(capSchema, 2));
+        expect(codecShort.encode(r)).toBe(
+          "(anyP = <opaque pointer>, anyS = <opaque pointer>, anyL = <opaque pointer>, cap = <external capability>, anyCap = <opaque pointer>, listCap = [<external capability>, <external capability>], uGrp = (g = (x = 0)), uVal = (dflt = 42), uPtr = ())",
+        );
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+describe("text input values follow capnp encode", () => {
+  test("reports bad values, keeps going, and coerces a value to a struct's first field", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("dynamic-kitchen.cgr.bin"));
+    const sinkSchema = loader.resolveStruct("KitchenSink");
+    const decode = (src: string) => {
+      const errors: TextInputError[] = [];
+      const b = new MessageBuilder();
+      const root = initDynamicRoot(b, sinkSchema);
+      new TextCodec().decodeStruct(src, root, (e) => {
+        errors.push(e);
+      });
+      const reader = DynamicStruct.fromMessage(Message.fromFlat(b.toFlat()), sinkSchema);
+      return { text: stringify(reader), errors };
+    };
+    const defaults =
+      "i32 = -100000, i64 = -9007199254740993, u8 = 200, u16 = 50000, u32 = 3000000000, " +
+      "u64 = 9007199254740995, f32 = 1.5, f64 = -2.25, priority = normal";
+    const groups = "meta = (revision = 1, nested = (ok = true, score = 0.5))";
+
+    // Expected texts are `capnp encode | capnp decode --short` output.
+    expect(decode('(i8 = 999, voids = [void, 1, void], tags = [5, (key = "k")], i16 = 7)')).toEqual({
+      text:
+        `(nothing = void, flag = false, flagDefaultTrue = true, i8 = 127, i16 = 7, ${defaults}, ` +
+        `tags = [(code = -42), (key = "k", code = -42)], voids = [void, void, void], ${groups}, ` +
+        "none = void, source = (unset = void))",
+      errors: [
+        { description: "6-9: Integer value out of range.", location: "(capnp text input):1" },
+        { description: "26-27: Type mismatch; expected Void.", location: "(capnp text input):1" },
+        { description: "44-45: Type mismatch; expected Tag.", location: "(capnp text input):1" },
+      ],
+    });
+    expect(decode('(defaultTag = "x", tags = ["y"])')).toEqual({
+      text:
+        `(nothing = void, flag = false, flagDefaultTrue = true, i8 = -12, i16 = -3000, ${defaults}, ` +
+        `defaultTag = (key = "x", code = -42), tags = [(key = "y", code = -42)], ${groups}, ` +
+        "none = void, source = (unset = void))",
+      errors: [],
+    });
+    expect(decode("(meta = 3,\n  nope = 1)").errors).toEqual([
+      { description: "8-9: Type mismatch; expected group.", location: "(capnp text input):1" },
+      { description: "3-7: Struct has no field named 'nope'.", location: "(capnp text input):2" },
+    ]);
+  });
+});

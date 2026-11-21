@@ -15,7 +15,9 @@ import {
   CapnpError,
   DEFAULT_DEPTH_LIMIT,
   ElemSize,
+  exactProduct,
   listStepBits,
+  primitiveBodySize,
   PtrKind,
   WORD_BYTES,
 } from "./kinds.ts";
@@ -178,7 +180,7 @@ function writeListToSlot(
   if (esize === ElemSize.Composite) {
     const { nd, np } = compositeTrim(list);
     const step = nd + np;
-    const content = n * step;
+    const content = exactProduct(n, step);
     const tagWord = b.alloc(1 + content);
     // Tag word reuses struct layout: offset field holds element count.
     b.storeWord(tagWord, wpMakeStruct(n, nd, np));
@@ -186,15 +188,18 @@ function writeListToSlot(
     // List count field = content words excluding tag.
     b.storeWord(slotWord, wpMakeList(off, ElemSize.Composite, content));
     const first = tagWord + 1;
-    for (let i = 0; i < n; i++) {
-      const el = list.listGetStruct(i);
-      writeStructBodyData(b, first + i * step, nd, el);
-      for (let k = 0; k < np; k++) {
-        const cslot = first + i * step + nd + k;
-        if (k < el.pwords) {
-          copyPtrToWord(b, cslot, el.getP(k), depth + 1);
-        } else {
-          b.storeWord(cslot, 0n);
+    // Zero-sized elements contribute no words. Walking `n` would amplify.
+    if (step > 0) {
+      for (let i = 0; i < n; i++) {
+        const el = list.listGetStruct(i);
+        writeStructBodyData(b, first + i * step, nd, el);
+        for (let k = 0; k < np; k++) {
+          const cslot = first + i * step + nd + k;
+          if (k < el.pwords) {
+            copyPtrToWord(b, cslot, el.getP(k), depth + 1);
+          } else {
+            b.storeWord(cslot, 0n);
+          }
         }
       }
     }
@@ -202,12 +207,7 @@ function writeListToSlot(
   }
 
   if (esize === ElemSize.Pointer) {
-    let listStart: number;
-    if (n > 0) {
-      listStart = b.alloc(n);
-    } else {
-      listStart = slotWord + 1;
-    }
+    const listStart = b.alloc(n);
     const off = listStart - slotWord - 1;
     b.storeWord(slotWord, wpMakeList(off, ElemSize.Pointer, n));
     for (let i = 0; i < n; i++) {
@@ -221,20 +221,15 @@ function writeListToSlot(
   if (stepBits < 0) {
     throw new CapnpError("KIND", `bad list esize ${esize}`);
   }
-  const bits = stepBits === 0 ? 0 : stepBits === 1 ? n : n * stepBits;
-  const nbytes = (bits + 7) >>> 3;
-  const nwords = (nbytes + 7) >>> 3;
-  let start: number;
+  const { nbytes, nwords } = primitiveBodySize(n, stepBits);
+  const start = b.alloc(nwords);
   if (nwords > 0) {
-    start = b.alloc(nwords);
     const seg = list.msg.segs[list.seg]!;
     const srcOff = list.word * WORD_BYTES;
     b.data.set(
       seg.data.subarray(srcOff, srcOff + nbytes),
       start * WORD_BYTES,
     );
-  } else {
-    start = slotWord + 1;
   }
   const off = start - slotWord - 1;
   b.storeWord(slotWord, wpMakeList(off, esize, n));

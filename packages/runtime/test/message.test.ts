@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -157,7 +159,47 @@ describe("Message reader", () => {
     expect(again.root().getP(0).getU64(0)).toBe(0xbeefn);
     expect(again.root().getP(1).listGetText(1)).toBe("far");
   });
+
+  test("Text field and List(Text) reads keep a leading BOM", () => {
+    const root = Message.fromSegments([{ data: bomTextSegment(), words: 8 }]).root();
+    expect(root.getText(0)).toBe("\ufeffa");
+    expect(root.getP(1).listGetText(0)).toBe("\ufeffb");
+    expect(root.getP(1).listGetText(1)).toBe("c");
+  });
+
+  test.skipIf(!hasCapnp())("the BOM Text segment is what capnp encode writes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "capnp-bom-"));
+    try {
+      const schema = join(dir, "l.capnp");
+      writeFileSync(schema, "@0xd2f3c8a1b4e5f602;\nstruct L { t @0 :Text; tl @1 :List(Text); }\n");
+      const r = spawnSync("capnp", ["encode", "--flat", schema, "L"], {
+        input: '(t = "\\xef\\xbb\\xbfa", tl = ["\\xef\\xbb\\xbfb", "c"])',
+      });
+      expect(r.status).toBe(0);
+      expect([...new Uint8Array(r.stdout)]).toEqual([...bomTextSegment()]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
+
+/** Root struct 0d 2p: p0 Text "\ufeffa", p1 List(Text) ["\ufeffb", "c"]. */
+function bomTextSegment(): Uint8Array {
+  const seg = new Uint8Array(8 * 8);
+  storeU64(seg, 0, wpMakeStruct(0, 0, 2));
+  storeU64(seg, 8, wpMakeList(1, ElemSize.Byte, 5));
+  storeU64(seg, 16, wpMakeList(1, ElemSize.Pointer, 2));
+  seg.set([0xef, 0xbb, 0xbf, 0x61], 24);
+  storeU64(seg, 32, wpMakeList(1, ElemSize.Byte, 5));
+  storeU64(seg, 40, wpMakeList(1, ElemSize.Byte, 2));
+  seg.set([0xef, 0xbb, 0xbf, 0x62], 48);
+  seg.set([0x63], 56);
+  return seg;
+}
+
+function hasCapnp(): boolean {
+  return spawnSync("capnp", ["--version"], { encoding: "utf8" }).status === 0;
+}
 
 describe("frameSegments / fromSegments guards", () => {
   test("frameSegments advances body by words*8 for {data,words}", () => {

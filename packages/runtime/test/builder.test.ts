@@ -382,6 +382,21 @@ describe("MessageBuilder", () => {
     expect([...msg.root().getData(0)]).toEqual([1, 2, 3, 4, 5]);
   });
 
+  test("initPrimList sizes a Bool list by its bit count", () => {
+    const b = new MessageBuilder();
+    const root = b.initRoot(1, 11);
+    root.initPrimList(1, ElemSize.Bit, 9, 0, Uint8Array.of(0x85, 0x01));
+    // `capnp encode` of (lb = [true, false, true, false, false, false, false,
+    // true, true]) for a struct with one data word and eleven pointers.
+    expect(Buffer.from(b.toFlat()).toString("hex")).toBe(
+      "000000000e0000000000000001000b000000000000000000" +
+        "0000000000000000" +
+        "2500000049000000" +
+        "0000000000000000".repeat(9) +
+        "8501000000000000",
+    );
+  });
+
   test("deep-copy setP: nested AddressBook across messages", () => {
     const src = Message.fromFlat(buildAliceBob());
     verifyAliceBob(src.root());

@@ -36,6 +36,7 @@ import {
   wpFarSeg,
   wpFarTwo,
   wpKind,
+  wpCompositeElementCount,
   wpListCount,
   wpListEsize,
   wpOffset,
@@ -392,8 +393,8 @@ function finishList(
     }
     const tag = readWord(m, seg, start);
     assertCapnp(wpKind(tag) === WireKind.Struct, "KIND");
-    // Element count lives in the tag "offset" field as unsigned 30-bit.
-    const nelem = Number((tag >> 2n) & 0x3fff_ffffn);
+    // C++ masks this to 29 bits. The extra offset bit is not an element.
+    const nelem = wpCompositeElementCount(tag);
     const dwords = wpStructDwords(tag);
     const pwords = wpStructPwords(tag);
     const step = dwords + pwords;
@@ -402,8 +403,8 @@ function finishList(
       throw new CapnpError("BOUNDS");
     }
     if (step === 0) {
-      // A zero-size element carries no words, so the element count itself is
-      // the amplification. Charge one word per element.
+      // Zero-sized structs carry no words. C++ amplifiedRead charges one
+      // word per element so the count cannot outrun the traversal limit.
       chargeWords(m, nelem);
     }
     return Ptr.list(m, seg, start + 1, esize, nelem, dwords, pwords, step, depth);
@@ -632,12 +633,14 @@ export class Ptr {
       list.kind === PtrKind.List && list.esize === ElemSize.Byte,
       "KIND",
     );
-    if (list.count === 0) return "";
     const s = list.msg.segs[list.seg]!;
     const start = list.word * WORD_BYTES;
-    let n = list.count;
-    if (n > 0 && s.data[start + n - 1] === 0) n -= 1;
-    return new TextDecoder().decode(s.data.subarray(start, start + n));
+    assertCapnp(
+      list.count > 0 && s.data[start + list.count - 1] === 0,
+      "TEXT",
+      "Text pointer is not NUL-terminated",
+    );
+    return new TextDecoder("utf-8", { ignoreBOM: true }).decode(s.data.subarray(start, start + list.count - 1));
   }
 
   getData(ptrIndex: number, dflt: Uint8Array = EMPTY_DATA): Uint8Array {
@@ -784,9 +787,12 @@ export class Ptr {
       if (elem.kind === PtrKind.List && elem.esize === ElemSize.Byte) {
         const s = elem.msg.segs[elem.seg]!;
         const start = elem.word * WORD_BYTES;
-        let n = elem.count;
-        if (n > 0 && s.data[start + n - 1] === 0) n -= 1;
-        return new TextDecoder().decode(s.data.subarray(start, start + n));
+        assertCapnp(
+          elem.count > 0 && s.data[start + elem.count - 1] === 0,
+          "TEXT",
+          "Text pointer is not NUL-terminated",
+        );
+        return new TextDecoder("utf-8", { ignoreBOM: true }).decode(s.data.subarray(start, start + elem.count - 1));
       }
       throw new CapnpError("KIND");
     }
@@ -802,7 +808,7 @@ export class Ptr {
    * is 1 for a pointer list. Promotions and Bool-to-data reads throw SCHEMA.
    * A Bool reader may view a wider data list; the bool accessor then ignores step.
    */
-  private assertListCompat(expectedBits: number, expectedPointers: number): void {
+  assertListCompat(expectedBits: number, expectedPointers: number): void {
     if (this.esize === ElemSize.Composite) {
       if (expectedBits === 1 && expectedPointers === 0) {
         throw new CapnpError(

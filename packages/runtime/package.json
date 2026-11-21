@@ -3,6 +3,9 @@
   "version": "0.1.0-dev",
   "description": "Pure TypeScript Cap'n Proto wire runtime (HaoZeke family)",
   "type": "module",
+  "bin": {
+    "capnp-ts": "./bin/capnp-ts"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -24,6 +27,36 @@
       "import": "./dist/canonical.js",
       "default": "./dist/canonical.js"
     },
+    "./schema": {
+      "bun": "./src/schema.ts",
+      "types": "./dist/schema.d.ts",
+      "import": "./dist/schema.js",
+      "default": "./dist/schema.js"
+    },
+    "./dynamic": {
+      "bun": "./src/dynamic.ts",
+      "types": "./dist/dynamic.d.ts",
+      "import": "./dist/dynamic.js",
+      "default": "./dist/dynamic.js"
+    },
+    "./text": {
+      "bun": "./src/text.ts",
+      "types": "./dist/text.d.ts",
+      "import": "./dist/text.js",
+      "default": "./dist/text.js"
+    },
+    "./json": {
+      "bun": "./src/json.ts",
+      "types": "./dist/json.d.ts",
+      "import": "./dist/json.js",
+      "default": "./dist/json.js"
+    },
+    "./cli": {
+      "bun": "./src/cli.ts",
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js",
+      "default": "./dist/cli.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -38,5 +71,5 @@
   },
   "license": "MIT",
   "sideEffects": false,
-  "files": ["src", "dist", "LICENSE", "README.md"]
+  "files": ["bin", "src", "dist", "LICENSE", "README.md"]
 }

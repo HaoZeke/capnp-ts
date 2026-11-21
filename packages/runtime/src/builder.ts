@@ -26,6 +26,12 @@ import {
   WORD_BYTES,
   WireKind,
   assertCapnp,
+  assertDataBlobSize,
+  assertListElementCount,
+  assertTextBlobSize,
+  bytesToWords,
+  compositeContentWords,
+  exactProduct,
 } from "./kinds.ts";
 import { serializeToFlat } from "./serialize.ts";
 import { Message, type Ptr } from "./message.ts";
@@ -63,6 +69,8 @@ export interface BuilderOptions {
   maxSegWords?: number;
   /** Grow last segment instead of appending (canonical path). */
   forceSingle?: boolean;
+  /** Allocate subsequent segments at max(firstWords, need) without doubling. */
+  fixedSegmentGrowth?: boolean;
 }
 
 /** Pointer slot or object body location inside a MessageBuilder. */
@@ -180,13 +188,17 @@ export class MessageBuilder {
   segs: BSeg[] = [];
   maxSegWords: number;
   forceSingle: boolean;
+  readonly firstWords: number;
+  readonly fixedSegmentGrowth: boolean;
 
   constructor(opts: BuilderOptions = {}) {
     this.maxSegWords = opts.maxSegWords ?? 0;
     this.forceSingle = opts.forceSingle ?? false;
+    this.fixedSegmentGrowth = opts.fixedSegmentGrowth ?? false;
     let first = opts.firstWords ?? DEFAULT_FIRST_WORDS;
     if (first < 1) first = 1;
     if (first > MAX_SEGMENT_WORDS) first = MAX_SEGMENT_WORDS;
+    this.firstWords = first;
     this.appendSegment(first);
   }
 
@@ -264,7 +276,11 @@ export class MessageBuilder {
       s.words += n;
       return { seg: lastIdx, word };
     }
-    let ncap = last.cap ? last.cap * 2 : 16;
+    let ncap = this.fixedSegmentGrowth
+      ? Math.max(this.firstWords, n)
+      : last.cap
+        ? last.cap * 2
+        : 16;
     if (ncap < n) ncap = n;
     if (ncap > lim) ncap = lim;
     assertCapnp(ncap >= n, "ALLOC");
@@ -274,11 +290,20 @@ export class MessageBuilder {
     return { seg: this.segs.length - 1, word: 0 };
   }
 
+  /**
+   * Target of a zero-word list body. Like C++ `allocate(0)`, it is the
+   * current end of the slot's segment, not the word after the slot.
+   */
+  emptyListTarget(slotSeg: number): { seg: number; word: number } {
+    return { seg: slotSeg, word: this.segs[slotSeg]!.words };
+  }
+
   /** Allocate `n` words inside a specific segment (grow in place). */
   private allocIn(seg: number, n: number): number | null {
     const s = this.segs[seg];
     if (!s) return null;
     if (s.words + n > this.limWords()) return null;
+    if (this.fixedSegmentGrowth && s.words + n > s.cap) return null;
     try {
       this.segEnsure(seg, s.words + n);
     } catch {
@@ -666,9 +691,14 @@ export class StructBuilder {
   }
 
   setText(ptrIndex: number, text: string): void {
-    const enc = new TextEncoder().encode(text);
+    this.setTextBytes(ptrIndex, new TextEncoder().encode(text));
+  }
+
+  /** Store Text bytes exactly as given (they need not be UTF-8) plus the NUL. */
+  setTextBytes(ptrIndex: number, enc: Uint8Array): void {
+    assertTextBlobSize(enc.length, "text blob too big");
     const nbytes = enc.length + 1; // trailing NUL
-    const nwords = (nbytes + 7) >> 3;
+    const nwords = bytesToWords(nbytes);
     const slot = this.slot(ptrIndex);
     const { seg: startSeg, word: startWord } = this.builder.allocWords(nwords);
     const data = this.builder.segBytes(startSeg);
@@ -686,8 +716,9 @@ export class StructBuilder {
   }
 
   setData(ptrIndex: number, bytes: Uint8Array): void {
+    assertDataBlobSize(bytes.length, "text blob too big");
     const slot = this.slot(ptrIndex);
-    const nwords = (bytes.length + 7) >> 3;
+    const nwords = bytesToWords(bytes.length);
     let startSeg: number;
     let startWord: number;
     if (nwords) {
@@ -697,8 +728,7 @@ export class StructBuilder {
       data.fill(0, base, base + nwords * WORD_BYTES);
       data.set(bytes, base);
     } else {
-      startSeg = slot.seg;
-      startWord = slot.word + 1;
+      ({ seg: startSeg, word: startWord } = this.builder.emptyListTarget(slot.seg));
     }
     this.builder.writeListPtr(
       slot.seg,
@@ -722,7 +752,7 @@ export class StructBuilder {
   ): StructBuilder {
     const slot = this.slot(ptrIndex);
     const step = elemDwords + elemPwords;
-    const contentWords = count * step;
+    const contentWords = compositeContentWords(count, step);
     const need = 1 + contentWords;
     const { seg: tagSeg, word: tagWord } = this.builder.allocWords(need);
     this.builder.storeW(
@@ -759,14 +789,14 @@ export class StructBuilder {
 
   /** Init List of pointer-sized elements (e.g. List(Text) slots). */
   initPointerList(ptrIndex: number, count: number): BuilderPointer {
+    assertListElementCount(count);
     const slot = this.slot(ptrIndex);
     let listSeg: number;
     let listStart: number;
     if (count) {
       ({ seg: listSeg, word: listStart } = this.builder.allocWords(count));
     } else {
-      listSeg = slot.seg;
-      listStart = slot.word + 1;
+      ({ seg: listSeg, word: listStart } = this.builder.emptyListTarget(slot.seg));
     }
     this.builder.writeListPtr(
       slot.seg,
@@ -779,7 +809,10 @@ export class StructBuilder {
     return new BuilderPointer(this.builder, listSeg, listStart);
   }
 
-  /** Init primitive list and optionally copy little-endian payload. */
+  /**
+   * Init primitive list and optionally copy little-endian payload. A Bit
+   * list takes ceil(count / 8) bytes and ignores `itemBytes`.
+   */
   initPrimList(
     ptrIndex: number,
     esize: number,
@@ -787,9 +820,10 @@ export class StructBuilder {
     itemBytes: number,
     items?: Uint8Array,
   ): BuilderPointer {
+    assertListElementCount(count);
     const slot = this.slot(ptrIndex);
-    const nbytes = count * itemBytes;
-    const nwords = (nbytes + 7) >> 3;
+    const nbytes = esize === ElemSize.Bit ? Math.ceil(count / 8) : exactProduct(count, itemBytes);
+    const nwords = bytesToWords(nbytes);
     let startSeg: number;
     let startWord: number;
     if (nwords) {
@@ -799,8 +833,7 @@ export class StructBuilder {
       data.fill(0, base, base + nwords * WORD_BYTES);
       if (items && nbytes) data.set(items.subarray(0, nbytes), base);
     } else {
-      startSeg = slot.seg;
-      startWord = slot.word + 1;
+      ({ seg: startSeg, word: startWord } = this.builder.emptyListTarget(slot.seg));
     }
     this.builder.writeListPtr(
       slot.seg,

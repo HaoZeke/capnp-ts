@@ -4,8 +4,15 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   BuilderPointer,
+  CapnpError,
+  DynamicStruct,
+  SchemaLoader,
   ElemSize,
   Message,
   MessageBuilder,
@@ -50,6 +57,10 @@ function initPointerListAt(
   );
   return view.initPointerList(0, count);
 }
+
+const here = dirname(fileURLToPath(import.meta.url));
+const repoRoot = join(here, "..", "..", "..");
+const hasCapnp = spawnSync("capnp", ["--version"]).status === 0;
 
 function msgFromWords(words: bigint[]): Message {
   const buf = new Uint8Array(words.length * 8);
@@ -122,9 +133,9 @@ describe("text and data edge cases", () => {
     expect(tl.listLen()).toBe(20);
   });
 
-  test("text without trailing NUL on the wire is read in full", () => {
+  test("text without a trailing NUL on the wire is rejected", () => {
     // Hand-crafted: List(UInt8) of "abcd" with no trailing 0 byte.
-    // getText must not invent a strip when the last byte is non-zero.
+    // Cap'n Proto rejects a non-null Text pointer that lacks its terminator.
     const words = [
       wpMakeStruct(0, 0, 1),
       wpMakeList(0, ElemSize.Byte, 4),
@@ -136,7 +147,39 @@ describe("text and data edge cases", () => {
     storeU8(seg, 17, 0x62); // b
     storeU8(seg, 18, 0x63); // c
     storeU8(seg, 19, 0x64); // d
-    expect(msg.root().getText(0)).toBe("abcd");
+    expect(() => msg.root().getText(0)).toThrow(CapnpError);
+  });
+
+  test("a 0-byte text pointer is rejected even when the byte before it is 0", () => {
+    // C++ layout.c++:2480 requires size > 0 so the terminator exists. The
+    // pointer word's top byte (the byte before the body) is 0 here.
+    const words = [wpMakeStruct(0, 0, 1), wpMakeList(0, ElemSize.Byte, 0), 0n];
+    const msg = msgFromWords(words);
+    expect(() => msg.root().getText(0)).toThrow(CapnpError);
+
+    const loader = SchemaLoader.fromCgr(
+      new Uint8Array(readFileSync(join(here, "golden", "addressbook.cgr.bin"))),
+    );
+    const person = DynamicStruct.fromMessage(msg, loader.resolveStruct("Person"));
+    expect(() => person.get("name").asText()).toThrow(CapnpError);
+  });
+
+  test.skipIf(!hasCapnp)("capnp-ts decode rejects a 0-byte text pointer like capnp decode", () => {
+    const words = [wpMakeStruct(0, 0, 1), wpMakeList(0, ElemSize.Byte, 0), 0n];
+    const buf = new Uint8Array(8 + words.length * 8);
+    new DataView(buf.buffer).setUint32(4, words.length, true);
+    words.forEach((w, i) => storeU64(buf, 8 + i * 8, w));
+    const args = ["decode", join(repoRoot, "schema/addressbook.capnp"), "Person"];
+    const cli = spawnSync("capnp", args, { input: buf, encoding: "utf8" });
+    expect(cli.status).not.toBe(0);
+    expect(cli.stderr).toContain("not NUL-terminated");
+    const ts = spawnSync(
+      process.execPath,
+      [join(repoRoot, "packages/runtime/bin/capnp-ts"), ...args],
+      { input: buf, encoding: "utf8" },
+    );
+    expect(ts.stdout).toBe("");
+    expect(ts.status).not.toBe(0);
   });
 
   test("text length boundaries (word padding + max-ish)", () => {
@@ -229,5 +272,41 @@ describe("text and data edge cases", () => {
     expect(row2.kind).toBe(PtrKind.List);
     expect(row2.esize).toBe(ElemSize.Pointer);
     expect(row2.listLen()).toBe(0);
+  });
+
+  const kitchen = () =>
+    SchemaLoader.fromCgr(
+      new Uint8Array(readFileSync(join(here, "golden", "dynamic-kitchen.cgr.bin"))),
+    ).resolveStruct("KitchenSink");
+
+  function expectBomTextReads(msg: Message): void {
+    const sink = DynamicStruct.fromMessage(msg, kitchen());
+    const title = sink.get("title");
+    expect(title.asText()).toBe("\ufeffa");
+    expect([...title.asTextBytes()]).toEqual([0xef, 0xbb, 0xbf, 0x61]);
+    const row = sink.get("wordGrid").asList().get(0).asList();
+    expect(row.get(0).asText()).toBe("\ufeffb");
+    expect([...row.get(0).asTextBytes()]).toEqual([0xef, 0xbb, 0xbf, 0x62]);
+    expect(row.get(1).asText()).toBe("c");
+  }
+
+  test("dynamic Text field and List(Text) reads keep a leading BOM", () => {
+    const b = new MessageBuilder();
+    const sink = DynamicStruct.initRoot(b, kitchen());
+    sink.set("title", "\ufeffa");
+    const row = sink.init("wordGrid", 1).asList().init(0, 2).asList();
+    row.set(0, "\ufeffb");
+    row.set(1, "c");
+    expectBomTextReads(Message.fromFlat(b.toFlat()));
+  });
+
+  test.skipIf(!hasCapnp)("dynamic reads keep a leading BOM in Text that capnp encode writes", () => {
+    const cli = spawnSync(
+      "capnp",
+      ["encode", join(repoRoot, "schema/dynamic-kitchen.capnp"), "KitchenSink"],
+      { input: '(title = "\\xef\\xbb\\xbfa", wordGrid = [["\\xef\\xbb\\xbfb", "c"]])' },
+    );
+    expect(cli.status).toBe(0);
+    expectBomTextReads(Message.fromFlat(new Uint8Array(cli.stdout)));
   });
 });

@@ -44,6 +44,17 @@ function hasPycapnp(): boolean {
   return existsSync(py) && existsSync(script);
 }
 
+/**
+ * Why `python` cannot run the interop script, or "" when its `check`
+ * command imports pycapnp and loads both schemas.
+ */
+function capnpImportError(python: string, flags: string[] = []): string {
+  const r = spawnSync(python, [...flags, script, "check"], { encoding: "utf8" });
+  if (r.error) return r.error.message;
+  if (r.status === 0 && r.stderr === "") return "";
+  return r.stderr || `exit status ${r.status}`;
+}
+
 function pycapnpReadAb(path: string): {
   people: Array<{
     id: number;
@@ -92,10 +103,26 @@ function decodeAbWithTs(bytes: Uint8Array) {
 }
 
 const pycapnpDescribe = hasPycapnp() || requirePycapnp ? describe : describe.skip;
+const python = existsSync(py) ? py : "python3";
+const hasPython = !spawnSync(python, ["-c", ""]).error;
+
+describe("pycapnp import check", () => {
+  test("a missing interpreter is reported, not taken as pycapnp", () => {
+    expect(capnpImportError(join(repoRoot, ".venv-missing/bin/python"))).toContain("ENOENT");
+  });
+
+  test.skipIf(!hasPython)("an interpreter without pycapnp gets a one-line reason", () => {
+    // -I -S leaves out every site-packages directory, so pycapnp is missing even from the venv.
+    expect(capnpImportError(python, ["-I", "-S"])).toBe(
+      "pycapnp_interop.py: cannot import capnp: No module named 'capnp'\n",
+    );
+  });
+});
 
 pycapnpDescribe("pycapnp interop", () => {
   test("venv and fixtures present", () => {
     expect(hasPycapnp()).toBe(true);
+    expect(capnpImportError(py)).toBe("");
     expect(existsSync(join(pyDir, "addressbook_pycapnp.bin"))).toBe(true);
     expect(existsSync(join(pyDir, "calculator_add_2_3_pycapnp.bin"))).toBe(true);
   });
