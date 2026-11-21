@@ -14,6 +14,7 @@ import { storeU64 } from "./endian.ts";
 import {
   CapnpError,
   ElemSize,
+  clearTrailingListBits,
   exactProduct,
   listStepBits,
   primitiveBodySize,
@@ -229,6 +230,7 @@ function writeListToSlot(
       seg.data.subarray(srcOff, srcOff + nbytes),
       start * WORD_BYTES,
     );
+    clearTrailingListBits(b.data, start * WORD_BYTES, n, stepBits);
   }
   const off = start - slotWord - 1;
   b.storeWord(slotWord, wpMakeList(off, esize, n));

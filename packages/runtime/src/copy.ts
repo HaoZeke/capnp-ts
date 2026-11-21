@@ -11,6 +11,7 @@ import {
   ElemSize,
   PtrKind,
   WORD_BYTES,
+  clearTrailingListBits,
   exactProduct,
   listStepBits,
   primitiveBodySize,
@@ -200,6 +201,7 @@ function copyList(
       ),
       startWord * WORD_BYTES,
     );
+    clearTrailingListBits(dest, startWord * WORD_BYTES, n, stepBits);
   } else {
     ({ seg: startSeg, word: startWord } = builder.emptyListTarget(slot.seg));
   }

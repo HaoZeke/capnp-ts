@@ -1398,6 +1398,58 @@ describe("read limits lifted like the capnp tool", () => {
   }
 });
 
+describe("bit list copies like capnp 1.4.0", () => {
+  const ksCgr = join(goldenDir, "dynamic-kitchen.cgr.bin");
+  const sha256 = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
+
+  // `KitchenSink.flags` is `[true, false, true]` with the five unused bits of its byte set.
+  async function dirtyFlags(): Promise<Uint8Array> {
+    const enc = await execCliInMemory(
+      ["encode", ksCgr, "KitchenSink"],
+      new TextEncoder().encode("(flags = [true, false, true])"),
+    );
+    expect(enc.code).toBe(0);
+    const msg = enc.stdout.slice();
+    const view = new DataView(msg.buffer);
+    let hits = 0;
+    for (let at = 8; at + 8 <= msg.byteLength; at += 8) {
+      if ((view.getUint32(at, true) & 3) === 1 && view.getUint32(at + 4, true) === ((3 << 3) | 1)) {
+        const body = at + 8 + (view.getInt32(at, true) >> 2) * 8;
+        expect(msg[body]).toBe(0x05);
+        msg[body]! |= 0xf8;
+        hits++;
+      }
+    }
+    expect(hits).toBe(1);
+    return msg;
+  }
+
+  const cases: [string, string][] = [
+    ["binary", "fa109b17d0a3d3973cf8d0f4756e73216e9a2f2dcccad09b594cc6a3bd94e587"],
+    ["canonical", "e26c86611341c116c98b4341f67dec722886c05fa3802f117901ae6aa6e385e1"],
+    ["flat", "d9b65b28dd0d6c3d60efb24fd152f1e8483125dcdb26c50b5ce5c9e6fb8a62d3"],
+    ["packed", "fc93b1d1b207b665a3a9acbc5e07e682e5ce58b1e1529b144568d2ea4096bc63"],
+    ["flat-packed", "ee8664d6b56fd6a8cfc75aee5e85cc144c8bb006d656b36ddde16466ad88e2e2"],
+  ];
+
+  for (const [to, digest] of cases) {
+    test(`converting to ${to} clears the unused bits`, async () => {
+      const r = await execCliInMemory(["convert", `binary:${to}`, ksCgr, "KitchenSink"], await dirtyFlags());
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(sha256(r.stdout)).toBe(digest);
+    });
+  }
+
+  test.skipIf(!hasCapnp)("digests match live capnp", async () => {
+    const schemaPath = join(repoRoot, "schema", "dynamic-kitchen.capnp");
+    for (const [to, digest] of cases) {
+      const live = execCapnp(["convert", `binary:${to}`, schemaPath, "KitchenSink"], await dirtyFlags());
+      expect({ to, code: live.code, digest: sha256(live.stdout) }).toEqual({ to, code: 0, digest });
+    }
+  });
+});
+
 describe("JSON array size limit like capnp 1.4.0", () => {
   const ksCgr = join(goldenDir, "dynamic-kitchen.cgr.bin");
 

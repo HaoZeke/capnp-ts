@@ -138,6 +138,21 @@ export function primitiveBodySize(
   return { nbytes: Number(nbytes), nwords: Number(nwords) };
 }
 
+/**
+ * Clear the bits past `count * stepBits` in the last byte of a copied
+ * primitive list body, as C++ `setListPointer` masks its partial byte.
+ */
+export function clearTrailingListBits(
+  dest: Uint8Array,
+  start: number,
+  count: number,
+  stepBits: number,
+): void {
+  const leftover = (count * stepBits) % 8;
+  if (leftover === 0) return;
+  dest[start + Math.floor((count * stepBits) / 8)]! &= (1 << leftover) - 1;
+}
+
 /** Word count of `nbytes` payload bytes, without a uint32 shift wrap. */
 export function bytesToWords(nbytes: number): number {
   if (nbytes <= 0) return 0;
