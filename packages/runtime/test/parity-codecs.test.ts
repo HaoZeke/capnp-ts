@@ -451,6 +451,42 @@ describe("json codec against capnp 1.4.0", () => {
     expect(codec.decode('{"prio":70000}', custom).get("prio").asEnum().getRaw()).toBe(4464);
     expect(codec.decode('{"prio":1.5}', custom).get("prio").asEnum().getRaw()).toBe(1);
   });
+
+  test("J-07 float strings follow strtod", () => {
+    const codec = new JsonCodec();
+    const f64 = (s: string) =>
+      codec.decode(`{"f64":${JSON.stringify(s)}}`, sink).get("f64").asFloat64();
+    expect(f64(" 12")).toBe(12);
+    expect(f64("\t\n\v\f\r-3")).toBe(-3);
+    expect(f64("0x10")).toBe(16);
+    expect(f64("0X1P3")).toBe(8);
+    expect(f64("-0x1.8p-1")).toBe(-0.75);
+    expect(f64("0x.8")).toBe(0.5);
+    expect(f64("0x1p-1074")).toBe(5e-324);
+    expect(f64("0x1p-1075")).toBe(0);
+    expect(f64("0x3p-1076")).toBe(5e-324);
+    expect(f64("0x1.fffffffffffff8p1023")).toBe(Infinity);
+    expect(f64("Inf")).toBe(Infinity);
+    expect(f64("-INFINITY")).toBe(-Infinity);
+    expect(f64("nan()")).toBeNaN();
+    const f32 = codec.decode('{"f32":"0x1.0000018p0"}', sink).get("f32").asFloat32();
+    expect(f32).toBe(Math.fround(1 + 2 ** -23));
+    for (const bad of ["0x", "0x1p", "12 ", "infin", "nan(-)", " ", "1e"]) {
+      expect(() => f64(bad)).toThrow(CapnpError);
+    }
+  });
+
+  test("hex float exponents are scaled before range checks", () => {
+    const codec = new JsonCodec();
+    const f64 = (s: string) =>
+      codec.decode(`{"f64":${JSON.stringify(s)}}`, sink).get("f64").asFloat64();
+    const zeros = "0".repeat(260000);
+    expect(f64(`0x0.${zeros}1p1040004`)).toBe(1);
+    expect(f64(`0x1${zeros}p-1040000`)).toBe(1);
+    expect(f64(`0x0.${zeros}1p1038930`)).toBe(5e-324);
+    expect(f64("0x1p-99999999999999999999")).toBe(0);
+    expect(f64("0x1p99999999999999999999")).toBe(Infinity);
+  });
 });
 
 describe("nesting limit against capnp 1.4.0 pointer reads", () => {

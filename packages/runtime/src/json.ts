@@ -626,7 +626,10 @@ function parseHexFloat64(
   expStr: string | undefined,
 ): number {
   const intTrim = intHex.replace(/^0+/, "");
-  const fracTrim = fracHex.replace(/0+$/, "");
+  // A `/0+$/` replace backtracks from every zero, quadratic on long fractions.
+  let fracEnd = fracHex.length;
+  while (fracEnd > 0 && fracHex.charCodeAt(fracEnd - 1) === 0x30) fracEnd--;
+  const fracTrim = fracHex.slice(0, fracEnd);
   let sig: string;
   if (intTrim.length > 0) {
     sig = intTrim + fracTrim;
