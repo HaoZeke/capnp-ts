@@ -145,7 +145,6 @@ import {
   PromisedAnswer_getTransform,
   PAYLOAD_DWORDS,
   PAYLOAD_PWORDS,
-  Payload_getCapTable,
   Payload_getContent,
   RETURN_DWORDS,
   RETURN_PWORDS,
@@ -567,14 +566,6 @@ function capPayload(hook: ClientHook): Payload {
 function emptyPayload(): Payload {
   const b = new CallBuilder(0, 1);
   return new Payload(b.toPayload().content.getP(0));
-}
-
-/** List pointer expected, with the wire kind in the comparison. */
-function nonListPointerMessage(wireKind: number): string {
-  return (
-    `expected ref->kind() == WirePointer::LIST [${wireKind} == 1]; ` +
-    "Schema mismatch: Message contains non-list pointer where list pointer was expected."
-  );
 }
 
 /**
@@ -1166,11 +1157,8 @@ export class RpcConnection implements RemoteHost {
 
   private receiveCaps(payload: Ptr): ClientHook[] {
     if (payload.kind !== PtrKind.Struct) return [];
-    const table = Payload_getCapTable(payload);
+    const table = payload.getP(1, "list");
     if (table.kind === PtrKind.Null) return [];
-    if (table.kind !== PtrKind.List) {
-      throw new RpcError(nonListPointerMessage(wireKindOf(table)));
-    }
     const hooks: ClientHook[] = [];
     for (let i = 0; i < table.listLen(); i++) hooks.push(this.receiveCap(table.listGetP(i)));
     return hooks;
@@ -1225,7 +1213,7 @@ export class RpcConnection implements RemoteHost {
     try {
       return payload.pipelinedCapAt(ops);
     } catch (e) {
-      return new BrokenClient(e instanceof RpcError ? e : new RpcError(e instanceof Error ? e.message : String(e)));
+      return new BrokenClient(toRpcError(e));
     }
   }
 
@@ -1830,7 +1818,7 @@ export class RpcConnection implements RemoteHost {
     try {
       cap = this.bootstrapCap(bootstrap.getP(0, "text"));
     } catch (e) {
-      cap = e instanceof RpcError ? e : new RpcError(e instanceof Error ? e.message : String(e));
+      cap = toRpcError(e);
     }
     if (cap instanceof RpcError) {
       const error = cap;
@@ -2343,7 +2331,7 @@ export class RpcConnection implements RemoteHost {
       return undefined;
     }
     const ops: number[] = [];
-    const transform = isDefault ? undefined : PromisedAnswer_getTransform(promised);
+    const transform = isDefault ? undefined : promised.getP(0, "list");
     const opCount = transform?.listLen() ?? 0;
     for (let i = 0; transform !== undefined && i < opCount; i++) {
       const op = transform.listGetP(i);

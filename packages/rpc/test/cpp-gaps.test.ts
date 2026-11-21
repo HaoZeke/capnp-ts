@@ -458,6 +458,60 @@ describe("bootstrap answers (rpc.c++ handleBootstrap)", () => {
     expect(Exception_getReason(Return_getException(ret))).toBe("Invalid pipeline transform.");
   });
 
+  test("a struct pointer in PromisedAnswer.transform aborts", () => {
+    const r = raw(ping);
+    r.send(bootstrap(0));
+    r.take();
+    r.send(
+      call(1, (t) => {
+        t.setU16(4, 1);
+        const pa = t.initStruct(0, 1, 1);
+        pa.setU32(0, 0);
+        pa.initStruct(0, 1, 0);
+      }),
+    );
+    const abort = r.take().find((m) => m.which === Message.abort);
+    expect(Exception_getReason(abort!.body)).toBe(
+      "expected ref->kind() == WirePointer::LIST [0 == 1]; Schema mismatch: Message contains non-list pointer where list pointer was expected.",
+    );
+  });
+
+  test("a struct cap table aborts", () => {
+    const r = raw(ping);
+    r.send(bootstrap(0));
+    r.take();
+    const bytes = frame(Message.call, (m) => {
+      const c = m.initStruct(0, 3, 3);
+      c.setU32(0, 1);
+      c.setU64(8, IFACE);
+      toAnswer(c.initStruct(0, 1, 1), 0);
+      const payload = c.initStruct(1, 0, 2);
+      payload.initStruct(0, 1, 0);
+      payload.initStruct(1, 0, 0);
+    });
+    // Widen the zero-size cap-table struct to 4096 data words. The body
+    // does not fit in the segment, and the pointer kind is still struct.
+    for (let i = 0; i + 8 <= bytes.length; i += 8) {
+      if (
+        bytes[i] === 0xfc &&
+        bytes[i + 1] === 0xff &&
+        bytes[i + 2] === 0xff &&
+        bytes[i + 3] === 0xff &&
+        bytes[i + 4] === 0 &&
+        bytes[i + 5] === 0 &&
+        bytes[i + 6] === 0 &&
+        bytes[i + 7] === 0
+      ) {
+        bytes[i + 5] = 0x10;
+      }
+    }
+    r.send(bytes);
+    const abort = r.take().find((m) => m.which === Message.abort);
+    expect(Exception_getReason(abort!.body)).toBe(
+      "expected ref->kind() == WirePointer::LIST [0 == 1]; Schema mismatch: Message contains non-list pointer where list pointer was expected.",
+    );
+  });
+
   test("a noop in a call answer's transform moves nowhere", () => {
     const r = raw(returning(() => Client.local(ping)));
     r.send(bootstrap(0));
