@@ -590,7 +590,24 @@ void runClient(const std::string &addr, const std::vector<std::string> &only) {
 			n = inc.send().wait(ws).getN();
 		}) << " n=" << n << std::endl;
 	}
-	if (named(only, "returncaps") || named(only, "echolocal")) {
+	if (named(only, "cancelreturn")) {
+		// `getMain` forwards a call a turn later, so `slow` gets a turn on
+		// the wire before it is cancelled.
+		auto first = echo.pingRequest();
+		first.setN(1);
+		first.send().wait(ws);
+		{
+			auto slow = echo.slowRequest().send();
+			client.getIoProvider().getTimer().afterDelay(20 * kj::MILLISECONDS).wait(ws);
+		}
+		uint32_t n = 0;
+		std::cout << "read: " << outcome([&]() {
+			auto ping = echo.pingRequest();
+			ping.setN(7);
+			n = ping.send().wait(ws).getN();
+		}) << " n=" << n << std::endl;
+	}
+	if (named(only, "returncaps") || named(only, "echolocal") || named(only, "cancelreturn")) {
 		// The request objects' destructors queue Finish. Pump it onto the
 		// socket before EzRpcClient is destroyed, or the write is dropped.
 		{

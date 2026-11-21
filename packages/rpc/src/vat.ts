@@ -1640,6 +1640,20 @@ export class RpcConnection implements RemoteHost {
   }
 
   private settleReturn(answerId: number, q: QuestionState, ret: Ptr, which: number): void {
+    // A Return for a question we already finished is not checked. Only a
+    // redirect back to us still needs cancelling.
+    if (q.finished) {
+      if (which === Return.resultsSentElsewhere) q.failed = false;
+      if (which === Return.takeFromOtherQuestion) {
+        this.takeResults(q, Return_getTakeFromOtherQuestion(ret));
+      }
+      // The Return is still the acknowledgement a streaming flow controller
+      // waits on, so a pending result settles here.
+      if (q.call.result.state === "pending") q.call.result.resolve(emptyPayload());
+      this.dropQuestion(answerId, q);
+      return;
+    }
+
     switch (which) {
       case Return.results: {
         if (q.isTailCall) {
@@ -1651,10 +1665,7 @@ export class RpcConnection implements RemoteHost {
           return;
         }
         const payload = Return_getResults(ret);
-        // Our Finish already said to drop the results, so nothing is
-        // imported for a question that was abandoned. The content pointer
-        // stays unread until something touches the results.
-        if (q.finished) break;
+        // The content pointer stays unread until something touches the results.
         q.call.result.resolve(
           payload.kind === PtrKind.Null
             ? emptyPayload()
@@ -1671,17 +1682,11 @@ export class RpcConnection implements RemoteHost {
           );
           return;
         }
-        if (!q.finished) q.call.result.reject(readException(Return_getException(ret)));
+        q.call.result.reject(readException(Return_getException(ret)));
         break;
       case Return.canceled:
-        // Legal only as the reply to a Finish we already sent. C++ treats
-        // Return.canceled for a question the caller still holds as a
-        // protocol error and disconnects.
-        if (!q.finished) {
-          this.abort(new RpcError("Return message falsely claims call was canceled."));
-          return;
-        }
-        break;
+        this.abort(new RpcError("Return message falsely claims call was canceled."));
+        return;
       case Return.resultsSentElsewhere:
         if (!q.isTailCall) {
           this.abort(
@@ -1692,7 +1697,7 @@ export class RpcConnection implements RemoteHost {
           return;
         }
         q.failed = false;
-        if (!q.finished) q.call.result.resolve(emptyPayload());
+        q.call.result.resolve(emptyPayload());
         break;
       case Return.takeFromOtherQuestion:
         this.takeResults(q, Return_getTakeFromOtherQuestion(ret));
@@ -1701,14 +1706,6 @@ export class RpcConnection implements RemoteHost {
         this.abort(new RpcError("Unknown 'Return' type."));
         return;
     }
-    // Finish already told the peer this question is done. The Return is
-    // still the acknowledgement a streaming flow controller waits on;
-    // leaving the result pending keeps those bytes in the window and
-    // flush() never resolves.
-    if (q.finished && q.call.result.state === "pending") {
-      q.call.result.resolve(emptyPayload());
-    }
-    if (q.finished) this.dropQuestion(answerId, q);
   }
 
   /**

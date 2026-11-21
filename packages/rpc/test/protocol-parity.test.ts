@@ -317,6 +317,29 @@ describe("return protocol errors", () => {
     expect(a.disconnected).toBeUndefined();
   });
 
+  test("a Return after Finish is not checked against the call", () => {
+    for (const which of [Return.resultsSentElsewhere, Return.acceptFromThirdParty]) {
+      const pair = new MemoryTransportPair();
+      const a = new RpcConnection(pair.a);
+      const call = a.sendCallTo(
+        (t) => {
+          t.setU16(4, MessageTarget.importedCap);
+          t.setU32(0, 0);
+        },
+        IFACE,
+        0,
+        new CallBuilder(0, 0).toPayload(),
+      );
+      pair.b.receive();
+      call.release();
+      expect(pair.b.receive()).not.toBeNull();
+      sendReturn(pair.b, 0, which);
+      a.pump();
+      expect(a.disconnected).toBeUndefined();
+      expect(a.isAnswered(0)).toBe(false);
+    }
+  });
+
   test("takeFromOtherQuestion with a bad answer id aborts", async () => {
     const pair = new MemoryTransportPair();
     const a = new RpcConnection(pair.a);

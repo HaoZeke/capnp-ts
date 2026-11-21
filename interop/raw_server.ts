@@ -17,6 +17,7 @@ import {
   Message,
   Message_which,
   Payload_getCapTableAt,
+  Payload_getContent,
 } from "../packages/rpc/src/rpc.capnp.ts";
 import { describe, need } from "./raw_frames.ts";
 
@@ -39,9 +40,12 @@ const RESULTS: Record<string, Results> = {
     payload.initStruct(0, 0, 1).initStruct(0, 1, 0).setU32(0, 7);
   },
   "return-echo-param": () => {},
+  "return-after-finish": () => {},
 };
 
 type Reply = (f: Uint8Array) => void;
+
+const slowCalls = new Set<number>();
 
 /** Answers a call on the bootstrap capability. False leaves it to the default. */
 const CALLS: Record<string, (body: Ptr, reply: Reply) => boolean> = {
@@ -60,6 +64,26 @@ const CALLS: Record<string, (body: Ptr, reply: Reply) => boolean> = {
     );
     return true;
   },
+  // `slow` gets no Return until its Finish. `ping` answers n + 1.
+  "return-after-finish": (body, reply) => {
+    const method = body.getU16(4);
+    if (method === 4) {
+      slowCalls.add(body.getU32(0));
+      return true;
+    }
+    if (method !== 0) return false;
+    const n = Payload_getContent(body.getP(1)).getU32(0);
+    reply(returnResults(body.getU32(0), (_b, payload) => payload.initStruct(0, 1, 0).setU32(0, n + 1)));
+    return true;
+  },
+};
+
+/** Answers a Finish. */
+const FINISHES: Record<string, (q: number, reply: Reply) => void> = {
+  // The cancelled `slow` was no tail call, so this Return is wrong for it.
+  "return-after-finish": (q, reply) => {
+    if (slowCalls.delete(q)) reply(returnWhich(q, 3));
+  },
 };
 
 function frame(fill: (m: StructBuilder, b: MessageBuilder) => void): Uint8Array {
@@ -75,6 +99,14 @@ function returnResults(q: number, results: Results): Uint8Array {
     const ret = m.initStruct(0, 2, 1);
     ret.setU32(0, q);
     results(b, ret.initStruct(0, 0, 2));
+  });
+}
+
+function returnWhich(q: number, which: number): Uint8Array {
+  return frame((m) => {
+    const ret = m.initStruct(0, 2, 1);
+    ret.setU32(0, q);
+    ret.setU16(6, which);
   });
 }
 
@@ -132,6 +164,9 @@ const server = createServer((sock) => {
           else sock.write(returnException(body.getU32(0), "pipelined call reached the server"));
           break;
         }
+        case Message.finish:
+          FINISHES[name]?.(body.getU32(0), (r) => sock.write(r));
+          break;
       }
     }
   });

@@ -500,9 +500,25 @@ const scenarios: Record<string, () => Promise<void>> = {
     });
     console.log(`read: ${read} n=${n}`);
   },
+
+  // Against interop/raw_server.ts only: a cancelled call gets a Return
+  // that does not fit it.
+  async cancelreturn() {
+    const first = echo(M.ping, arg(1), 1, 0);
+    await first;
+    first.release();
+    echo(M.slow).release();
+    let n = 0;
+    const read = await outcome(async () => {
+      const ping = echo(M.ping, arg(7), 1, 0);
+      n = await u32(ping);
+      ping.release();
+    });
+    console.log(`read: ${read} n=${n}`);
+  },
 };
 
-const explicitOnly = new Set(["returncaps", "echolocal"]);
+const explicitOnly = new Set(["returncaps", "echolocal", "cancelreturn"]);
 
 let failed = false;
 for (const [name, run] of Object.entries(scenarios)) {

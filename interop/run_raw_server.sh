@@ -14,6 +14,7 @@ port() { echo $((RANDOM % 20000 + 30000)); }
 client_for() {
   case $1 in
     return-echo-param) echo echolocal ;;
+    return-after-finish) echo cancelreturn ;;
     *) echo returncaps ;;
   esac
 }
@@ -54,7 +55,7 @@ side() {
 }
 
 LIST=("$@")
-[ ${#LIST[@]} -gt 0 ] || LIST=(return-none return-out-of-range return-non-cap return-echo-param)
+[ ${#LIST[@]} -gt 0 ] || LIST=(return-none return-out-of-range return-non-cap return-echo-param return-after-finish)
 FAIL=0
 for s in "${LIST[@]}"; do
   C=$(side "$s" "$PEER" client)
