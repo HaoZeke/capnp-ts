@@ -4,7 +4,15 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Message, canonicalizeFlat, loadU32, unpack } from "../src/index.ts";
+import {
+  DynamicStruct,
+  Message,
+  SchemaLoader,
+  TextCodec,
+  canonicalizeFlat,
+  loadU32,
+  unpack,
+} from "../src/index.ts";
 import {
   type WireFormat,
   formatNeedsSchema,
@@ -1181,6 +1189,75 @@ describe("pointer null checks like capnp 1.4.0", () => {
         }
       }
     }
+  });
+});
+
+describe("capabilities without a capability context like capnp 1.4.0", () => {
+  const capCgr = join(goldenDir, "capability-fields.cgr.bin");
+  const noContext =
+    "capnp-ts: expected brokenCapFactory != nullptr [0 != nullptr]; Trying to read capabilities " +
+    "without ever having created a capability context.  To read capabilities from a message, " +
+    "you must imbue it with CapReaderContext, or use the Cap'n Proto RPC system.";
+
+  // A `CapHolder` root with the given pointer words; word 5 is spare.
+  function holder(ptrs: bigint[], spare = 0n): Uint8Array {
+    const words = [0x0004000000000000n, ...ptrs, spare];
+    const out = new Uint8Array(8 + words.length * 8);
+    const view = new DataView(out.buffer);
+    view.setUint32(4, words.length, true);
+    words.forEach((w, i) => view.setBigUint64(8 + i * 8, w, true));
+    return out;
+  }
+  const capField = holder([0n, 3n, 0n, 0n]);
+  const capList = holder([0n, 0n, 0x0000000e00000005n, 0n], 3n);
+  const capabilityField = holder([0n, 0n, 0n, 3n]);
+
+  for (const [name, input] of [
+    ["an interface field", capField],
+    ["a list of interfaces", capList],
+  ] as [string, Uint8Array][]) {
+    test(`decode fails on ${name}`, async () => {
+      const r = await execCliInMemory(["decode", capCgr, "CapHolder"], input);
+      expect(r.code).toBe(1);
+      expect(r.stdout.byteLength).toBe(0);
+      expect(r.stderr).toBe(noContext);
+    });
+  }
+
+  test("a `Capability` field still prints as an opaque pointer", async () => {
+    const r = await execCliInMemory(["decode", capCgr, "CapHolder"], capabilityField);
+    expect(r.code).toBe(0);
+    expect(new TextDecoder().decode(r.stdout)).toBe("(any = <opaque pointer>)\n");
+  });
+
+  test("eval of an interface field fails", async () => {
+    for (const short of [[], ["--short"]]) {
+      const r = await execCliInMemory(["eval", ...short, capCgr, "CapHolder.ping"]);
+      expect(r.code).toBe(1);
+      expect(r.stdout.byteLength).toBe(0);
+      expect(r.stderr).toBe(noContext);
+    }
+  });
+
+  test("TextCodec prints capabilities by default", () => {
+    const schema = SchemaLoader.fromCgr(readGolden("capability-fields.cgr.bin")).resolveStruct("CapHolder");
+    const reader = DynamicStruct.fromMessage(Message.fromFlat(capField), schema);
+    expect(new TextCodec().encode(reader)).toBe("(ping = <external capability>)");
+  });
+
+  test.skipIf(!hasCapnp)("matches live capnp", async () => {
+    const schemaPath = join(repoRoot, "schema", "capability-fields.capnp");
+    for (const input of [capField, capList, capabilityField]) {
+      const live = execCapnp(["decode", schemaPath, "CapHolder"], input);
+      const ours = await execCliInMemory(["decode", capCgr, "CapHolder"], input);
+      expect({ code: ours.code, stdout: [...ours.stdout] }).toEqual({
+        code: live.code,
+        stdout: [...live.stdout],
+      });
+    }
+    const live = execCapnp(["eval", schemaPath, "CapHolder.ping"]);
+    expect(live.code).toBe(1);
+    expect(live.stderr).toContain(noContext.slice("capnp-ts: ".length));
   });
 });
 

@@ -587,7 +587,7 @@ export function writeMessageInFormat(
       });
       fresh.onRecoverable = msg.onRecoverable;
       const reader = DynamicStruct.fromMessage(fresh, rootSchema);
-      const text = encodeTextBytes(reader, { pretty });
+      const text = encodeTextBytes(reader, { pretty, readCapabilities: false });
       const out = new Uint8Array(text.byteLength + 1);
       out.set(text);
       out[text.byteLength] = 0x0a;
@@ -905,7 +905,7 @@ export function formatEvaluatedValue(
 ): Uint8Array {
   const pretty = !(opts?.short ?? false);
   if (format === "text") {
-    const codec = new TextCodec({ prettyPrint: pretty });
+    const codec = new TextCodec({ prettyPrint: pretty, readCapabilities: false });
     const text = codec.encodeBytes(value, type);
     const out = new Uint8Array(text.byteLength + 1);
     out.set(text);

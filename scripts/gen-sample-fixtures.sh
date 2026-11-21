@@ -92,6 +92,8 @@ EVAL_JSON_CONSTS="emptyDefault unsetArms numArm tagArm groupArm voidArm nested c
 mkdir -p "$FIX/eval-json"
 (cd "$ROOT/schema" && capnp compile -o- eval-unions.capnp) >"$FIX/eval-unions.cgr.bin"
 EVAL_JSON_FILES="eval-unions.cgr.bin"
+(cd "$ROOT/schema" && capnp compile -o- capability-fields.capnp) >"$FIX/capability-fields.cgr.bin"
+EVAL_JSON_FILES="$EVAL_JSON_FILES capability-fields.cgr.bin"
 for c in extremeConst; do
   capnp eval -o json "$ROOT/schema/dynamic-kitchen.capnp" "$c" >"$FIX/eval-json/$c.json"
   capnp eval --short -o json "$ROOT/schema/dynamic-kitchen.capnp" "$c" >"$FIX/eval-json/$c.short.json"

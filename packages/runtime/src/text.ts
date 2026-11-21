@@ -237,17 +237,19 @@ const MAX_INLINE_RECORD_SIZE = 64;
 
 class Indent {
   readonly amount: number;
+  readonly readCapabilities: boolean;
 
-  constructor(amount: number) {
+  constructor(amount: number, readCapabilities: boolean) {
     this.amount = amount;
+    this.readCapabilities = readCapabilities;
   }
 
-  static root(enable: boolean): Indent {
-    return new Indent(enable ? 1 : 0);
+  static root(enable: boolean, readCapabilities: boolean): Indent {
+    return new Indent(enable ? 1 : 0, readCapabilities);
   }
 
   next(): Indent {
-    return new Indent(this.amount === 0 ? 0 : this.amount + 1);
+    return new Indent(this.amount === 0 ? 0 : this.amount + 1, this.readCapabilities);
   }
 
   delimit(items: readonly string[], mode: PrintMode, kind: PrintKind): string {
@@ -367,6 +369,7 @@ function printDynamicValue(
       return `(${indent.delimit(printed, mode, "record")})`;
     }
     case DynamicValueType.CAPABILITY:
+      assertCapnp(indent.readCapabilities, "UNSUPPORTED", NO_CAPABILITY_CONTEXT);
       return "<external capability>";
     case DynamicValueType.ANY_POINTER:
       return OPAQUE_POINTER;
@@ -374,6 +377,11 @@ function printDynamicValue(
 }
 
 const OPAQUE_POINTER = "<opaque pointer>";
+
+const NO_CAPABILITY_CONTEXT =
+  "expected brokenCapFactory != nullptr [0 != nullptr]; Trying to read capabilities without " +
+  "ever having created a capability context.  To read capabilities from a message, you must " +
+  "imbue it with CapReaderContext, or use the Cap'n Proto RPC system.";
 
 /**
  * C++ reads an `AnyPointer` field without following it, so the printer
@@ -450,14 +458,14 @@ export function prettyPrint(
     | DynamicListBuilder,
 ): string {
   const { reader, defaultTypeCode } = normalizePrintable(value);
-  return printedString(printDynamicValue(reader, defaultTypeCode, Indent.root(true), "bare"));
+  return printedString(printDynamicValue(reader, defaultTypeCode, Indent.root(true, true), "bare"));
 }
 
 /** Single-line Cap'n Proto text output matching `kj::str(DynamicValue::Reader)`. */
 export function stringify(value: PrintableDynamic, type?: Type): string {
   const { reader, defaultTypeCode } = normalizePrintable(value);
   return printedString(
-    printDynamicValue(reader, type ? type.whichCode : defaultTypeCode, Indent.root(false), "bare"),
+    printDynamicValue(reader, type ? type.whichCode : defaultTypeCode, Indent.root(false, true), "bare"),
   );
 }
 
@@ -1440,9 +1448,15 @@ function fillStructFromText(
  */
 export class TextCodec {
   private pretty: boolean;
+  private readonly readCapabilities: boolean;
 
-  constructor(opts?: { prettyPrint?: boolean }) {
+  /**
+   * With `readCapabilities: false`, printing a capability fails as it does in
+   * the `capnp` tool, which reads messages without a capability context.
+   */
+  constructor(opts?: { prettyPrint?: boolean; readCapabilities?: boolean }) {
     this.pretty = opts?.prettyPrint ?? false;
+    this.readCapabilities = opts?.readCapabilities ?? true;
   }
 
   setPrettyPrint(enabled: boolean): void {
@@ -1452,16 +1466,17 @@ export class TextCodec {
   private render(value: PrintableDynamic, type: Type | undefined): string {
     const { reader, defaultTypeCode } = normalizePrintable(value);
     const code = type ? type.whichCode : defaultTypeCode;
+    const caps = this.readCapabilities;
     if (!this.pretty) {
-      return printDynamicValue(reader, code, Indent.root(false), "bare");
+      return printDynamicValue(reader, code, Indent.root(false, caps), "bare");
     }
     if (
       reader.getType() === DynamicValueType.STRUCT ||
       reader.getType() === DynamicValueType.LIST
     ) {
-      return printDynamicValue(reader, code, Indent.root(true), "bare");
+      return printDynamicValue(reader, code, Indent.root(true, caps), "bare");
     }
-    return printDynamicValue(reader, code, Indent.root(false), "bare");
+    return printDynamicValue(reader, code, Indent.root(false, caps), "bare");
   }
 
   /**
@@ -1558,9 +1573,12 @@ export function encodeText(
  */
 export function encodeTextBytes(
   value: DynamicStructReader | DynamicStructBuilder,
-  opts?: { pretty?: boolean },
+  opts?: { pretty?: boolean; readCapabilities?: boolean },
 ): Uint8Array {
-  const codec = new TextCodec({ prettyPrint: opts?.pretty ?? true });
+  const codec = new TextCodec({
+    prettyPrint: opts?.pretty ?? true,
+    readCapabilities: opts?.readCapabilities,
+  });
   return codec.encodeBytes(value);
 }
 
