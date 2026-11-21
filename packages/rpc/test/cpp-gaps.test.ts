@@ -572,6 +572,52 @@ describe("tail calls (rpc.c++ directTailCall)", () => {
     expect(out.map((m) => m.which)).toEqual([Message.call]);
     expect(Call_sendResultsTo_which(out[0]!.body)).toBe(Call_sendResultsTo.caller);
   });
+
+  test("onlyPromisePipeline is passed on to a tail call made elsewhere", async () => {
+    const other = raw();
+    const far = other.vat.bootstrap();
+    other.send(returnCap(0, 0));
+    await far.whenResolved();
+    other.take();
+    const r = raw({
+      dispatch(_i, _m, _p, _r, ctx) {
+        return ctx.tailCall(far, IFACE, 0);
+      },
+    });
+    r.send(bootstrap(0));
+    r.take();
+    r.send(call(0x80000001, (t) => toAnswer(t, 0), (c) => c.setBool(130, true)));
+    const [sent] = other.take();
+    expect(sent!.which).toBe(Message.call);
+    expect(Call_getOnlyPromisePipeline(sent!.body)).toBe(true);
+    const tailQ = Call_getQuestionId(sent!.body);
+    expect(tailQ).toBeGreaterThanOrEqual(0x80000000);
+    expect(r.take()).toEqual([]);
+    // A call pipelined on the incoming question reaches the tail call's answer.
+    r.send(call(2, (t) => toAnswer(t, 0x80000001, [0])));
+    const [piped] = other.take();
+    expect(PromisedAnswer_getQuestionId(MessageTarget_getPromisedAnswer(Call_getTarget(piped!.body)))).toBe(
+      tailQ,
+    );
+  });
+
+  test("a tail call made elsewhere without the hint is a plain call", async () => {
+    const other = raw();
+    const far = other.vat.bootstrap();
+    other.send(returnCap(0, 0));
+    await far.whenResolved();
+    other.take();
+    const r = raw({
+      dispatch(_i, _m, _p, _r, ctx) {
+        return ctx.tailCall(far, IFACE, 0);
+      },
+    });
+    r.send(bootstrap(0));
+    r.send(call(1, (t) => toAnswer(t, 0)));
+    const [sent] = other.take();
+    expect(Call_getOnlyPromisePipeline(sent!.body)).toBe(false);
+    expect(Call_getQuestionId(sent!.body)).toBeLessThan(0x80000000);
+  });
 });
 
 /** A bootstrap Return for question `q`: the content is the peer's export `id`. */

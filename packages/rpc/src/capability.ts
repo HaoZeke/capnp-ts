@@ -668,9 +668,15 @@ export class LocalClient extends RefHook implements ClientHook {
     let liveRefs = 1;
     let pipeline!: LocalPipeline;
     const ctx = new LocalCallContext(params, (target, iface, method, tailParams) => {
+      // As capnp-C++ `directTailCall`, a call that only pipelines tails
+      // with `sendForPipeline()`.
       const tailOpts =
-        opts?.tailHandler !== undefined || opts?.onError !== undefined
-          ? { tailHandler: opts.tailHandler, onError: opts.onError }
+        opts?.tailHandler !== undefined || opts?.onError !== undefined || opts?.onlyPromisePipeline
+          ? {
+              tailHandler: opts.tailHandler,
+              onError: opts.onError,
+              ...(opts.onlyPromisePipeline ? { onlyPromisePipeline: true } : {}),
+            }
           : undefined;
       const tail = target.call(iface, method, tailParams, tailOpts);
       pipeline.setDelegate(tail.pipeline);

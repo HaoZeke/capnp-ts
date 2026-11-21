@@ -270,6 +270,20 @@ const SCENARIOS: Record<string, Step[]> = {
       noPromisePipelining: true,
     }),
   ],
+  // A tail call back to the caller takes the `yourself` path even when
+  // the call only pipelines (rpc.c++ directTailCall).
+  "tail-call-only-pipeline": [
+    bootstrap(0),
+    hold(1, 5),
+    W(100),
+    call({
+      q: 0x80000002,
+      method: M.callHeld,
+      target: (t) => targetAnswer(t, 0),
+      params: (p) => p.setU32(0, 3),
+      onlyPromisePipeline: true,
+    }),
+  ],
   "disembargo-provide": [bootstrap(0), W(100), disembargoProvide(1)],
   "disembargo-accept": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0, [0, 2]), 2)],
   "disembargo-unknown": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0), 9)],

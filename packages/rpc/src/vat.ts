@@ -1767,12 +1767,12 @@ export class RpcConnection implements RemoteHost {
       const message = e instanceof Error ? e.message : String(e);
       this.abort(new RpcError(message));
     };
-    const state = target.call(
-      Call_getInterfaceId(call),
-      Call_getMethodId(call),
-      callPayload,
-      tailHandler !== undefined ? { tailHandler, onError } : { onError },
-    );
+    const opts: CallOptions = { onError };
+    if (tailHandler !== undefined) opts.tailHandler = tailHandler;
+    // As capnp-C++ passes the call's hints to `startCall`: a forwarded or
+    // tail call goes out with `sendForPipeline()`.
+    if (answer.onlyPromisePipeline) opts.onlyPromisePipeline = true;
+    const state = target.call(Call_getInterfaceId(call), Call_getMethodId(call), callPayload, opts);
     target.release();
     answer.call = state;
     state.onError = onError;

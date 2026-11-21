@@ -9,7 +9,16 @@ import { connect, type Socket } from "node:net";
 import { strict as assert } from "node:assert";
 import type { StructBuilder } from "@haozeke/capnp";
 
-import { Client, membrane, savePersistent, RevocablePolicy, RpcError, RpcStream, type RpcConnection } from "../packages/rpc/src/index.ts";
+import {
+  Client,
+  membrane,
+  MemoryTransportPair,
+  savePersistent,
+  RevocablePolicy,
+  RpcConnection,
+  RpcError,
+  RpcStream,
+} from "../packages/rpc/src/index.ts";
 import type { ImportClient } from "../packages/rpc/src/remote.ts";
 import {
   attach,
@@ -78,6 +87,40 @@ const scenarios: Record<string, () => Promise<void>> = {
     const plain = boot.call(ECHO_INTERFACE_ID, M.ping.ordinal, arg(1), 1, 0, { noPromisePipelining: true });
     assert.equal(await u32(plain), 2);
     assert.ok(plain.pipeline(0).isBroken);
+  },
+
+  async tailhint() {
+    // A vat in between tail-calls the C++ peer for a call that only
+    // pipelines; capnp-C++ `directTailCall` would use `sendForPipeline()`.
+    const pair = new MemoryTransportPair();
+    const middle = new RpcConnection(pair.b, {
+      dispatch(_i, _m, _p, _r, ctx) {
+        return ctx.tailCall(boot, ECHO_INTERFACE_ID, M.makeCounter.ordinal, undefined, 0, 0);
+      },
+    });
+    const caller = new RpcConnection(pair.a);
+    const tick = setInterval(() => {
+      caller.pump();
+      middle.pump();
+    }, 1);
+    const peer = conn as unknown as { nextHighQuestionId: number; gotReturnForHighQuestionId: boolean };
+    const highBefore = peer.nextHighQuestionId;
+    try {
+      const front = caller.bootstrap();
+      const only = front.call(ECHO_INTERFACE_ID, M.makeCounter.ordinal, undefined, 0, 0, {
+        onlyPromisePipeline: true,
+      });
+      const counter = only.pipeline(0);
+      assert.equal(await u32(inc(counter, 1)), 2);
+      assert.equal(peer.nextHighQuestionId, highBefore + 1, "the tail call was not pipeline-only");
+      await u32(echo(M.ping, arg(0), 1, 0));
+      assert.equal(peer.gotReturnForHighQuestionId, false);
+      counter.release();
+      only.release();
+      front.release();
+    } finally {
+      clearInterval(tick);
+    }
   },
 
   async named() {
