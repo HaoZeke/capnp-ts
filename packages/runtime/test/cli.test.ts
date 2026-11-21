@@ -1078,6 +1078,45 @@ describe("text output of corrupt AnyPointer fields", () => {
   });
 });
 
+describe("JSON array size limit like capnp 1.4.0", () => {
+  const ksCgr = join(goldenDir, "dynamic-kitchen.cgr.bin");
+
+  async function amplifiedVoids(count: number): Promise<Uint8Array> {
+    const enc = await execCliInMemory(
+      ["encode", ksCgr, "KitchenSink"],
+      new TextEncoder().encode("(voids = [void])"),
+    );
+    expect(enc.code).toBe(0);
+    const msg = enc.stdout.slice();
+    const view = new DataView(msg.buffer);
+    let patched = 0;
+    for (let at = 8; at + 8 <= msg.byteLength; at += 8) {
+      if ((view.getUint32(at, true) & 3) === 1 && view.getUint32(at + 4, true) === 1 << 3) {
+        view.setUint32(at + 4, count << 3, true);
+        patched++;
+      }
+    }
+    expect(patched).toBe(1);
+    return msg;
+  }
+
+  for (const [count, message] of [
+    [178956971, "total size of struct list is larger than max segment size"],
+    [178956970, "requested object size exceeds maximum segment size"],
+    [348127232, "total size of struct list is larger than max segment size"],
+  ] as [number, string][]) {
+    test(`List(Void) of ${count} elements fails before building the array`, async () => {
+      const r = await execCliInMemory(
+        ["convert", "binary:json", ksCgr, "KitchenSink"],
+        await amplifiedVoids(count),
+      );
+      expect(r.code).toBe(1);
+      expect(r.stdout.byteLength).toBe(0);
+      expect(r.stderr).toBe(`capnp-ts: ${message}`);
+    });
+  }
+});
+
 describe("eval of an unset struct field", () => {
   const unionCgr = join(goldenDir, "eval-unions.cgr.bin");
   const expected: [string, number[]][] = [

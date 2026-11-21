@@ -95,6 +95,25 @@ export interface JsonCodecOptions {
   rejectUnknownFields?: boolean;
 }
 
+/**
+ * C++ `JsonCodec` builds each array as a `List(JsonValue)` of 3-word
+ * structs, which must fit in one segment along with its tag and a far
+ * pointer landing pad.
+ */
+const SEGMENT_WORD_LIMIT = 2 ** 29 - 1;
+function checkJsonArrayLength(n: number): void {
+  assertCapnp(
+    n * 3 <= SEGMENT_WORD_LIMIT - 1,
+    "ALLOC",
+    "total size of struct list is larger than max segment size",
+  );
+  assertCapnp(
+    n * 3 + 2 <= SEGMENT_WORD_LIMIT,
+    "ALLOC",
+    "requested object size exceeds maximum segment size",
+  );
+}
+
 const HEX_CHARS = "0123456789abcdef";
 
 /**
@@ -1472,6 +1491,7 @@ export class JsonCodec {
         };
       case TypeKind.Data: {
         const bytes = input.asData();
+        checkJsonArrayLength(bytes.length);
         const items: JsonAst[] = new Array(bytes.length);
         for (let i = 0; i < bytes.length; i++) {
           items[i] = { which: "number", value: bytes[i]! };
@@ -1481,6 +1501,7 @@ export class JsonCodec {
       case TypeKind.List: {
         const list = input.asList();
         const elemType = type.asList().getElementType();
+        checkJsonArrayLength(list.size());
         const items: JsonAst[] = new Array(list.size());
         for (let i = 0; i < list.size(); i++) {
           items[i] = this._encodeValueAst(list.get(i), elemType);
