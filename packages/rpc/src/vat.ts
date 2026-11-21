@@ -891,7 +891,7 @@ export class RpcConnection implements RemoteHost {
    * connection exports it under. Returns the ids exported.
    */
   private writePayload(payload: StructBuilder, p: Payload, releaseCaps: boolean): number[] {
-    payload.setP(0, p.content);
+    if (!p.contentIsNull) payload.setP(0, p.content);
     const exported: number[] = [];
     if (p.caps.length > 0) {
       let desc = payload.initCompositeList(

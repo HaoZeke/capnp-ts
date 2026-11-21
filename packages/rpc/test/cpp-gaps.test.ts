@@ -1012,3 +1012,58 @@ describe("named Bootstrap (ez-rpc.c++ restore, rpc.c++ handleBootstrap)", () => 
     expect(bs!.body.getText(0)).toBe("echo");
   });
 });
+
+describe("results a method never wrote (rpc.c++ sendReturn, getResults)", () => {
+  const content = (ret: Ptr): Ptr => Payload_getContent(Return_getResults(ret));
+
+  test("a method that leaves its results alone returns a null content", () => {
+    const r = raw({ dispatch() {} });
+    r.send(bootstrap(0));
+    r.send(call(1, (t) => toAnswer(t, 0)));
+    const ret = r.take()[1]!.body;
+    expect(Return_which(ret)).toBe(Return.results);
+    expect(content(ret).kind).toBe(PtrKind.Null);
+  });
+
+  test("a method that writes a default value returns a struct", () => {
+    const r = raw({
+      dispatch(_i, _m, _p, results) {
+        results.setU32(0, 0);
+      },
+    });
+    r.send(bootstrap(0));
+    r.send(call(1, (t) => toAnswer(t, 0)));
+    expect(content(r.take()[1]!.body).kind).toBe(PtrKind.Struct);
+  });
+
+  test("a null content reads as a struct of defaults", async () => {
+    const r = raw();
+    const cap = r.vat.bootstrap();
+    r.send(returnCap(0, 0));
+    await cap.whenResolved();
+    const p = cap.call(IFACE, 0);
+    r.send(frame(Message.return, (m) => m.initStruct(0, 2, 1).setU32(0, 1)));
+    const out = await p;
+    expect(out.content.getU32(0)).toBe(0);
+    expect(out.content.getP(0).kind).toBe(PtrKind.Null);
+    expect(new Client(out.getCap(out.content.getP(0))).isBroken).toBe(true);
+  });
+
+  test("a null content is passed on as null", async () => {
+    const a = raw({ dispatch() {} });
+    const relay = raw({
+      dispatch(_i, _m, _p, _r, ctx) {
+        return ctx.tailCall(Client.local({ dispatch() {} }), IFACE, 0);
+      },
+    });
+    a.send(bootstrap(0));
+    a.send(call(1, (t) => toAnswer(t, 0)));
+    expect(content(a.take()[1]!.body).kind).toBe(PtrKind.Null);
+    relay.send(bootstrap(0));
+    relay.send(call(1, (t) => toAnswer(t, 0)));
+    await nextTurn();
+    const ret = relay.take()[1]!.body;
+    expect(Return_which(ret)).toBe(Return.results);
+    expect(content(ret).kind).toBe(PtrKind.Null);
+  });
+});

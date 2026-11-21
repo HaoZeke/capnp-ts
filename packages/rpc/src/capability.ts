@@ -14,12 +14,13 @@
  * calls `release()`; keeping one longer takes `addRef()`.
  */
 import {
+  type BuilderPointer,
   Message as CapnpMessage,
   MessageBuilder,
   Orphan,
   Ptr,
   PtrKind,
-  type StructBuilder,
+  StructBuilder,
 } from "@haozeke/capnp";
 
 export type ExceptionType = "failed" | "overloaded" | "disconnected" | "unimplemented";
@@ -91,16 +92,38 @@ export class Settle<T> {
   }
 }
 
+let nullContent: Ptr | undefined;
+
+/** What a null content reads as: a struct whose every field is its default. */
+function defaultContent(): Ptr {
+  if (nullContent === undefined) {
+    const b = new MessageBuilder();
+    b.initRoot(0, 0);
+    nullContent = CapnpMessage.fromFlat(b.toFlat()).root();
+  }
+  return nullContent;
+}
+
 /**
  * The content of a message together with the capabilities its pointers
  * name. A capability pointer holds an index; the hook it stands for is
  * `caps[index]`.
  */
 export class Payload {
+  /** A null content reads as a struct of defaults, as capnp-C++ getters read one. */
+  readonly content: Ptr;
+
   constructor(
-    readonly content: Ptr,
+    content: Ptr,
     readonly caps: ClientHook[] = [],
-  ) {}
+  ) {
+    this.content = content.kind === PtrKind.Null ? defaultContent() : content;
+  }
+
+  /** The content was a null pointer, and is sent on as one. */
+  get contentIsNull(): boolean {
+    return this.content === nullContent;
+  }
 
   /** The hook a capability pointer inside this payload names. */
   getCap(ptr: Ptr): ClientHook {
@@ -139,8 +162,10 @@ export class CallBuilder {
   readonly root: StructBuilder;
   readonly caps: ClientHook[] = [];
 
-  constructor(dwords = 1, pwords = 1) {
-    this.root = this.message.initRoot(dwords, pwords);
+  /** With `results`, a root nobody writes to becomes a null content. */
+  constructor(dwords = 1, pwords = 1, results = false) {
+    const root = this.message.initRoot(dwords, pwords);
+    this.root = results ? new ResultsStruct(root) : root;
   }
 
   /**
@@ -164,10 +189,72 @@ export class CallBuilder {
 
   /** The readable view; the builder gives up its capabilities to it. */
   toPayload(): Payload {
+    if (this.root instanceof ResultsStruct && !this.root.written) {
+      return new Payload(defaultContent(), this.caps.splice(0));
+    }
     const root = CapnpMessage.fromFlat(this.message.toFlat(), {
       maxSegments: Number.MAX_SAFE_INTEGER,
     }).root();
     return new Payload(root, this.caps.splice(0));
+  }
+}
+
+/**
+ * The results struct a method is handed. capnp-C++ leaves a Return's
+ * content null until the method calls `getResults()`; writing to this
+ * struct is that call here.
+ */
+class ResultsStruct extends StructBuilder {
+  written = false;
+
+  constructor(root: StructBuilder) {
+    super(root.builder, root.seg, root.word, root.dwords, root.pwords);
+  }
+
+  override setU8(...a: Parameters<StructBuilder["setU8"]>): void {
+    this.written = true;
+    super.setU8(...a);
+  }
+
+  override setU16(...a: Parameters<StructBuilder["setU16"]>): void {
+    this.written = true;
+    super.setU16(...a);
+  }
+
+  override setU32(...a: Parameters<StructBuilder["setU32"]>): void {
+    this.written = true;
+    super.setU32(...a);
+  }
+
+  override setU64(...a: Parameters<StructBuilder["setU64"]>): void {
+    this.written = true;
+    super.setU64(...a);
+  }
+
+  override setF32(...a: Parameters<StructBuilder["setF32"]>): void {
+    this.written = true;
+    super.setF32(...a);
+  }
+
+  override setF64(...a: Parameters<StructBuilder["setF64"]>): void {
+    this.written = true;
+    super.setF64(...a);
+  }
+
+  override setBool(...a: Parameters<StructBuilder["setBool"]>): void {
+    this.written = true;
+    super.setBool(...a);
+  }
+
+  /** Every pointer write goes through a slot. */
+  override slot(ptrIndex: number): BuilderPointer {
+    this.written = true;
+    return super.slot(ptrIndex);
+  }
+
+  override asPointer(): BuilderPointer {
+    this.written = true;
+    return super.asPointer();
   }
 }
 
@@ -429,7 +516,7 @@ export interface RpcServer {
 }
 
 class LocalCallContext implements CallContext {
-  results = new CallBuilder();
+  results = new CallBuilder(1, 1, true);
   readonly controller = new AbortController();
   cancelRequested = false;
   cancellable = false;
