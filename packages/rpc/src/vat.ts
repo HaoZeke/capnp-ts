@@ -388,6 +388,10 @@ interface Provision {
   questionId: number;
   /** The connection the `Provide` came in on; the arrangement ends with it. */
   owner: RpcConnection;
+  /** `Disembargo.provide` came before the embargoed Accept it lifts. */
+  disembargoed: boolean;
+  /** The embargoed Accept's answer, settled when the embargo lifts. */
+  accept?: CallState;
 }
 
 /**
@@ -405,12 +409,6 @@ interface Provision {
 export class Vat {
   /** Capabilities held for a third vat, by the nonce that claims them. */
   readonly provisions = new Map<bigint, Provision>();
-}
-
-/** An embargoed Accept: claimed, answer withheld until the disembargo. */
-interface HeldAccept {
-  hook: ClientHook;
-  answerId: number;
 }
 
 export interface Introduction {
@@ -602,6 +600,31 @@ function settledCall(payload: Payload): CallState {
   return call;
 }
 
+/** An answer whose results come later; pipelined calls queue until then. */
+function embargoedCall(): CallState {
+  const call = new CallState();
+  const capAt = (payload: Payload, ops: readonly number[]): ClientHook => {
+    try {
+      return payload.pipelinedCapAt(ops);
+    } catch (e) {
+      return new BrokenClient(toRpcError(e));
+    }
+  };
+  call.pipeline = {
+    getPipelinedCap: (ops) => {
+      const r = call.result;
+      if (r.state === "ok") return r.value.pipelinedCapAt(ops);
+      if (r.state === "err") return new BrokenClient(r.error);
+      const eventual = new Settle<ClientHook>();
+      r.onSettled((s) => {
+        eventual.resolve(s.state === "ok" ? capAt(s.value, ops) : new BrokenClient(s.error));
+      });
+      return new QueuedClient(eventual);
+    },
+  };
+  return call;
+}
+
 /** Locally chosen ids, as capnp-C++ `ExportTable`: the lowest freed id goes first. */
 class IdAllocator {
   private next = 0;
@@ -664,8 +687,13 @@ export class RpcConnection implements RemoteHost {
   private readonly vat: Vat;
   /** No vat was given, so level 3 and 4 messages are refused. */
   private readonly twoParty: boolean;
-  /** Embargoed Accepts, keyed by the introducer's Provide question. */
-  private readonly heldAccepts = new Map<number, HeldAccept>();
+  /**
+   * Provisions arranged by this connection's Provides that a
+   * `Disembargo.provide` may still name, oldest first. A Provide question
+   * id can be reused once finished, so a Disembargo lifts the oldest
+   * arrangement with that id that it has not lifted yet.
+   */
+  private readonly arranged: Provision[] = [];
   private readonly introductions = new Map<bigint, Introduction>();
   private readonly introductionHooks = new Map<bigint, ClientHook>();
   private readonly bootstrapHook: ClientHook | undefined;
@@ -1853,9 +1881,20 @@ export class RpcConnection implements RemoteHost {
     // The arrangement holds the capability, not this connection's id for
     // it: the recipient may well arrive on another connection. The
     // question id is how a later Disembargo names this arrangement.
-    this.vat.provisions.get(nonce)?.hook.release();
-    this.vat.provisions.set(nonce, { hook, questionId, owner: this });
+    const replaced = this.vat.provisions.get(nonce);
+    if (replaced !== undefined) {
+      replaced.owner.unarrange(replaced);
+      replaced.hook.release();
+    }
+    const provision: Provision = { hook, questionId, owner: this, disembargoed: false };
+    this.vat.provisions.set(nonce, provision);
+    this.arranged.push(provision);
     this.answerNow(questionId, emptyPayload());
+  }
+
+  private unarrange(provision: Provision): void {
+    const at = this.arranged.indexOf(provision);
+    if (at !== -1) this.arranged.splice(at, 1);
   }
 
   /**
@@ -1878,20 +1917,32 @@ export class RpcConnection implements RemoteHost {
     }
     this.vat.provisions.delete(nonce);
 
-    if (Accept_getEmbargo(accept)) {
-      // Claimed, but the Return waits: the recipient has calls in flight
-      // through the introducer, and answering now would let one sent
-      // straight to us overtake them. The introducer lifts it with
-      // Disembargo.provide.
-      this.heldAccepts.set(held.questionId, { hook: held.hook, answerId: questionId });
+    if (Accept_getEmbargo(accept) && !held.disembargoed) {
+      // Claimed, but the Return and pipelined calls wait: the recipient
+      // has calls in flight through the introducer, and answering now
+      // would let one sent straight to us overtake them. The introducer
+      // lifts it with Disembargo.provide on its own connection.
+      const answer = this.newAnswer(questionId);
+      const call = embargoedCall();
+      answer.call = call;
+      held.accept = call;
+      call.onRelease = () => {
+        // Finish, or this connection ending, gives up the claim.
+        held.owner.unarrange(held);
+        if (call.result.state !== "pending") return;
+        held.hook.release();
+        call.result.reject(new RpcError("canceled"));
+      };
+      call.result.onSettled((s) => this.completeAnswer(questionId, answer, s));
       return;
     }
+    held.owner.unarrange(held);
     this.answerNow(questionId, capPayload(held.hook));
   }
 
-  /** Accepts claimed but still embargoed, awaiting Disembargo.provide. */
+  /** Provide question ids whose Accept is claimed but still embargoed. */
   embargoedAccepts(): number[] {
-    return [...this.heldAccepts.keys()];
+    return this.arranged.filter((p) => p.accept !== undefined).map((p) => p.questionId);
   }
 
   /** Pending handoffs, for tests and for shutdown accounting. */
@@ -2567,13 +2618,16 @@ export class RpcConnection implements RemoteHost {
       case Disembargo_context.provide: {
         if (this.twoParty) break;
         // The introducer lifts the embargo on the Accept it arranged,
-        // naming its own Provide question. One naming nothing we hold is
-        // the sender's problem, not a reason to disturb this connection.
+        // naming its own Provide question. It may overtake the Accept, which
+        // then is answered on arrival. One naming nothing we hold is the
+        // sender's problem, not a reason to disturb this connection.
         const provideQuestion = Disembargo_context_getProvide(context);
-        const held = this.heldAccepts.get(provideQuestion);
+        const held = this.arranged.find((p) => p.questionId === provideQuestion && !p.disembargoed);
         if (held === undefined) return;
-        this.heldAccepts.delete(provideQuestion);
-        this.answerNow(held.answerId, capPayload(held.hook));
+        held.disembargoed = true;
+        if (held.accept === undefined) return;
+        this.unarrange(held);
+        held.accept.result.resolve(capPayload(held.hook));
         return;
       }
       case Disembargo_context.receiverLoopback: {
@@ -2905,8 +2959,11 @@ export class RpcConnection implements RemoteHost {
     this.exportIdByHook.clear();
     for (const hook of this.introductionHooks.values()) hook.release();
     this.introductionHooks.clear();
-    for (const held of this.heldAccepts.values()) held.hook.release();
-    this.heldAccepts.clear();
+    for (const held of this.arranged.splice(0)) {
+      if (held.accept === undefined || held.accept.result.state !== "pending") continue;
+      held.hook.release();
+      held.accept.result.reject(reason);
+    }
     for (const [nonce, provision] of this.vat.provisions) {
       if (provision.owner !== this) continue;
       provision.hook.release();
