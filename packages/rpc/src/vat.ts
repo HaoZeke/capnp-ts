@@ -2162,14 +2162,18 @@ export class RpcConnection implements RemoteHost {
     promised: Ptr,
     mode: "target" | "descriptor" | "legacy" = "legacy",
   ): ClientHook | undefined {
-    if (promised.kind !== PtrKind.Struct) return undefined;
-    const answer = this.answers.get(PromisedAnswer_getQuestionId(promised));
+    // capnp-C++ reads a null `PromisedAnswer` as the default one, which
+    // names question 0 with an empty transform.
+    const isDefault = mode !== "legacy" && promised.kind === PtrKind.Null;
+    if (!isDefault && promised.kind !== PtrKind.Struct) return undefined;
+    const answer = this.answers.get(isDefault ? 0 : PromisedAnswer_getQuestionId(promised));
     if (mode !== "target" && (answer === undefined || (mode === "descriptor" && answer.finished))) {
       return undefined;
     }
     const ops: number[] = [];
-    const transform = PromisedAnswer_getTransform(promised);
-    for (let i = 0; i < transform.listLen(); i++) {
+    const transform = isDefault ? undefined : PromisedAnswer_getTransform(promised);
+    const opCount = transform?.listLen() ?? 0;
+    for (let i = 0; transform !== undefined && i < opCount; i++) {
       const op = transform.listGetP(i);
       const opWhich = PromisedAnswer_Op_which(op);
       // noop is a real op and does not move. Anything else is the
@@ -2182,7 +2186,7 @@ export class RpcConnection implements RemoteHost {
       ops.push(PromisedAnswer_Op_getGetPointerField(op));
     }
     if (answer === undefined || (mode === "target" && answer.finished)) return undefined;
-    if (answer.singleCap && transform.listLen() > 0) {
+    if (answer.singleCap && opCount > 0) {
       return new BrokenClient(new RpcError("Invalid pipeline transform."));
     }
     return answer.call.pipeline.getPipelinedCap(ops);

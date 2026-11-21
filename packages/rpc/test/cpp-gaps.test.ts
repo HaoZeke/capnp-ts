@@ -1577,3 +1577,27 @@ describe("descriptors naming what this side lacks (rpc.c++ receiveCap)", () => {
     ).toBe("invalid 'receiverAnswer'");
   });
 });
+
+describe("a null PromisedAnswer reads as question 0 (rpc.c++ getMessageTarget, receiveCap)", () => {
+  test("as a call target", () => {
+    const r = raw(ping);
+    r.send(bootstrap(0));
+    r.take();
+    r.send(call(1, (t) => t.setU16(4, MessageTarget.promisedAnswer), undefined, (p) => p.setU32(0, 3)));
+    const ret = r.take().find((m) => m.which === Message.return);
+    expect(Return_which(ret!.body)).toBe(Return.results);
+    expect(Payload_getContent(Return_getResults(ret!.body)).getU32(0)).toBe(4);
+  });
+
+  test("as a `receiverAnswer` descriptor", async () => {
+    const r = raw(echoCap);
+    r.send(bootstrap(0));
+    r.send(callWithCap(1, (t) => toAnswer(t, 0), CapDescriptor.receiverAnswer, 0));
+    await nextTurn();
+    r.take();
+    r.send(call(2, (t) => toAnswer(t, 1, [0])));
+    await nextTurn();
+    const ret = r.take().find((m) => m.which === Message.return && Return_getAnswerId(m.body) === 2);
+    expect(Return_which(ret!.body)).toBe(Return.results);
+  });
+});

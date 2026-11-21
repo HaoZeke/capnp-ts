@@ -512,6 +512,19 @@ const SCENARIOS: Record<string, Step[]> = {
     W(100),
     call({ q: 2, method: M.callHeld, target: (t) => targetAnswer(t, 0), params: (p) => p.setU32(0, 3) }),
   ],
+  // A null `PromisedAnswer` is the default one: question 0, no transform.
+  "null-promised-answer-target": [
+    bootstrap(0),
+    W(100),
+    call({ q: 1, method: M.ping, target: (t) => t.setU16(4, 1), params: (p) => p.setU32(0, 3) }),
+  ],
+  "null-receiver-answer": [
+    bootstrap(0),
+    W(100),
+    capCall(1, M.echoCap, (t) => targetAnswer(t, 0), [[4, 0]]),
+    W(100),
+    call({ q: 2, method: M.ping, target: (t) => targetAnswer(t, 1, [0]), params: (p) => p.setU32(0, 3) }),
+  ],
   "disembargo-provide": [bootstrap(0), W(100), disembargoProvide(1)],
   "disembargo-accept": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0, [0, 2]), 2)],
   "disembargo-unknown": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0), 9)],
