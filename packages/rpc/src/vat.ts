@@ -106,6 +106,7 @@ import {
   EXCEPTION_PWORDS,
   Exception_Type,
   Exception_getReason,
+  Exception_getTrace,
   Exception_getType,
   Disembargo_context,
   Disembargo_context_getProvide,
@@ -250,7 +251,8 @@ function exceptionTypeFromWire(n: number): ExceptionType {
 
 function readException(exc: Ptr): RpcError {
   const e = structOrDefault(exc);
-  return new RpcError(Exception_getReason(e), exceptionTypeFromWire(Exception_getType(e)));
+  const trace = e.getP(1).kind === PtrKind.Null ? undefined : Exception_getTrace(e);
+  return new RpcError(Exception_getReason(e), exceptionTypeFromWire(Exception_getType(e)), trace);
 }
 
 /**
@@ -534,6 +536,7 @@ export class RpcConnection implements RemoteHost {
 
   private readonly windowGetter: WindowGetter;
   private flowLimit: number;
+  private traceEncoder: ((error: RpcError) => string) | undefined;
   /** Words of incoming calls not yet complete, as capnp-C++ `callWordsInFlight`. */
   private callWordsInFlight = 0;
   private flowBlocked = false;
@@ -546,9 +549,12 @@ export class RpcConnection implements RemoteHost {
       streamWindow?: number | (() => number) | WindowGetter;
       /** Words of incoming calls in flight past which no more messages are read. Unlimited by default. */
       flowLimit?: number;
+      /** Fills `Exception.trace` in what this side sends, as capnp-C++ `setTraceEncoder`. */
+      traceEncoder?: (error: RpcError) => string;
     } = {},
   ) {
     this.flowLimit = options.flowLimit ?? Infinity;
+    this.traceEncoder = options.traceEncoder;
     this.vat = vat ?? new Vat();
     this.twoParty = vat === undefined;
     const w = options.streamWindow;
@@ -669,7 +675,7 @@ export class RpcConnection implements RemoteHost {
         const reason = exc.message.startsWith("remote exception: ")
           ? exc.message
           : `remote exception: ${exc.message}`;
-        this.abort(new RpcError(reason, exc.type));
+        this.abort(new RpcError(reason, exc.type, exc.remoteTrace));
         break;
       }
       case Message.unimplemented:
@@ -1664,6 +1670,11 @@ export class RpcConnection implements RemoteHost {
     this.transport.send(b.toFlat());
   }
 
+  /** As capnp-C++ `RpcSystem::setTraceEncoder`. */
+  setTraceEncoder(encode: ((error: RpcError) => string) | undefined): void {
+    this.traceEncoder = encode;
+  }
+
   /** As capnp-C++ `RpcSystem::setFlowLimit`. */
   setFlowLimit(words: number): void {
     this.flowLimit = words;
@@ -2334,6 +2345,7 @@ export class RpcConnection implements RemoteHost {
     const e = toRpcError(error);
     exc.setU16(OFF.exceptionType, EXCEPTION_TYPES[e.type]);
     exc.setText(0, e.message);
+    if (this.traceEncoder !== undefined) exc.setText(1, this.traceEncoder(e));
   }
 
   private sendException(questionId: number, error: RpcError): void {
@@ -2437,7 +2449,10 @@ export class RpcConnection implements RemoteHost {
    */
   disconnect(error: RpcError): void {
     if (this.gone !== undefined) return;
-    this.gone = error.type === "disconnected" ? error : new RpcError(error.message, "disconnected");
+    this.gone =
+      error.type === "disconnected"
+        ? error
+        : new RpcError(error.message, "disconnected", error.remoteTrace);
     const reason = this.gone;
 
     // A Return can set `returned` and then abort before the promise is

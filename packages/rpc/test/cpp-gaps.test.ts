@@ -25,6 +25,7 @@ import {
   CapDescriptor,
   CapDescriptor_which,
   Exception_getReason,
+  Exception_getTrace,
   Finish_getQuestionId,
   Finish_getReleaseResultCaps,
   Message,
@@ -867,5 +868,64 @@ describe("a released export of a promise (rpc.c++ handleRelease)", () => {
     await nextTurn();
     expect(disposed).toBe(1);
     expect(r.take()).toEqual([]);
+  });
+});
+
+describe("Exception.trace (rpc.c++ toException, fromException)", () => {
+  const failing: RpcServer = {
+    dispatch() {
+      throw new RpcError("nope");
+    },
+  };
+
+  test("a received trace is kept as the remote trace", async () => {
+    const r = raw();
+    const cap = r.vat.bootstrap();
+    r.send(
+      frame(Message.return, (m) => {
+        const ret = m.initStruct(0, 2, 1);
+        ret.setU16(6, Return.exception);
+        const e = ret.initStruct(0, 1, 2);
+        e.setText(0, "bad");
+        e.setText(1, "at the far end");
+      }),
+    );
+    const err = await Promise.resolve(cap.call(IFACE, 0)).catch((e: RpcError) => e);
+    expect(err).toBeInstanceOf(RpcError);
+    expect((err as RpcError).remoteTrace).toBe("at the far end");
+  });
+
+  test("an Abort's trace is kept", () => {
+    const r = raw();
+    r.send(
+      frame(Message.abort, (m) => {
+        const e = m.initStruct(0, 1, 2);
+        e.setText(0, "bye");
+        e.setText(1, "stack");
+      }),
+    );
+    expect(r.vat.disconnected?.message).toBe("remote exception: bye");
+    expect(r.vat.disconnected?.remoteTrace).toBe("stack");
+  });
+
+  test("no trace is sent without an encoder", () => {
+    const r = raw(failing);
+    r.send(bootstrap(0));
+    r.send(call(1, (t) => toAnswer(t, 0)));
+    const exc = Return_getException(r.take()[1]!.body);
+    expect(exc.getP(1).kind).toBe(PtrKind.Null);
+  });
+
+  test("a trace encoder fills the trace", () => {
+    const pair = new MemoryTransportPair();
+    const vat = new RpcConnection(pair.a, failing, undefined, {
+      traceEncoder: (e) => `trace of ${e.message}`,
+    });
+    pair.b.send(bootstrap(0));
+    pair.b.send(call(1, (t) => toAnswer(t, 0)));
+    vat.pump();
+    pair.b.receive();
+    const ret = CapnpMessage.fromFlat(pair.b.receive()!).root().getP(0);
+    expect(Exception_getTrace(Return_getException(ret))).toBe("trace of nope");
   });
 });

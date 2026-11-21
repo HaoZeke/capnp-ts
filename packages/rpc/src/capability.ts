@@ -29,6 +29,8 @@ export class RpcError extends Error {
   constructor(
     message: string,
     readonly type: ExceptionType = "failed",
+    /** `Exception.trace` from the peer, as capnp-C++ `setRemoteTrace` keeps it. */
+    readonly remoteTrace?: string,
   ) {
     super(message);
     this.name = "RpcError";
