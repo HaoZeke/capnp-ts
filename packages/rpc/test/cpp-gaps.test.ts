@@ -14,7 +14,7 @@ import {
 } from "@haozeke/capnp";
 
 import { newNullCap } from "../src/capability.ts";
-import { Client, RpcError, type RpcServer } from "../src/index.ts";
+import { Client, membrane, RevocablePolicy, RpcError, type RpcServer } from "../src/index.ts";
 import {
   Call_getNoPromisePipelining,
   Call_getOnlyPromisePipeline,
@@ -670,5 +670,45 @@ describe("Disembargo senderLoopback (rpc.c++ handleDisembargo)", () => {
     expect(Exception_getReason(out[0]!.body)).toBe(
       "'Disembargo' of type 'senderLoopback' sent to an object that does not point back to the sender.",
     );
+  });
+});
+
+describe("membranes (membrane.c++)", () => {
+  const forwarder: RpcServer = {
+    dispatch(_i, _m, params, _r, ctx) {
+      return ctx.tailCall(new Client(ctx.getCap(params.getP(0))), IFACE, 0);
+    },
+  };
+
+  test("a tail call crossing back out keeps the round trip saving", () => {
+    const r = raw(membrane(Client.local(forwarder), new RevocablePolicy()));
+    r.send(bootstrap(0));
+    r.take();
+    r.send(callWithCap(1, (t) => toAnswer(t, 0), CapDescriptor.senderHosted, 5));
+    const out = r.take();
+    expect(out.map((m) => m.which)).toEqual([Message.call, Message.return]);
+    expect(Call_sendResultsTo_which(out[0]!.body)).toBe(Call_sendResultsTo.yourself);
+    expect(Return_which(out[1]!.body)).toBe(Return.takeFromOtherQuestion);
+  });
+
+  test("a tail call to a capability from another membrane stays a plain call", () => {
+    const other = new RevocablePolicy();
+    const r = raw(
+      membrane(
+        Client.local({
+          dispatch(_i, _m, params, _r, ctx) {
+            const cap = membrane(new Client(ctx.getCap(params.getP(0))), other);
+            return ctx.tailCall(cap, IFACE, 0);
+          },
+        }),
+        new RevocablePolicy(),
+      ),
+    );
+    r.send(bootstrap(0));
+    r.take();
+    r.send(callWithCap(1, (t) => toAnswer(t, 0), CapDescriptor.senderHosted, 5));
+    const out = r.take();
+    expect(out.map((m) => m.which)).toEqual([Message.call]);
+    expect(Call_sendResultsTo_which(out[0]!.body)).toBe(Call_sendResultsTo.caller);
   });
 });

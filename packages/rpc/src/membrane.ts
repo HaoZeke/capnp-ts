@@ -32,6 +32,7 @@ import {
   RefHook,
   RpcError,
   Settle,
+  type TailHandler,
   toRpcError,
 } from "./capability.ts";
 
@@ -431,10 +432,8 @@ class MembraneHook extends RefHook implements ClientHook {
       return call;
     }
 
-    // Crossing a membrane must wrap any returned capabilities and honor
-    // revocation, so do not bypass the membrane with an outer tailHandler.
-    const innerOpts =
-      opts?.tailHandler !== undefined ? { ...opts, tailHandler: undefined } : opts;
+    const tail = opts?.tailHandler;
+    const innerOpts = tail === undefined ? opts : { ...opts, tailHandler: this.innerTail(tail) };
     const inner = routed.target.call(interfaceId, methodId, routed.params, innerOpts);
     routed.target.release();
     const outer = new CallState();
@@ -460,6 +459,19 @@ class MembraneHook extends RefHook implements ClientHook {
       inner.release();
     };
     return outer;
+  }
+
+  /**
+   * The tail handler for a call crossing this membrane. A tail call made
+   * inside reaches the outer handler only if it crosses back out the way
+   * the call came in, as capnp-C++ `MembraneRequestHook::wrap` unwraps a
+   * request. Any other tail call stays a plain call.
+   */
+  private innerTail(tail: TailHandler): TailHandler {
+    if (tail instanceof MembraneTailHandler && tail.policy === this.policy && tail.reverse === !this.reverse) {
+      return tail.outer;
+    }
+    return new MembraneTailHandler(tail, this.policy, this.reverse);
   }
 
   callStreaming(interfaceId: bigint, methodId: number, params: Payload): Promise<void> {
@@ -503,6 +515,19 @@ class MembraneHook extends RefHook implements ClientHook {
     }
     this.inner.release();
     this.resolvedWrap?.release();
+  }
+}
+
+/** The outer tail handler of a call that crossed a membrane, held for a tail call crossing back. */
+class MembraneTailHandler implements TailHandler {
+  constructor(
+    readonly outer: TailHandler,
+    readonly policy: MembranePolicy,
+    readonly reverse: boolean,
+  ) {}
+
+  tryTailCall(): undefined {
+    return undefined;
   }
 }
 
