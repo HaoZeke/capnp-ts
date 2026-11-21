@@ -429,6 +429,46 @@ const SCENARIOS: Record<string, Step[]> = {
       d.setU32(0, 99);
     }),
   ],
+  // Aborts whose capnp-C++ text ends with a printed KJ parameter.
+  "target-unknown-type": [
+    bootstrap(0),
+    W(100),
+    call({ q: 1, method: M.ping, target: (t) => t.setU16(4, 5) }),
+  ],
+  "pipeline-op-unknown": [
+    bootstrap(0),
+    W(100),
+    frame(Message.call, (m) => {
+      const c = m.initStruct(0, 3, 3);
+      c.setU32(0, 1);
+      c.setU64(8, ECHO);
+      const t = c.initStruct(0, 1, 1);
+      t.setU16(4, 1);
+      t.initStruct(0, 1, 1).initCompositeList(0, 1, 1, 0).setU16(0, 2);
+      c.initStruct(1, 0, 2).initStruct(0, 1, 0);
+    }),
+  ],
+  "unimplemented-call": [
+    bootstrap(0),
+    W(100),
+    frame(Message.unimplemented, (m) => {
+      const inner = m.initStruct(0, 1, 1);
+      inner.setU16(0, Message.call);
+      const c = inner.initStruct(0, 3, 3);
+      c.setU32(0, 1);
+      targetImport(c.initStruct(0, 1, 1), 0);
+    }),
+  ],
+  "unimplemented-null": [bootstrap(0), W(100), nullBody(Message.unimplemented)],
+  "unimplemented-bootstrap": [
+    bootstrap(0),
+    W(100),
+    frame(Message.unimplemented, (m) => {
+      const inner = m.initStruct(0, 1, 1);
+      inner.setU16(0, Message.bootstrap);
+      inner.initStruct(0, 1, 1).setU32(0, 4);
+    }),
+  ],
   "disembargo-provide": [bootstrap(0), W(100), disembargoProvide(1)],
   "disembargo-accept": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0, [0, 2]), 2)],
   "disembargo-unknown": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0), 9)],

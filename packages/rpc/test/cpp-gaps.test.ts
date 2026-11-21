@@ -1504,3 +1504,40 @@ describe("protocol abort texts (rpc.c++ releaseExport, handleCall, handleDisemba
     expect(abortReasonOf(r)).toBe("Invalid embargo ID in 'Disembargo.context.receiverLoopback'.");
   });
 });
+
+describe("aborts that print a KJ parameter (rpc.c++ getMessageTarget, toPipelineOps, handleUnimplemented)", () => {
+  test("an unknown target type prints the target", () => {
+    const r = raw(ping);
+    r.send(bootstrap(0));
+    r.send(call(1, (t) => t.setU16(4, 5)));
+    expect(abortReasonOf(r)).toBe("Unknown message target type.; target = ()");
+  });
+
+  test("an unknown pipeline op prints its kind", () => {
+    const r = raw(ping);
+    r.send(bootstrap(0));
+    r.send(
+      call(1, (t) => {
+        t.setU16(4, 1);
+        t.initStruct(0, 1, 1).initCompositeList(0, 1, 1, 0).setU16(0, 2);
+      }),
+    );
+    expect(abortReasonOf(r)).toBe("Unsupported pipeline op.; (uint)opReader.which() = 2");
+  });
+
+  test("an Unimplemented echo of a required message prints its kind", () => {
+    const echoed = (fill?: (m: StructBuilder) => void): Uint8Array =>
+      frame(Message.unimplemented, (m) => fill?.(m.initStruct(0, 1, 1)));
+    const r = raw(ping);
+    r.send(
+      echoed((inner) => {
+        inner.setU16(0, Message.call);
+        inner.initStruct(0, 3, 3);
+      }),
+    );
+    expect(abortReasonOf(r)).toBe("Peer did not implement required RPC message type.; (uint)message.which() = 2");
+    const n = raw(ping);
+    n.send(frame(Message.unimplemented));
+    expect(abortReasonOf(n)).toBe("Peer did not implement required RPC message type.; (uint)message.which() = 0");
+  });
+});

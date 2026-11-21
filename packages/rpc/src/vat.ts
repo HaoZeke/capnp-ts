@@ -2140,7 +2140,8 @@ export class RpcConnection implements RemoteHost {
         );
       }
       default:
-        if (abortOnInvalid) this.abort(new RpcError("Unknown message target type."));
+        // capnp-C++ prints the target, and a union it cannot name prints as `()`.
+        if (abortOnInvalid) this.abort(new RpcError("Unknown message target type.; target = ()"));
         return undefined;
     }
   }
@@ -2175,7 +2176,7 @@ export class RpcConnection implements RemoteHost {
       // unsupported-pipeline-op protocol error, which disconnects.
       if (opWhich === PromisedAnswer_Op.noop) continue;
       if (opWhich !== PromisedAnswer_Op.getPointerField) {
-        this.abort(new RpcError("Unsupported pipeline op."));
+        this.abort(new RpcError(`Unsupported pipeline op.; (uint)opReader.which() = ${opWhich}`));
         return undefined;
       }
       ops.push(PromisedAnswer_Op_getGetPointerField(op));
@@ -2460,8 +2461,16 @@ export class RpcConnection implements RemoteHost {
    * reference it would have held is released.
    */
   private handleUnimplemented(echoed: Ptr): void {
+    const notImplemented = (): void =>
+      this.abort(
+        new RpcError(
+          `Peer did not implement required RPC message type.; (uint)message.which() = ${
+            echoed.kind === PtrKind.Struct ? Message_which(echoed) : 0
+          }`,
+        ),
+      );
     if (echoed.kind !== PtrKind.Struct) {
-      this.abort(new RpcError("Peer did not implement required RPC message type."));
+      notImplemented();
       return;
     }
     const unimplemented = new RpcError("peer does not implement this message", "unimplemented");
@@ -2498,7 +2507,7 @@ export class RpcConnection implements RemoteHost {
         return;
       }
       default:
-        this.abort(new RpcError("Peer did not implement required RPC message type."));
+        notImplemented();
         return;
     }
   }
