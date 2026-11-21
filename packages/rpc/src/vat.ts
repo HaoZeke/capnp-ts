@@ -251,10 +251,31 @@ function segmentWords(frame: Uint8Array): number {
 const REMOTE_PREFIX = "remote exception: ";
 
 /** A received exception, as capnp-C++ `toException()` reads one for every message kind. */
+/**
+ * Write an exception string. Bytes above 127 and interior NULs stay raw,
+ * matching the `char` values kj puts in the description.
+ */
+function writeWireText(struct: StructBuilder, index: number, text: string): void {
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 0 || c > 127) {
+      const bytes = new Uint8Array(text.length);
+      for (let j = 0; j < text.length; j++) bytes[j] = text.charCodeAt(j) & 0xff;
+      struct.setTextBytes(index, bytes);
+      return;
+    }
+  }
+  struct.setText(index, text);
+}
+
+/** A received exception, as capnp-C++ `toException()` reads one for every message kind. */
 function readException(exc: Ptr): RpcError {
   const e = structOrDefault(exc);
-  const trace = e.getP(1).kind === PtrKind.Null ? undefined : Exception_getTrace(e);
+  // Reason is read before the trace, so a bad reason wins over a bad trace.
+  // The trace is text: kind is checked before the struct body bounds.
   const reason = Exception_getReason(e);
+  const tracePtr = e.getP(1, "text");
+  const trace = tracePtr.kind === PtrKind.Null ? undefined : Exception_getTrace(e);
   const message = reason.startsWith(REMOTE_PREFIX) ? reason : REMOTE_PREFIX + reason;
   const wireType = Exception_getType(e);
   return new RpcError(message, exceptionTypeFromWire(wireType), trace, wireType);
@@ -544,6 +565,36 @@ function emptyPayload(): Payload {
   return new Payload(b.toPayload().content.getP(0));
 }
 
+/** List pointer expected, with the wire kind in the comparison. */
+function nonListPointerMessage(wireKind: number): string {
+  return (
+    `expected ref->kind() == WirePointer::LIST [${wireKind} == 1]; ` +
+    "Schema mismatch: Message contains non-list pointer where list pointer was expected."
+  );
+}
+
+/**
+ * The call's content pointer is resolved the first time something reads it.
+ * `Payload_getContent` follows the pointer, so doing it here would abort a
+ * call whose method never looks at its parameters.
+ */
+function lazyCallPayload(params: Ptr, caps: ClientHook[]): Payload {
+  const payload = emptyPayload();
+  payload.caps.push(...caps);
+  let resolved: Ptr | undefined;
+  Object.defineProperty(payload, "content", {
+    configurable: true,
+    enumerable: true,
+    get(): Ptr {
+      if (resolved === undefined) {
+        resolved = new Payload(Payload_getContent(params)).content;
+      }
+      return resolved;
+    },
+  });
+  return payload;
+}
+
 function settledCall(payload: Payload): CallState {
   const call = new CallState();
   call.result.resolve(payload);
@@ -746,6 +797,19 @@ export class RpcConnection implements RemoteHost {
     let n = 0;
     while (this.pumpOnce()) n++;
     return n;
+  }
+
+  /**
+   * Handle pending messages one at a time, with a microtask between them.
+   * capnp-C++ `messageLoop` uses `kj::evalLater` so a ready promise's
+   * continuation runs before the next frame in the same read.
+   */
+  pumpTurns(): void {
+    const step = (): void => {
+      if (!this.pumpOnce()) return;
+      if (this.gone === undefined && this.transport.pending > 0) queueMicrotask(step);
+    };
+    step();
   }
 
   // --- exports --------------------------------------------------------
@@ -1053,7 +1117,10 @@ export class RpcConnection implements RemoteHost {
   private receiveCaps(payload: Ptr): ClientHook[] {
     if (payload.kind !== PtrKind.Struct) return [];
     const table = Payload_getCapTable(payload);
-    if (table.kind !== PtrKind.List) return [];
+    if (table.kind === PtrKind.Null) return [];
+    if (table.kind !== PtrKind.List) {
+      throw new RpcError(nonListPointerMessage(wireKindOf(table)));
+    }
     const hooks: ClientHook[] = [];
     for (let i = 0; i < table.listLen(); i++) hooks.push(this.receiveCap(table.listGetP(i)));
     return hooks;
@@ -1087,11 +1154,13 @@ export class RpcConnection implements RemoteHost {
 
   private pipelineOf(id: number, q: QuestionState, ops: readonly number[]): ClientHook {
     const r = q.call.result;
-    if (r.state === "ok") return r.value.pipelinedCapAt(ops);
+    if (r.state === "ok") return this.pipelineCapOrBroken(r.value, ops);
     if (r.state === "err") return new BrokenClient(r.error);
     const eventual = new Settle<ClientHook>();
     r.onSettled((s) => {
-      eventual.resolve(s.state === "ok" ? s.value.pipelinedCapAt(ops) : new BrokenClient(s.error));
+      eventual.resolve(
+        s.state === "ok" ? this.pipelineCapOrBroken(s.value, ops) : new BrokenClient(s.error),
+      );
     });
     return new PromiseClient(
       this,
@@ -1099,6 +1168,15 @@ export class RpcConnection implements RemoteHost {
       eventual,
       undefined,
     );
+  }
+
+  /** A client's own pipeline. A bad path is a broken capability, not an abort. */
+  private pipelineCapOrBroken(payload: Payload, ops: readonly number[]): ClientHook {
+    try {
+      return payload.pipelinedCapAt(ops);
+    } catch (e) {
+      return new BrokenClient(e instanceof RpcError ? e : new RpcError(e instanceof Error ? e.message : String(e)));
+    }
   }
 
   /** The last interest in a question is gone: tell the peer. */
@@ -1801,17 +1879,11 @@ export class RpcConnection implements RemoteHost {
       this.abort(new RpcError("expected !answer.active; questionId is already in use"));
       return;
     }
-    let callPayload: Payload;
-    try {
-      callPayload =
-        params.kind === PtrKind.Null
-          ? emptyPayload()
-          : new Payload(Payload_getContent(params), caps);
-    } catch (e) {
-      target.release();
-      caps.forEach((c) => c.release());
-      throw e;
-    }
+    // Content stays unread until the method touches its parameters. A method
+    // that ignores them still succeeds, and a bad pointer becomes the call's
+    // exception rather than an abort.
+    const callPayload =
+      params.kind === PtrKind.Null ? emptyPayload() : lazyCallPayload(params, caps);
     const answer = this.newAnswer(questionId);
     answer.isCall = true;
     answer.resultsElsewhere = sendTo === Call_sendResultsTo.yourself;
@@ -2033,12 +2105,12 @@ export class RpcConnection implements RemoteHost {
     }
     const live = answer.call.pipeline;
     answer.call.pipeline = {
-      getPipelinedCap: (ops) =>
-        this.resolutionAtReturnTime(
-          live.getPipelinedCap(ops),
-          results.pipelinedCapAt(ops),
-          atReturn,
-        ),
+      getPipelinedCap: (ops) => {
+        // Read the returned path first. A non-struct or non-cap throws here,
+        // before the live reference is taken.
+        const returned = results.pipelinedCapAt(ops);
+        return this.resolutionAtReturnTime(live.getPipelinedCap(ops), returned, atReturn);
+      },
     };
     const onRelease = answer.call.onRelease;
     answer.call.onRelease = () => {
@@ -2212,7 +2284,10 @@ export class RpcConnection implements RemoteHost {
     // capnp-C++ reads a null `PromisedAnswer` as the default one, which
     // names question 0 with an empty transform.
     const isDefault = mode !== "legacy" && promised.kind === PtrKind.Null;
-    if (!isDefault && promised.kind !== PtrKind.Struct) return undefined;
+    if (!isDefault && promised.kind !== PtrKind.Struct) {
+      if (mode === "target") throw new RpcError(nonStructPointerMessage(wireKindOf(promised)));
+      return undefined;
+    }
     const answer = this.answers.get(isDefault ? 0 : PromisedAnswer_getQuestionId(promised));
     if (mode !== "target" && (answer === undefined || (mode === "descriptor" && answer.finished))) {
       return undefined;
@@ -2503,8 +2578,8 @@ export class RpcConnection implements RemoteHost {
   private writeException(exc: StructBuilder, error: unknown): void {
     const e = toRpcError(error);
     exc.setU16(OFF.exceptionType, e.wireType !== undefined ? e.wireType : EXCEPTION_TYPES[e.type]);
-    exc.setText(0, e.message);
-    if (this.traceEncoder !== undefined) exc.setText(1, this.traceEncoder(e));
+    writeWireText(exc, 0, e.message);
+    if (this.traceEncoder !== undefined) writeWireText(exc, 1, this.traceEncoder(e));
   }
 
   private sendException(questionId: number, error: RpcError): void {
@@ -2550,16 +2625,12 @@ export class RpcConnection implements RemoteHost {
       notImplemented();
       return;
     }
-    const unimplemented = new RpcError("peer does not implement this message", "unimplemented");
     switch (Message_which(echoed)) {
       case Message.provide:
-        this.failAsked(Provide_getQuestionId(Message_getProvide(echoed)), unimplemented);
-        return;
       case Message.accept:
-        this.failAsked(Accept_getQuestionId(Message_getAccept(echoed)), unimplemented);
-        return;
       case Message.join:
-        this.failAsked(Join_getQuestionId(Message_getJoin(echoed)), unimplemented);
+        // Two-party has no level-3 or level-4 messages. An echo of one aborts.
+        notImplemented();
         return;
       case Message.resolve: {
         const resolve = Message_getResolve(echoed);
@@ -2587,15 +2658,6 @@ export class RpcConnection implements RemoteHost {
         notImplemented();
         return;
     }
-  }
-
-  private failAsked(questionId: number, error: RpcError): void {
-    const q = this.questions.get(questionId);
-    if (q === undefined || q.returned) return;
-    this.failQuestion(q, error);
-    for (const id of q.paramExports) this.releaseExport(id, 1);
-    q.paramExports = [];
-    if (q.finished) this.questions.delete(questionId);
   }
 
   /**

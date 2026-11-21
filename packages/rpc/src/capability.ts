@@ -17,6 +17,7 @@ import {
   type BuilderPointer,
   Message as CapnpMessage,
   MessageBuilder,
+  nonStructPointerMessage,
   Orphan,
   Ptr,
   PtrKind,
@@ -148,17 +149,20 @@ export class Payload {
 
   /**
    * The capability at the end of a chain of pointer fields, as an owned
-   * reference. This is what a pipelined call addresses.
+   * reference. A null step is an empty struct, a non-struct throws, and
+   * the final capability read throws on a bad cap.
    */
   getPipelinedCap(ops: readonly number[]): ClientHook {
-    let pos = this.content;
+    let at = this.content;
     for (const field of ops) {
-      if (pos.kind !== PtrKind.Struct) {
-        return new BrokenClient(new RpcError("pipeline path walks into a non-struct"));
+      if (at.kind === PtrKind.Null) continue;
+      if (at.kind !== PtrKind.Struct) {
+        const wire = at.kind === PtrKind.List ? 1 : at.kind === PtrKind.Cap ? 3 : 0;
+        throw new RpcError(nonStructPointerMessage(wire));
       }
-      pos = pos.getP(field);
+      at = at.getP(field);
     }
-    return this.getCap(pos);
+    return this.getCap(at);
   }
 
   release(): void {
@@ -173,19 +177,7 @@ export class Payload {
    * is a broken one.
    */
   pipelinedCapAt(ops: readonly number[]): ClientHook {
-    let at = this.content;
-    for (const field of ops) {
-      if (at.kind === PtrKind.Null) return newNullCap();
-      if (at.kind !== PtrKind.Struct) {
-        return new BrokenClient(new RpcError("pipeline path walks into a non-struct"));
-      }
-      at = at.getP(field);
-    }
-    try {
-      return this.getCap(at);
-    } catch (e) {
-      return new BrokenClient(e instanceof RpcError ? e : new RpcError(String(e)));
-    }
+    return this.getPipelinedCap(ops);
   }
 }
 
@@ -647,15 +639,15 @@ class LocalPipeline implements PipelineHook {
     if (this.delegate !== undefined) return;
     this.delegate = pipeline;
     for (const p of this.pending.splice(0)) {
-      p.eventual.resolve(pipeline.getPipelinedCap(p.ops));
+      p.eventual.resolve(capAt(pipeline, p.ops));
       p.drop();
     }
   }
 
   getPipelinedCap(ops: readonly number[]): ClientHook {
-    if (this.delegate !== undefined) return this.delegate.getPipelinedCap(ops);
+    if (this.delegate !== undefined) return capAt(this.delegate, ops);
     const r = this.result;
-    if (r.state === "ok") return r.value.pipelinedCapAt(ops);
+    if (r.state === "ok") return capAtPayload(r.value, ops);
     if (r.state === "err") return new BrokenClient(r.error);
     this.retain();
     let held = true;
@@ -671,7 +663,7 @@ class LocalPipeline implements PipelineHook {
       const idx = this.pending.indexOf(entry);
       if (idx !== -1) this.pending.splice(idx, 1);
       if (eventual.state === "pending") {
-        eventual.resolve(s.state === "ok" ? s.value.pipelinedCapAt(ops) : new BrokenClient(s.error));
+        eventual.resolve(s.state === "ok" ? capAtPayload(s.value, ops) : new BrokenClient(s.error));
       }
       drop();
     });
@@ -700,6 +692,7 @@ export class LocalClient extends RefHook implements ClientHook {
   whenMoreResolved(): undefined {
     return undefined;
   }
+
 
   call(interfaceId: bigint, methodId: number, params: Payload, opts?: CallOptions): CallState {
     if (this.broken !== undefined) {
@@ -840,7 +833,7 @@ export class LocalClient extends RefHook implements ClientHook {
       ret = this.server.dispatch(
         interfaceId,
         methodId,
-        ctx.params.content,
+        unreadParams(ctx.params),
         ctx.results.root,
         ctx,
       );
@@ -1121,6 +1114,7 @@ export class Client {
     this.release();
   }
 
+
   /** The hook with every resolved promise looked through. */
   resolved(): ClientHook {
     let h = this.hook;
@@ -1188,4 +1182,48 @@ export class RpcPromise implements PromiseLike<Payload> {
   [Symbol.dispose](): void {
     this.release();
   }
+}
+
+/**
+ * A queued pipeline call resolves to a broken capability when the path
+ * cannot be read. A call that arrives after the Return lets the same
+ * failure leave the connection.
+ */
+function capAt(pipeline: PipelineHook, ops: readonly number[]): ClientHook {
+  try {
+    return pipeline.getPipelinedCap(ops);
+  } catch (e) {
+    return new BrokenClient(toRpcError(e));
+  }
+}
+
+function capAtPayload(payload: Payload, ops: readonly number[]): ClientHook {
+  try {
+    return payload.pipelinedCapAt(ops);
+  } catch (e) {
+    return new BrokenClient(toRpcError(e));
+  }
+}
+
+/**
+ * Params are read when a method touches them. A method that ignores its
+ * parameters never resolves the content pointer. The object is a real
+ * `Ptr`, so `instanceof Ptr` is true.
+ */
+function unreadParams(payload: Payload): Ptr {
+  const shell = Object.create(Ptr.prototype) as Ptr;
+  return new Proxy(shell, {
+    get(_target, prop, _receiver) {
+      if (prop === "constructor") return Ptr;
+      const real = payload.content;
+      const value = Reflect.get(real, prop, real) as unknown;
+      if (typeof value === "function") {
+        return (value as (...args: unknown[]) => unknown).bind(real);
+      }
+      return value;
+    },
+    getPrototypeOf() {
+      return Ptr.prototype;
+    },
+  });
 }

@@ -44,14 +44,22 @@ export function attach(
   });
   const conn = new RpcConnection(transport, bootstrap, undefined, options);
   const drain = (): void => {
-    try {
-      conn.pump();
-    } catch (e) {
-      conn.abort(new RpcError(e instanceof Error ? e.message : String(e)));
-      sock.destroy();
-    }
-    // capnp-C++ closes the stream once the connection is gone.
-    if (conn.disconnected !== undefined) sock.end();
+    const step = (): void => {
+      let ran = false;
+      try {
+        ran = conn.pumpOnce();
+      } catch (e) {
+        conn.abort(new RpcError(e instanceof Error ? e.message : String(e)));
+        sock.destroy();
+        return;
+      }
+      if (conn.disconnected !== undefined) {
+        sock.end();
+        return;
+      }
+      if (ran && transport.pending > 0) queueMicrotask(step);
+    };
+    step();
   };
   sock.on("data", (chunk: Buffer) => {
     try {
@@ -123,8 +131,6 @@ export function keepServer(): RpcServer {
   });
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 /** The Echo interface of schema/interop.capnp. */
 export class EchoImpl implements RpcServer {
   cancelled = 0;
@@ -160,10 +166,10 @@ export class EchoImpl implements RpcServer {
         results.setU32(0, params.getU32(0) + 1);
         return;
       case m.makeCounter.ordinal:
-        // Answered late, so a pipelined call arrives while this is pending.
-        return sleep(20).then(() => {
-          ctx.setResultCap(ctx.initResults(0, 1), 0, Client.local(new CounterImpl()).hook);
-        });
+        // Ready immediately, as the C++ peer's `kj::READY_NOW`. A pipelined
+        // call in the same burst is therefore post-return.
+        ctx.setResultCap(ctx.initResults(0, 1), 0, Client.local(new CounterImpl()).hook);
+        return;
       case m.makePromise.ordinal: {
         const promise = Client.fromPromise(
           new Promise<Client>((resolve) => (this.fulfillCounter = resolve)),
