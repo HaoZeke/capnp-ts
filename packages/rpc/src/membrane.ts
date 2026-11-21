@@ -67,7 +67,7 @@ export abstract class MembranePolicy {
       this.revocationWatched = true;
       p.then(
         () => {
-          this.fireRevocation(new RpcError("onRevoked() resolved; it should only reject"));
+          this.fireRevocation(new RpcError("onRevoked() promise resolved; it should only reject"));
         },
         (e) => {
           this.fireRevocation(toRpcError(e));
@@ -500,7 +500,26 @@ class MembraneHook extends RefHook implements ClientHook {
     const resolved = this.getResolved();
     if (resolved !== undefined) return resolved.flush?.() ?? Promise.resolve();
     if (this.revoked !== undefined) return Promise.reject(this.revoked);
-    return this.inner.flush?.() ?? Promise.resolve();
+    const done = this.inner.flush?.() ?? Promise.resolve();
+    // Stream calls across a membrane end with its revocation, and so does
+    // waiting for them.
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let unwatch: (() => void) | undefined;
+      const finish = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        unwatch?.();
+        fn();
+      };
+      const revoked = this.policy.watchRevocation((err) => finish(() => reject(err)));
+      if (settled) revoked();
+      else unwatch = revoked;
+      done.then(
+        () => finish(resolve),
+        (e) => finish(() => reject(e)),
+      );
+    });
   }
 
   protected dispose(): void {

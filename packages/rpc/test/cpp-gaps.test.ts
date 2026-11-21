@@ -13,7 +13,7 @@ import {
   type StructBuilder,
 } from "@haozeke/capnp";
 
-import { newNullCap } from "../src/capability.ts";
+import { LocalClient, newNullCap } from "../src/capability.ts";
 import { Client, membrane, RevocablePolicy, RpcError, type RpcServer } from "../src/index.ts";
 import {
   Call_getNoPromisePipelining,
@@ -710,5 +710,19 @@ describe("membranes (membrane.c++)", () => {
     const out = r.take();
     expect(out.map((m) => m.which)).toEqual([Message.call]);
     expect(Call_sendResultsTo_which(out[0]!.body)).toBe(Call_sendResultsTo.caller);
+  });
+
+  test("flush() ends with the membrane's revocation", async () => {
+    const hook = new LocalClient(ping);
+    hook.flush = () => new Promise<void>(() => {});
+    const policy = new RevocablePolicy();
+    const wrapped = membrane(new Client(hook), policy);
+    const flushed = wrapped.flush().then(
+      () => "flushed",
+      (e: Error) => e.message,
+    );
+    policy.revoke("gone");
+    const pending = new Promise((r) => setTimeout(() => r("still pending"), 50));
+    expect(await Promise.race([flushed, pending])).toBe("gone");
   });
 });
