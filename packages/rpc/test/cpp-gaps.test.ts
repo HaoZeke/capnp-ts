@@ -32,6 +32,7 @@ import {
   Return_getAnswerId,
   Return_getException,
   Return_getNoFinishNeeded,
+  Return_getReleaseParamCaps,
   Return_getResults,
   Return_which,
 } from "../src/rpc.capnp.ts";
@@ -368,5 +369,36 @@ describe("null message bodies read as defaults (rpc.c++ handleMessage)", () => {
     const out = r.take();
     expect(out.map((m) => m.which)).toEqual([Message.abort]);
     expect(Exception_getReason(out[0]!.body)).toBe("remote exception: ");
+  });
+});
+
+describe("bootstrap answers (rpc.c++ handleBootstrap)", () => {
+  test("the Return leaves releaseParamCaps at its default", () => {
+    const r = raw(ping);
+    r.send(bootstrap(0));
+    expect(Return_getReleaseParamCaps(r.take()[0]!.body)).toBe(true);
+  });
+
+  test("a vat without a bootstrap capability returns a broken one", async () => {
+    const r = raw();
+    r.send(bootstrap(0));
+    const out = r.take();
+    expect(capKinds(out[0]!.body)).toEqual([CapDescriptor.senderPromise]);
+    await nextTurn();
+    const resolve = r.take()[0]!.body;
+    expect(Resolve_which(resolve)).toBe(Resolve.exception);
+    expect(Exception_getReason(Resolve_getException(resolve))).toBe(
+      "This vat does not expose any public/bootstrap interfaces.",
+    );
+  });
+
+  test("a pipelined call with a nonempty transform is invalid", () => {
+    const r = raw(ping);
+    r.send(bootstrap(0));
+    r.take();
+    r.send(call(1, (t) => toAnswer(t, 0, [0])));
+    const ret = r.take()[0]!.body;
+    expect(Return_which(ret)).toBe(Return.exception);
+    expect(Exception_getReason(Return_getException(ret))).toBe("Invalid pipeline transform.");
   });
 });

@@ -1510,26 +1510,59 @@ export class RpcConnection implements RemoteHost {
 
   // --- answering ------------------------------------------------------
 
+  /**
+   * `Bootstrap`, as capnp-C++ `handleBootstrap` answers it. The Return
+   * leaves `releaseParamCaps` at its default: there were no params.
+   * Pipelined calls reach the capability the Return named, and only with
+   * an empty transform.
+   */
   private handleBootstrap(bootstrap: Ptr): void {
     const questionId = Bootstrap_getQuestionId(bootstrap);
     if (this.answers.has(questionId)) {
       this.abort(new RpcError(`bootstrap reuses question id ${questionId} still in use`));
       return;
     }
+    const answer = this.newAnswer(questionId);
+    answer.returned = true;
+    const { b, root } = newMessage(Message.return);
+    const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+    ret.setU32(OFF.returnAnswerId, questionId);
+    let pipelineCap: ClientHook;
     if (Bootstrap_getDeprecatedObjectId(bootstrap).kind !== PtrKind.Null) {
-      this.answerWithError(
-        questionId,
-        new RpcError(
-          "This vat only supports a bootstrap interface, not the old Cap'n-Proto-0.4-style named exports.",
-        ),
+      const error = new RpcError(
+        "This vat only supports a bootstrap interface, not the old Cap'n-Proto-0.4-style named exports.",
       );
-      return;
+      ret.setU16(OFF.returnUnion, Return.exception);
+      this.writeException(ret.initStruct(0, EXCEPTION_DWORDS, EXCEPTION_PWORDS), error);
+      answer.call = new CallState();
+      answer.call.result.reject(error);
+      pipelineCap = new BrokenClient(error);
+    } else {
+      const cap =
+        this.bootstrapHook?.addRef() ??
+        new BrokenClient(new RpcError("This vat does not expose any public/bootstrap interfaces."));
+      pipelineCap = this.innermostForExport(cap).addRef();
+      const payload = capPayload(cap);
+      ret.setU16(OFF.returnUnion, Return.results);
+      answer.resultExports = this.writePayload(
+        ret.initStruct(0, PAYLOAD_DWORDS, PAYLOAD_PWORDS),
+        payload,
+        false,
+      );
+      answer.call = settledCall(payload);
     }
-    if (this.bootstrapHook === undefined) {
-      this.answerWithError(questionId, new RpcError("no bootstrap capability"));
-      return;
-    }
-    this.answerNow(questionId, capPayload(this.bootstrapHook.addRef()));
+    answer.call.pipeline = {
+      getPipelinedCap: (ops) =>
+        ops.length === 0
+          ? pipelineCap.addRef()
+          : new BrokenClient(new RpcError("Invalid pipeline transform.")),
+    };
+    const onRelease = answer.call.onRelease;
+    answer.call.onRelease = () => {
+      onRelease?.();
+      pipelineCap.release();
+    };
+    this.transport.send(b.toFlat());
   }
 
   private handleCall(call: Ptr): void {
