@@ -13,7 +13,14 @@
  */
 import { connect } from "node:net";
 
-import { Message as CapnpMessage, MessageBuilder, type Ptr, PtrKind, type StructBuilder } from "@haozeke/capnp";
+import {
+  Message as CapnpMessage,
+  MessageBuilder,
+  Orphan,
+  type Ptr,
+  PtrKind,
+  type StructBuilder,
+} from "@haozeke/capnp";
 
 import {
   CapDescriptor_which,
@@ -37,6 +44,8 @@ const M = {
   echoCap: 8,
   brokenCap: 10,
   promiseOfHeld: 13,
+  hold: 11,
+  callHeld: 12,
   resolveHeld: 14,
 } as const;
 
@@ -101,6 +110,24 @@ function call(o: CallOpts): Uint8Array {
     const content = payload.initStruct(0, o.dwords ?? 1, o.pwords ?? 0);
     o.params?.(content);
   });
+}
+
+/** `Echo.hold` with a capability the driver hosts as export `id`. */
+function hold(q: number, id: number): Uint8Array {
+  const b = new MessageBuilder();
+  const root = b.initRoot(1, 1);
+  root.setU16(0, Message.call);
+  const c = root.initStruct(0, 3, 3);
+  c.setU32(0, q);
+  c.setU64(8, ECHO);
+  c.setU16(4, M.hold);
+  targetAnswer(c.initStruct(0, 1, 1), 0);
+  const payload = c.initStruct(1, 0, 2);
+  payload.initStruct(0, 0, 1).adopt(0, Orphan.cap(b, 0));
+  const table = payload.initCompositeList(1, 1, 1, 1);
+  table.setU16(0, 1);
+  table.setU32(4, id);
+  return b.toFlat();
 }
 
 function finish(q: number, releaseResultCaps = true): Uint8Array {
@@ -224,6 +251,25 @@ const SCENARIOS: Record<string, Step[]> = {
   provide: [bootstrap(0), W(100), provide(1)],
   accept: [accept(1)],
   join: [bootstrap(0), W(100), join(1)],
+  // Gap 7: callHeld tail-calls the capability the driver handed over.
+  "tail-call": [
+    bootstrap(0),
+    hold(1, 5),
+    W(100),
+    call({ q: 2, method: M.callHeld, target: (t) => targetAnswer(t, 0), params: (p) => p.setU32(0, 3) }),
+  ],
+  "tail-call-no-pipelining": [
+    bootstrap(0),
+    hold(1, 5),
+    W(100),
+    call({
+      q: 2,
+      method: M.callHeld,
+      target: (t) => targetAnswer(t, 0),
+      params: (p) => p.setU32(0, 3),
+      noPromisePipelining: true,
+    }),
+  ],
   "disembargo-provide": [bootstrap(0), W(100), disembargoProvide(1)],
   "disembargo-accept": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0, [0, 2]), 2)],
   "disembargo-unknown": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0), 9)],
@@ -318,6 +364,12 @@ function describe(f: Uint8Array): string {
       } else if (w === 1) rest = ` ${exc(body.getP(0))}`;
       else if (w === 4) rest = ` other=${body.getU32(8)}`;
       return `return a=${body.getU32(0)} ${RETURN_NAMES[w]}${rest}${flags.length ? ` {${flags.join(",")}}` : ""}`;
+    }
+    case Message.call: {
+      const t = body.getP(0);
+      const target = t.getU16(4) === 0 ? `import:${t.getU32(0)}` : `answer:${t.getP(0).getU32(0)}`;
+      const to = ["caller", "yourself", "thirdParty"][body.getU16(6)];
+      return `call q=${body.getU32(0)} method=${body.getU16(4)} target=${target} sendResultsTo=${to}`;
     }
     case Message.abort:
       return `abort ${exc(body)}`;

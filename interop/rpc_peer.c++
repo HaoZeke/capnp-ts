@@ -159,9 +159,14 @@ public:
 	}
 
 	kj::Promise<void> callHeld(CallHeldContext ctx) override {
-		auto req = held.incRequest();
-		req.setN(ctx.getParams().getN());
-		return req.send().then([ctx](auto r) mutable { ctx.getResults().setN(r.getN()); });
+		// A tail call, as the TypeScript server makes it: `Counter.inc`
+		// results have the same layout as `callHeld` results.
+		auto inc = held.incRequest();
+		inc.setN(ctx.getParams().getN());
+		Counter::IncParams::Builder params = inc;
+		auto hook = capnp::RequestHook::from(kj::mv(inc));
+		return ctx.tailCall(
+			capnp::Request<Counter::IncParams, Echo::CallHeldResults>(params, kj::mv(hook)));
 	}
 
 	kj::Promise<void> promiseOfHeld(PromiseOfHeldContext ctx) override {
