@@ -35,9 +35,7 @@ side() {
     fi
     wait "$SERVER" || true
     outcomes=$(grep -E '^(read|after|early): ' "$CLIENT" || true)
-    # Question 0's Finish is queued by the C++ client's destructor and
-    # sometimes never reaches the socket. Drop that one line on both sides.
-    sent=$(grep -v '^finish q=0$' "$OUT" | sed 's/^/sent /' || true)
+    sent=$(sed 's/^/sent /' "$OUT" || true)
     rm -f "$OUT" "$ERR" "$CLIENT"
     if printf '%s\n' "$outcomes" | grep -q '^read: '; then
       printf '%s\n%s\n' "$outcomes" "$sent"

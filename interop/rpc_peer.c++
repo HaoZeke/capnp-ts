@@ -579,6 +579,14 @@ void runClient(const std::string &addr, const std::vector<std::string> &only) {
 		std::cout << "early: " << outcome([&]() { earlyP.wait(ws); }) << std::endl;
 		ok("returncaps");
 	}
+	if (named(only, "returncaps")) {
+		// The request objects' destructors queue Finish. Pump it onto the
+		// socket before EzRpcClient is destroyed, or the write is dropped.
+		{
+			auto &timer = client.getIoProvider().getTimer();
+			timer.afterDelay(20 * kj::MILLISECONDS).wait(ws);
+		}
+	}
 
 	if (wants(only, "abort")) {
 		echo.pingRequest().send().wait(ws);
