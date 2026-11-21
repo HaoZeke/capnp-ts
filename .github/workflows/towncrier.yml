@@ -1,0 +1,25 @@
+name: Towncrier check
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  towncrier:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version: '3.12'
+    - run: python3 -m pip install --quiet towncrier
+    - env:
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
+      run: |
+        git fetch origin "$BASE_REF"
+        if ! towncrier check --compare-with "origin/${BASE_REF}"; then
+          echo "::error::Add docs/newsfragments/<issue>.<type>.md (see docs/newsfragments/README.md)"
+          exit 1
+        fi

@@ -1,0 +1,26 @@
+## Cocogitto config. Towncrier owns CHANGELOG.md; cog creates the bump commit and tag.
+## Run: cog bump --auto   (then push with --follow-tags; the tag triggers release.yml)
+from_latest_tag = true
+ignore_merge_commits = true
+disable_changelog = true
+skip_ci = "[skip ci]"
+branch_whitelist = ["main", "master"]
+tag_prefix = "v"
+
+pre_bump_hooks = [
+  "npm version {{version}} --workspaces --include-workspace-root --no-git-tag-version",
+  "sed -i 's/^version = \"[^\"]*\"/version = \"{{version}}\"/' towncrier.toml",
+  "towncrier build --version {{version}} --date $(date +%Y-%m-%d) --yes",
+  "python3 scripts/release_notes.py {{version}} > /dev/null",
+]
+
+[commit_types]
+feat = { changelog_title = "Features" }
+fix = { changelog_title = "Bug Fixes" }
+docs = { changelog_title = "Documentation" }
+refactor = { changelog_title = "Refactoring" }
+perf = { changelog_title = "Performance" }
+test = { changelog_title = "Tests" }
+build = { changelog_title = "Build" }
+ci = { changelog_title = "CI" }
+chore = { changelog_title = "Chores" }
