@@ -9,6 +9,7 @@
 // exit status.
 #include "interop.capnp.h"
 #include <capnp/ez-rpc.h>
+#include <capnp/membrane.h>
 #include <capnp/rpc-twoparty.h>
 #include <kj/async-io.h>
 #include <kj/async.h>
@@ -210,6 +211,35 @@ private:
 
 void ok(const char *name) {
 	std::cout << "ok " << name << std::endl;
+}
+
+// A membrane policy that passes every call and cuts everything on revoke().
+class RevocablePolicy final : public capnp::MembranePolicy, public kj::Refcounted {
+public:
+	RevocablePolicy(kj::PromiseFulfillerPair<void> paf = kj::newPromiseAndFulfiller<void>())
+	    : fulfiller(kj::mv(paf.fulfiller)), revoked(paf.promise.fork()) {}
+	kj::Maybe<capnp::Capability::Client> inboundCall(uint64_t, uint16_t, capnp::Capability::Client) override {
+		return nullptr;
+	}
+	kj::Maybe<capnp::Capability::Client> outboundCall(uint64_t, uint16_t, capnp::Capability::Client) override {
+		return nullptr;
+	}
+	kj::Own<capnp::MembranePolicy> addRef() override { return kj::addRef(*this); }
+	kj::Maybe<kj::Promise<void>> onRevoked() override { return revoked.addBranch(); }
+	void revoke(const char *why) { fulfiller->reject(KJ_EXCEPTION(DISCONNECTED, why)); }
+
+private:
+	kj::Own<kj::PromiseFulfiller<void>> fulfiller;
+	kj::ForkedPromise<void> revoked;
+};
+
+template <typename F> bool failsWith(F &&f, const char *text) {
+	KJ_IF_MAYBE(e, kj::runCatchingExceptions(kj::fwd<F>(f))) {
+		KJ_REQUIRE(std::string(e->getDescription().cStr()).find(text) != std::string::npos,
+		           e->getDescription());
+		return true;
+	}
+	return false;
 }
 
 bool wants(const std::vector<std::string> &only, const char *name) {
@@ -460,6 +490,64 @@ void runClient(const std::string &addr, const std::vector<std::string> &only) {
 		save.setSealFor("bob");
 		KJ_REQUIRE(std::string(save.send().wait(ws).getSturdyRef().cStr()) == "ref-for-bob");
 		ok("persistent");
+	}
+
+	if (wants(only, "membrane")) {
+		// A capnp-C++ membrane around the TypeScript bootstrap capability.
+		auto policy = kj::refcounted<RevocablePolicy>();
+		auto &revocable = *policy;
+		Echo::Client outside = capnp::membrane(Echo::Client(echo), kj::mv(policy));
+		auto ping = outside.pingRequest();
+		ping.setN(1);
+		KJ_REQUIRE(ping.send().wait(ws).getN() == 2);
+
+		// A capability of ours that crosses the membrane and comes back is
+		// ours again, so revocation leaves it alone.
+		class Mine final : public Counter::Server {
+		public:
+			Mine(unsigned &calls) : calls(calls) {}
+			kj::Promise<void> inc(IncContext ctx) override {
+				++calls;
+				ctx.getResults().setN(ctx.getParams().getN() + 100);
+				return kj::READY_NOW;
+			}
+			unsigned &calls;
+		};
+		unsigned calls = 0;
+		auto echoed = outside.echoCapRequest();
+		echoed.setCap(kj::heap<Mine>(calls));
+		auto back = echoed.send().wait(ws).getCap();
+
+		// A capability the TypeScript side returns is behind the membrane too.
+		auto counter = outside.makeCounterRequest().send().wait(ws).getCounter();
+		auto inc = counter.incRequest();
+		inc.setN(1);
+		KJ_REQUIRE(inc.send().wait(ws).getN() == 2);
+
+		auto before = echo.statsRequest().send().wait(ws).getCancelled();
+		auto pending = outside.slowRequest().send();
+		echo.pingRequest().send().wait(ws);
+		revocable.revoke("access withdrawn");
+		KJ_REQUIRE(failsWith([&]() { pending.wait(ws); }, "access withdrawn"));
+		KJ_REQUIRE(failsWith([&]() { counter.incRequest().send().wait(ws); }, "access withdrawn"));
+		KJ_REQUIRE(failsWith([&]() { outside.pingRequest().send().wait(ws); }, "access withdrawn"));
+		auto &timer = client.getIoProvider().getTimer();
+		auto cancelled = before;
+		for (int i = 0; i < 50 && cancelled == before; i++) {
+			timer.afterDelay(10 * kj::MILLISECONDS).wait(ws);
+			cancelled = echo.statsRequest().send().wait(ws).getCancelled();
+		}
+		KJ_REQUIRE(cancelled == before + 1, "the revoked call was never canceled", cancelled, before);
+		echo.unblockRequest().send().wait(ws);
+
+		auto mine = back.incRequest();
+		mine.setN(1);
+		KJ_REQUIRE(mine.send().wait(ws).getN() == 101);
+		KJ_REQUIRE(calls == 1, calls);
+		auto plain = echo.pingRequest();
+		plain.setN(5);
+		KJ_REQUIRE(plain.send().wait(ws).getN() == 6);
+		ok("membrane");
 	}
 
 	if (wants(only, "abort")) {

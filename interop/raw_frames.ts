@@ -334,6 +334,27 @@ const SCENARIOS: Record<string, Step[]> = {
     W(100),
     disembargoLoopback((t) => targetAnswer(t, 1, [0]), 3),
   ],
+  // senderLoopback aimed at an exported null capability, and at the promise
+  // export that resolved to it. The C++ peer shares one Echo between
+  // connections, so each first holds a null capability pointer.
+  "loopback-null-export": [
+    bootstrap(0),
+    call({ q: 1, method: M.hold, target: (t) => targetAnswer(t, 0), dwords: 0, pwords: 1 }),
+    call({ q: 2, method: M.promiseOfHeld, target: (t) => targetAnswer(t, 0) }),
+    W(100),
+    call({ q: 3, method: M.resolveHeld, target: (t) => targetAnswer(t, 0) }),
+    W(100),
+    disembargoLoopback((t) => targetImport(t, 2), 3),
+  ],
+  "loopback-null-promise": [
+    bootstrap(0),
+    call({ q: 1, method: M.hold, target: (t) => targetAnswer(t, 0), dwords: 0, pwords: 1 }),
+    call({ q: 2, method: M.promiseOfHeld, target: (t) => targetAnswer(t, 0) }),
+    W(100),
+    call({ q: 3, method: M.resolveHeld, target: (t) => targetAnswer(t, 0) }),
+    W(100),
+    disembargoLoopback((t) => targetImport(t, 1), 3),
+  ],
   // Gap 13: senderLoopback aimed at the peer's own local bootstrap.
   "loopback-local": [bootstrap(0), W(100), disembargoLoopback((t) => targetImport(t, 0), 3)],
   // Gap 14: Abort with a null exception and with a trace.
