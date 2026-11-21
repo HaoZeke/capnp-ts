@@ -954,6 +954,99 @@ describe("eval -o json goldens from capnp 1.4.0", () => {
   }
 });
 
+describe("input plausibility like capnp 1.4.0", () => {
+  const abCgr = join(goldenDir, "addressbook.cgr.bin");
+  const bytes = (...b: number[]) => Uint8Array.from(b);
+  const emptyRoot = bytes(0, 0, 0, 0, 1, 0, 0, 0, 0xfc, 0xff, 0xff, 0xff, 0, 0, 0, 0);
+  const wrongTypeFlat = bytes(0, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  const typeWarning =
+    "*** WARNING ***\n" +
+    "The input data does not appear to be the type that you specified.  I'll try\n" +
+    "to parse it anyway, but if it doesn't look right, please verify that you\n" +
+    "have the right type.  Use --quiet to suppress this warning.\n" +
+    "*** END WARNING ***";
+
+  test("rejects a binary empty-struct root and suggests flat", async () => {
+    const r = await execCliInMemory(["convert", "binary:json", abCgr, "AddressBook"], emptyRoot);
+    expect(r.code).toBe(1);
+    expect(r.stdout.byteLength).toBe(0);
+    expect(r.stderr).toBe(
+      'capnp-ts: The input is not in "binary" format. It looks like it is in "flat" format. Try that instead.',
+    );
+  });
+
+  test("--quiet skips the check", async () => {
+    const r = await execCliInMemory(["decode", "--quiet", abCgr, "AddressBook"], emptyRoot);
+    expect(r.code).toBe(0);
+    expect(new TextDecoder().decode(r.stdout)).toBe("()\n");
+  });
+
+  test("text input names the format it resembles", async () => {
+    const r = await execCliInMemory(
+      ["convert", "text:binary", abCgr, "AddressBook"],
+      new TextEncoder().encode("hello"),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toBe(
+      'capnp-ts: The input is not in "text" format. It looks like it is in "binary" format. Try that instead.',
+    );
+  });
+
+  test("a zero byte literal in packed input is impossible", async () => {
+    const r = await execCliInMemory(
+      ["convert", "flat-packed:text", abCgr, "AddressBook"],
+      bytes(1, 0, 0, 0, 0, 0, 0, 0),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toBe(
+      'capnp-ts: The input is not in "flat-packed" format. It looks like it is in "binary" format. Try that instead.',
+    );
+  });
+
+  test("a root of the wrong size warns and still converts", async () => {
+    const r = await execCliInMemory(["convert", "flat:text", abCgr, "AddressBook"], wrongTypeFlat);
+    expect(r.code).toBe(0);
+    expect(new TextDecoder().decode(r.stdout)).toBe("()\n");
+    expect(r.stderr).toBe(typeWarning);
+  });
+
+  test("an implausible flat root warns before the read fails", async () => {
+    const r = await execCliInMemory(
+      ["convert", "flat:json", abCgr, "AddressBook"],
+      bytes(0, 0, 0, 0, 0, 8, 1, 0),
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr.split("\n").slice(0, 6).join("\n")).toBe(
+      "*** WARNING ***\n" +
+        'The input data does not appear to be in "flat" format. It\n' +
+        'looks like it may be in "binary" format. I\'ll try to parse\n' +
+        'it in "flat" format as you requested, but if it doesn\'t work,\n' +
+        'try "flat" instead. Use --quiet to suppress this warning.\n' +
+        "*** END WARNING ***",
+    );
+  });
+
+  test.skipIf(!hasCapnp)("matches live capnp on stdout and exit code", async () => {
+    const schemaPath = join(repoRoot, "schema", "addressbook.capnp");
+    const cases: [string[], Uint8Array][] = [
+      [["convert", "binary:json"], emptyRoot],
+      [["decode", "--quiet"], emptyRoot],
+      [["convert", "flat:text"], wrongTypeFlat],
+      [["convert", "text:binary"], new TextEncoder().encode("hello")],
+      [["convert", "flat-packed:text"], bytes(1, 0, 0, 0, 0, 0, 0, 0)],
+    ];
+    for (const [args, input] of cases) {
+      const live = execCapnp([...args, schemaPath, "AddressBook"], input);
+      const ours = await execCliInMemory([...args, abCgr, "AddressBook"], input);
+      expect({ args, code: ours.code, stdout: [...ours.stdout] }).toEqual({
+        args,
+        code: live.code,
+        stdout: [...live.stdout],
+      });
+    }
+  });
+});
+
 describe("eval of an unset struct field", () => {
   const unionCgr = join(goldenDir, "eval-unions.cgr.bin");
   const expected: [string, number[]][] = [

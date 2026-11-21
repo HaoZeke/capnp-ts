@@ -139,7 +139,7 @@ function* iterateFramedMessages(input: Uint8Array): Generator<Message> {
   }
 }
 
-/** `capnp` checks this many leading bytes before reading text or JSON. */
+/** `capnp` checks this many leading bytes before reading any input. */
 const SNIFF_BYTES = 8192;
 
 /**
@@ -209,12 +209,202 @@ function isPlausiblyJson(prefix: Uint8Array): boolean {
   return true;
 }
 
+/** The `capnp` CLI's verdict on whether input is in the format named. */
+type Plausibility = "impossible" | "implausible" | "wrongType" | "plausible";
+
+function plausibleOrWrongType(p: Plausibility): boolean {
+  return p === "plausible" || p === "wrongType";
+}
+
+function loadU32At(prefix: Uint8Array, at: number): number {
+  return (prefix[at]! | (prefix[at + 1]! << 8) | (prefix[at + 2]! << 16) | (prefix[at + 3]! << 24)) >>> 0;
+}
+
+/**
+ * The `capnp` CLI's `isPlausiblyFlat`. Its empty-struct exception names
+ * `ff ff ff ff 00 00 00 00`, which the tag check before it already refuses,
+ * so a zero-sized root struct (offset -1) counts as a negative offset.
+ */
+function isPlausiblyFlat(
+  prefix: Uint8Array,
+  rootSchema: StructSchema | undefined,
+  segmentCount = 1,
+): Plausibility {
+  if (prefix.byteLength < 8) return "plausible";
+  if ((prefix[0]! & 3) === 2) {
+    const segmentId = loadU32At(prefix, 4);
+    return segmentId === 0 || segmentId >= segmentCount ? "impossible" : "plausible";
+  }
+  if ((prefix[0]! & 3) !== 0) return "impossible";
+  if ((prefix[3]! & 0x80) !== 0) return "impossible";
+  if ((prefix[3]! & 0xe0) !== 0) return "implausible";
+  const data = prefix[4]! | (prefix[5]! << 8);
+  const pointers = prefix[6]! | (prefix[7]! << 8);
+  if (data + pointers > 2048) return "implausible";
+  const dw = rootSchema?.dataWordCount ?? 0;
+  const pw = rootSchema?.pointerCount ?? 0;
+  if ((data < dw && pointers > pw) || (data > dw && pointers < pw)) return "wrongType";
+  if (data > dw && data - dw > 128) return "wrongType";
+  if (pointers > pw && pointers - pw > 128) return "wrongType";
+  return "plausible";
+}
+
+/** The `capnp` CLI's `isPlausiblyBinary`; the segment count wraps like a `uint32_t`. */
+function isPlausiblyBinary(prefix: Uint8Array, rootSchema: StructSchema | undefined): Plausibility {
+  if (prefix.byteLength < 8) return "plausible";
+  const segmentCount = (loadU32At(prefix, 0) + 1) >>> 0;
+  if (segmentCount > 65536) return "impossible";
+  if (segmentCount > 256) return "implausible";
+  if (loadU32At(prefix, 4) > 1 << 27) return "implausible";
+  let segment0Offset = 4 + segmentCount * 4;
+  if (segment0Offset % 8 !== 0) segment0Offset += 4;
+  if (prefix.byteLength < segment0Offset + 8) return "plausible";
+  return isPlausiblyFlat(prefix.subarray(segment0Offset), rootSchema, segmentCount);
+}
+
+/** The `capnp` CLI's `isPlausiblyPacked`: unpack at most 1 KiB, then check that. */
+function isPlausiblyPacked(
+  prefix: Uint8Array,
+  checkUnpacked: (unpacked: Uint8Array) => Plausibility,
+): Plausibility {
+  const unpacked: number[] = [];
+  let pos = 0;
+  const end = Math.min(prefix.byteLength, 1024);
+  while (pos < end) {
+    const tag = prefix[pos++]!;
+    for (let i = 0; i < 8 && pos < end; i++) {
+      if (tag & (1 << i)) {
+        const b = prefix[pos++]!;
+        if (b === 0) return "impossible";
+        unpacked.push(b);
+      } else {
+        unpacked.push(0);
+      }
+    }
+    if (pos === end) break;
+    if (tag === 0) {
+      const count = prefix[pos++]! * 8;
+      for (let i = 0; i < count; i++) unpacked.push(0);
+    } else if (tag === 0xff) {
+      const count = prefix[pos++]! * 8;
+      const n = Math.min(count, end - pos);
+      for (let i = 0; i < n; i++) unpacked.push(prefix[pos + i]!);
+      pos += n;
+    }
+  }
+  return checkUnpacked(Uint8Array.from(unpacked));
+}
+
+function isPlausibly(
+  format: WireFormat,
+  prefix: Uint8Array,
+  rootSchema: StructSchema | undefined,
+): Plausibility {
+  switch (format) {
+    case "binary":
+      return isPlausiblyBinary(prefix, rootSchema);
+    case "packed":
+      return isPlausiblyPacked(prefix, (u) => isPlausiblyBinary(u, rootSchema));
+    case "flat":
+    case "canonical":
+      return isPlausiblyFlat(prefix, rootSchema);
+    case "flat-packed":
+      return isPlausiblyPacked(prefix, (u) => isPlausiblyFlat(u, rootSchema));
+    case "text":
+      return isPlausiblyText(prefix) ? "plausible" : "impossible";
+    case "json":
+      return isPlausiblyJson(prefix) ? "plausible" : "impossible";
+  }
+}
+
+const GUESS_ORDER: readonly WireFormat[] = ["binary", "text", "packed", "json", "flat", "flat-packed"];
+
+function guessFormat(prefix: Uint8Array, rootSchema: StructSchema | undefined): WireFormat | null {
+  return GUESS_ORDER.find((f) => plausibleOrWrongType(isPlausibly(f, prefix, rootSchema))) ?? null;
+}
+
+/**
+ * The `capnp` CLI's `checkPlausibility` on the first buffered read: throw
+ * when the input cannot be in `format`, and warn when it looks unlikely.
+ */
+function checkPlausibility(
+  format: WireFormat,
+  prefix: Uint8Array,
+  rootSchema: StructSchema | undefined,
+  warn: (message: string) => void,
+): void {
+  const verdict = isPlausibly(format, prefix, rootSchema);
+  if (verdict === "plausible") return;
+  const guess = guessFormat(prefix, rootSchema);
+  if (verdict === "impossible") {
+    throw new CapnpError(
+      "ARG",
+      guess === null
+        ? `The input is not in "${format}" format.`
+        : `The input is not in "${format}" format. It looks like it is in "${guess}" format. Try that instead.`,
+    );
+  }
+  if (verdict === "implausible") {
+    warn(
+      guess === null
+        ? "*** WARNING ***\n" +
+            `The input data does not appear to be in "${format}" format, nor\n` +
+            `in any other known format. I'll try to parse it in "${format}"\n` +
+            "format anyway, as you requested. Use --quiet to suppress this warning.\n" +
+            "*** END WARNING ***"
+        : "*** WARNING ***\n" +
+            `The input data does not appear to be in "${format}" format. It\n` +
+            `looks like it may be in "${guess}" format. I'll try to parse\n` +
+            `it in "${format}" format as you requested, but if it doesn't work,\n` +
+            `try "${format}" instead. Use --quiet to suppress this warning.\n` +
+            "*** END WARNING ***",
+    );
+    return;
+  }
+  if (format === "flat" && plausibleOrWrongType(isPlausiblyBinary(prefix, rootSchema))) {
+    warn(
+      "*** WARNING ***\n" +
+        "The input data does not appear to match the schema that you specified. I'll try\n" +
+        "to parse it anyway, but if it doesn't look right, please verify that you\n" +
+        'have the right schema. This could also be because the input is not in "flat"\n' +
+        "format; indeed, it looks like this input may be in regular binary format,\n" +
+        'so you might want to try "binary" instead.  Use --quiet to suppress this\n' +
+        "warning.\n" +
+        "*** END WARNING ***",
+    );
+  } else if (
+    format === "flat-packed" &&
+    plausibleOrWrongType(isPlausibly("packed", prefix, rootSchema))
+  ) {
+    warn(
+      "*** WARNING ***\n" +
+        "The input data does not appear to match the schema that you specified. I'll try\n" +
+        "to parse it anyway, but if it doesn't look right, please verify that you\n" +
+        'have the right schema. This could also be because the input is not in "flat-packed"\n' +
+        "format; indeed, it looks like this input may be in regular packed format,\n" +
+        'so you might want to try "packed" instead.  Use --quiet to suppress this\n' +
+        "warning.\n" +
+        "*** END WARNING ***",
+    );
+  } else {
+    warn(
+      "*** WARNING ***\n" +
+        "The input data does not appear to be the type that you specified.  I'll try\n" +
+        "to parse it anyway, but if it doesn't look right, please verify that you\n" +
+        "have the right type.  Use --quiet to suppress this warning.\n" +
+        "*** END WARNING ***",
+    );
+  }
+}
+
 export interface ReadFormatOptions {
   /**
-   * Skip the check that text or JSON input looks like that format, like
+   * Skip the check that the input looks like the format named, like
    * `capnp convert --quiet`.
    */
   quiet?: boolean;
+  /** Receives the warnings `capnp` prints for input that looks unlikely. */
+  warn?: (message: string) => void;
 }
 
 /** Read zero or more messages from `input` in `from` format. */
@@ -248,6 +438,9 @@ function* iterateMessagesInFormat(
   opts?: ReadFormatOptions & { recover?: boolean },
 ): Generator<StreamMessage> {
   if (input.byteLength === 0) return;
+  if (opts?.quiet !== true) {
+    checkPlausibility(from, input.subarray(0, SNIFF_BYTES), rootSchema, opts?.warn ?? (() => {}));
+  }
   const wrap = function* (messages: Iterable<Message>): Generator<StreamMessage> {
     for (const message of messages) yield { message };
   };
@@ -299,11 +492,6 @@ function* iterateMessagesInFormat(
         "ARG",
         "text format requires <schema> and <type>",
       );
-      assertCapnp(
-        opts?.quiet === true || isPlausiblyText(input.subarray(0, SNIFF_BYTES)),
-        "ARG",
-        'The input is not in "text" format.',
-      );
       const source = Array.from(input, (byte) => String.fromCharCode(byte)).join("");
       for (const slice of splitTextMessages(source)) {
         const builder = new MessageBuilder();
@@ -323,11 +511,6 @@ function* iterateMessagesInFormat(
         rootSchema !== undefined,
         "ARG",
         "json format requires <schema> and <type>",
-      );
-      assertCapnp(
-        opts?.quiet === true || isPlausiblyJson(input.subarray(0, SNIFF_BYTES)),
-        "ARG",
-        'The input is not in "json" format.',
       );
       const source = Array.from(input, (byte) => String.fromCharCode(byte)).join("");
       for (const slice of splitJsonMessages(source)) {
@@ -450,6 +633,7 @@ function writeConvertedStream(
   let status = 0;
   for (const { message, error } of iterateMessagesInFormat(input, from, rootSchema, {
     quiet: opts.quiet,
+    warn: writeErr,
     recover: true,
   })) {
     writeOut(writeMessageInFormat(message, to, rootSchema, opts));
@@ -1107,7 +1291,7 @@ export async function runCli(
         from,
         "text",
         rootSchema,
-        { short: flags.short },
+        { short: flags.short, quiet: flags.quiet },
         writeOut,
         writeErr,
       );
