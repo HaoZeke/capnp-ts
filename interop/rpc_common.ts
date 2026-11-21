@@ -132,7 +132,8 @@ export class EchoImpl implements RpcServer {
   private gates: Array<() => void> = [];
   private fulfillCounter: ((c: Client) => void) | undefined;
   private fulfillHeld: ((c: Client) => void) | undefined;
-  private held: Client | undefined;
+  // As the C++ Echo's `Counter::Client held = nullptr`.
+  private held = new Client(newNullCap());
 
   constructor(private readonly onDie: () => void = () => {}) {}
 
@@ -215,13 +216,15 @@ export class EchoImpl implements RpcServer {
           newBrokenCap(new RpcError("broken on purpose")),
         );
         return;
-      case m.hold.ordinal:
-        this.held?.release();
-        this.held = new Client(ctx.getCap(params.getP(0)));
+      case m.hold.ordinal: {
+        const cap = new Client(ctx.getCap(params.getP(0)));
+        this.held.release();
+        this.held = cap;
         return;
+      }
       case m.callHeld.ordinal: {
         const n = params.getU32(0);
-        return ctx.tailCall(this.held!, COUNTER_INTERFACE_ID, 0, (p) => p.setU32(0, n), 1, 0);
+        return ctx.tailCall(this.held, COUNTER_INTERFACE_ID, 0, (p) => p.setU32(0, n), 1, 0);
       }
       case m.promiseOfHeld.ordinal: {
         const promise = Client.fromPromise(
@@ -231,7 +234,7 @@ export class EchoImpl implements RpcServer {
         return;
       }
       case m.resolveHeld.ordinal:
-        this.fulfillHeld?.(this.held?.dup() ?? new Client(newNullCap()));
+        this.fulfillHeld?.(this.held.dup());
         this.fulfillHeld = undefined;
         return;
       case m.openSink.ordinal:
