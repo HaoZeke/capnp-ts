@@ -11,6 +11,7 @@
  * knowledge of the wire beyond which message to ask for.
  */
 import type { StructBuilder } from "@haozeke/capnp";
+import { closeSync } from "node:fs";
 
 import { WindowFlowController } from "./flow.ts";
 
@@ -135,13 +136,29 @@ const RECEIVER_ANSWER = 4;
 export class ImportClient extends RefHook implements RpcClientHook {
   flow: WindowFlowController;
   readonly adoptedFlows: WindowFlowController[] = [];
+  /** FD received with this import. Closed on drop only when this process owns it. */
+  private attachedFd: number | undefined;
+  private ownsFd = false;
 
   constructor(
     private readonly host: RemoteHost,
     readonly importId: number,
+    fd?: number,
+    ownsFd = false,
   ) {
     super();
     this.flow = host.createFlowController();
+    this.attachedFd = fd;
+    this.ownsFd = ownsFd && fd !== undefined;
+  }
+
+  /** Keep the first FD. A later descriptor that names the same import adds none. */
+  adoptFd(fd: number): void {
+    if (this.attachedFd === undefined) this.attachedFd = fd;
+  }
+
+  getFd(): number | undefined {
+    return this.attachedFd;
   }
 
   adoptFlow(incoming: WindowFlowController): void {
@@ -212,6 +229,14 @@ export class ImportClient extends RefHook implements RpcClientHook {
   }
 
   protected dispose(): void {
+    if (this.ownsFd && this.attachedFd !== undefined) {
+      try {
+        closeSync(this.attachedFd);
+      } catch {
+        // The descriptor may already be closed.
+      }
+    }
+    this.attachedFd = undefined;
     this.host.importDropped(this.importId, this);
   }
 }
@@ -347,6 +372,15 @@ export class PromiseClient extends RefHook implements RpcClientHook {
 
   getResolved(): ClientHook | undefined {
     return this.resolved ? this.cap : undefined;
+  }
+
+  /**
+   * Unresolved promises do not expose an FD. A resolved one uses the
+   * target's FD. See `PromiseClient::getFd` in `rpc.c++`.
+   */
+  getFd(): number | undefined {
+    if (!this.resolved) return undefined;
+    return this.cap.getFd?.();
   }
 
   /**

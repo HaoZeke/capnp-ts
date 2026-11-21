@@ -13,6 +13,7 @@
  * the second half; both need a vat that spans connections, which is
  * `Vat`.
  */
+import { closeSync } from "node:fs";
 import {
   ElemSize,
   Message as CapnpMessage,
@@ -71,6 +72,7 @@ import {
   CAP_DESCRIPTOR_DWORDS,
   CAP_DESCRIPTOR_PWORDS,
   CapDescriptor,
+  CapDescriptor_getAttachedFd,
   CapDescriptor_getReceiverAnswer,
   CapDescriptor_getReceiverHosted,
   CapDescriptor_getSenderHosted,
@@ -250,7 +252,6 @@ function segmentWords(frame: Uint8Array): number {
 
 const REMOTE_PREFIX = "remote exception: ";
 
-/** A received exception, as capnp-C++ `toException()` reads one for every message kind. */
 /**
  * Write an exception string. Bytes above 127 and interior NULs stay raw,
  * matching the `char` values kj puts in the description.
@@ -527,6 +528,9 @@ class TribbleRaceBlocker extends RefHook implements ClientHook {
   whenMoreResolved(): undefined {
     return undefined;
   }
+  getFd(): number | undefined {
+    return this.inner.getFd?.();
+  }
   call(interfaceId: bigint, methodId: number, params: Payload, opts?: CallOptions): CallState {
     return this.inner.call(interfaceId, methodId, params, opts);
   }
@@ -636,6 +640,12 @@ export class RpcConnection implements RemoteHost {
   private gotReturnForHighQuestionId = false;
   private nextEmbargoId = 0;
   private gone: RpcError | undefined;
+  /** FDs to send with the message currently being built. */
+  private outFds: number[] = [];
+  /** FDs that arrived with the frame `pumpOnce` is handling. */
+  private messageFds: Array<number | undefined> = [];
+  /** True when `messageFds` are OS descriptors the import must close. */
+  private ownsMessageFds = false;
 
   private readonly windowGetter: WindowGetter;
   private flowLimit: number;
@@ -720,6 +730,8 @@ export class RpcConnection implements RemoteHost {
       return false;
     }
     const frame = this.transport.receive();
+    this.messageFds = [...(this.transport.receivedFds?.() ?? [])];
+    this.ownsMessageFds = this.transport.ownsReceivedFds?.() ?? false;
     if (frame === null) {
       if (this.transport.closed) this.disconnect(new RpcError("transport closed", "disconnected"));
       return false;
@@ -799,6 +811,14 @@ export class RpcConnection implements RemoteHost {
     return n;
   }
 
+  /** Send `frame`, attaching any FDs `writeDescriptor` collected for it. */
+  private sendFlat(frame: Uint8Array): void {
+    const fds = this.outFds;
+    this.outFds = [];
+    if (fds.length > 0) this.transport.send(frame, fds);
+    else this.transport.send(frame);
+  }
+
   /**
    * Handle pending messages one at a time, with a microtask between them.
    * capnp-C++ `messageLoop` uses `kj::evalLater` so a ready promise's
@@ -874,6 +894,12 @@ export class RpcConnection implements RemoteHost {
    */
   private writeDescriptor(hook: ClientHook, desc: StructBuilder): number | undefined {
     const inner = innermost(hook);
+    const fd = inner.getFd?.();
+    if (fd !== undefined) {
+      // Schema default is 0xff, so the wire byte is the index XOR 255.
+      desc.setU8(2, this.outFds.length, 255);
+      this.outFds.push(fd);
+    }
     if (isNullCap(inner)) {
       desc.setU16(OFF.capDescriptorUnion, CapDescriptor.none);
       return undefined;
@@ -920,7 +946,7 @@ export class RpcConnection implements RemoteHost {
       const resolve = root.initStruct(0, RESOLVE_DWORDS, RESOLVE_PWORDS);
       resolve.setU32(0, exportId);
       fill(resolve);
-      this.transport.send(b.toFlat());
+      this.sendFlat(b.toFlat());
     };
     eventual.then(
       (resolution) => {
@@ -1028,7 +1054,7 @@ export class RpcConnection implements RemoteHost {
 
   // --- imports --------------------------------------------------------
 
-  private importCap(importId: number, isPromise: boolean): ClientHook {
+  private importCap(importId: number, isPromise: boolean, fd?: number): ClientHook {
     let imp = this.imports.get(importId);
     if (imp === undefined) {
       imp = { remoteRefs: 0 };
@@ -1037,8 +1063,9 @@ export class RpcConnection implements RemoteHost {
     imp.remoteRefs++;
     const importClient =
       imp.importClient === undefined
-        ? (imp.importClient = new ImportClient(this, importId))
+        ? (imp.importClient = new ImportClient(this, importId, fd, this.ownsMessageFds))
         : imp.importClient.addRef();
+    if (fd !== undefined && imp.importClient !== undefined) imp.importClient.adoptFd(fd);
 
     if (!isPromise) {
       imp.appClient ??= importClient;
@@ -1068,19 +1095,40 @@ export class RpcConnection implements RemoteHost {
     if (imp !== undefined && imp.appClient === client) imp.appClient = undefined;
   }
 
+  private dropFd(fd: number | undefined): void {
+    if (fd === undefined || !this.ownsMessageFds) return;
+    try {
+      closeSync(fd);
+    } catch {
+      // The descriptor may already be closed.
+    }
+  }
+
+  /** FD named by this descriptor, taken so a second use sees none. */
+  private takeAttachedFd(desc: Ptr): number | undefined {
+    const index = CapDescriptor_getAttachedFd(desc);
+    if (index >= this.messageFds.length) return undefined;
+    const fd = this.messageFds[index];
+    this.messageFds[index] = undefined;
+    return fd;
+  }
+
   /** Make a hook from one entry of a received cap table. */
   private receiveCap(desc: Ptr): ClientHook {
     if (desc.kind !== PtrKind.Struct) {
       return new NoneEntry();
     }
+    const fd = this.takeAttachedFd(desc);
     switch (CapDescriptor_which(desc)) {
       case CapDescriptor.none:
+        this.dropFd(fd);
         return new NoneEntry();
       case CapDescriptor.senderHosted:
-        return this.importCap(CapDescriptor_getSenderHosted(desc), false);
+        return this.importCap(CapDescriptor_getSenderHosted(desc), false, fd);
       case CapDescriptor.senderPromise:
-        return this.importCap(CapDescriptor_getSenderPromise(desc), true);
+        return this.importCap(CapDescriptor_getSenderPromise(desc), true, fd);
       case CapDescriptor.receiverHosted: {
+        this.dropFd(fd);
         const slot = this.exports.get(CapDescriptor_getReceiverHosted(desc));
         if (slot === undefined) {
           return new BrokenClient(new RpcError("invalid 'receiverHosted' export ID"));
@@ -1089,6 +1137,7 @@ export class RpcConnection implements RemoteHost {
         return hook.brand === this ? new TribbleRaceBlocker(hook) : hook;
       }
       case CapDescriptor.receiverAnswer: {
+        this.dropFd(fd);
         const hook = this.pipelinedCap(CapDescriptor_getReceiverAnswer(desc), "descriptor");
         if (hook === undefined) {
           return new BrokenClient(new RpcError("invalid 'receiverAnswer'"));
@@ -1100,7 +1149,7 @@ export class RpcConnection implements RemoteHost {
         // The vine is an ordinary import through the introducer, which is
         // the fallback the spec gives a receiver that cannot reach the
         // third party; the introduction is recorded for whoever can.
-        const vine = this.importCap(ThirdPartyCapDescriptor_getVineId(tp), false);
+        const vine = this.importCap(ThirdPartyCapDescriptor_getVineId(tp), false, fd);
         const nonce = this.noteIntroduction(tp);
         if (nonce !== undefined) {
           this.introductionHooks.get(nonce)?.release();
@@ -1109,6 +1158,7 @@ export class RpcConnection implements RemoteHost {
         return vine;
       }
       default:
+        this.dropFd(fd);
         this.abort(new RpcError("unknown CapDescriptor type"));
         return new BrokenClient(new RpcError("unknown CapDescriptor type"));
     }
@@ -1195,7 +1245,7 @@ export class RpcConnection implements RemoteHost {
     // send their own Release. Results never received are abandoned here.
     finish.setBool(OFF.finishReleaseResultCaps, !q.returned, true);
     finish.setBool(OFF.finishRequireEarly, false, true);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
   }
 
   /** Ask for the peer's bootstrap capability. Returns the questionId. */
@@ -1226,7 +1276,7 @@ export class RpcConnection implements RemoteHost {
     const bs = root.initStruct(0, BOOTSTRAP_DWORDS, BOOTSTRAP_PWORDS);
     bs.setU32(OFF.bootstrapQuestionId, question.id);
     if (name !== undefined) bs.setText(0, name);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
     return question;
   }
 
@@ -1286,7 +1336,7 @@ export class RpcConnection implements RemoteHost {
     );
     const frame = b.toFlat();
     q.call.wireSize = frame.length;
-    this.transport.send(frame);
+    this.sendFlat(frame);
     return q.call;
   }
 
@@ -1399,7 +1449,7 @@ export class RpcConnection implements RemoteHost {
     const vat = rid.initStruct(0, VAT_ID_DWORDS, VAT_ID_PWORDS);
     vat.setText(0, recipient.host);
     vat.setU16(0, recipient.port);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
     return id;
   }
 
@@ -1418,7 +1468,7 @@ export class RpcConnection implements RemoteHost {
     accept.setU32(0, id);
     if (embargo) accept.setBool(32, true);
     accept.initStruct(0, PROVISION_ID_DWORDS, PROVISION_ID_PWORDS).setU64(0, nonce);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
     return id;
   }
 
@@ -1444,7 +1494,7 @@ export class RpcConnection implements RemoteHost {
     key.setU32(0, joinId);
     key.setU16(4, partCount);
     key.setU16(6, partNum);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
     return id;
   }
 
@@ -1457,7 +1507,7 @@ export class RpcConnection implements RemoteHost {
     const dis = root.initStruct(0, DISEMBARGO_DWORDS, DISEMBARGO_PWORDS);
     dis.setU16(OFF.disembargoContextUnion, Disembargo_context.provide);
     dis.setU32(0, provideQuestionId);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
   }
 
   /** Stop caring about a question: its answer is dropped, a pending call canceled. */
@@ -1471,7 +1521,7 @@ export class RpcConnection implements RemoteHost {
     const rel = root.initStruct(0, RELEASE_DWORDS, RELEASE_PWORDS);
     rel.setU32(0, importId);
     rel.setU32(4, count);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
   }
 
   private handleReturn(ret: Ptr, frame: Uint8Array): void {
@@ -1632,7 +1682,7 @@ export class RpcConnection implements RemoteHost {
     ret.setU32(OFF.returnAnswerId, questionId);
     ret.setU16(OFF.returnUnion, Return.resultsSentElsewhere);
     ret.setBool(OFF.returnReleaseParamCaps, false, true);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
   }
 
   // --- level 3: introductions handed to us --------------------------
@@ -1811,7 +1861,7 @@ export class RpcConnection implements RemoteHost {
       onRelease?.();
       pipelineCap.release();
     };
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
   }
 
   /** What a Bootstrap names, as capnp-C++ `handleBootstrap` and `baseCreateFor`. */
@@ -1854,7 +1904,7 @@ export class RpcConnection implements RemoteHost {
     ret.setU32(OFF.returnAnswerId, questionId);
     ret.setU16(OFF.returnUnion, Return.canceled);
     ret.setBool(OFF.returnReleaseParamCaps, false, true);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
   }
 
   /** A Call, checked in the order of capnp-C++ `handleCall`. */
@@ -1992,7 +2042,7 @@ export class RpcConnection implements RemoteHost {
     ret.setU16(OFF.returnUnion, Return.takeFromOtherQuestion);
     ret.setU32(OFF.returnTakeFromOtherQuestion, tailId);
     ret.setBool(OFF.returnReleaseParamCaps, false, true);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
     return tail;
   }
 
@@ -2083,7 +2133,7 @@ export class RpcConnection implements RemoteHost {
         answer.finished = true;
         if (this.answers.get(questionId) === answer) this.answers.delete(questionId);
       }
-      this.transport.send(b.toFlat());
+      this.sendFlat(b.toFlat());
       if (noCaps) answer.call.release();
     } else {
       this.sendException(questionId, s.error);
@@ -2375,7 +2425,7 @@ export class RpcConnection implements RemoteHost {
     target.writeTarget(dis.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS));
     dis.setU16(OFF.disembargoContextUnion, Disembargo_context.senderLoopback);
     dis.setU32(OFF.disembargoContextValue, id);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
     return settle;
   }
 
@@ -2442,7 +2492,7 @@ export class RpcConnection implements RemoteHost {
           // rather than living behind a pointer.
           out.setU16(OFF.disembargoContextUnion, Disembargo_context.receiverLoopback);
           out.setU32(OFF.disembargoContextValue, id);
-          this.transport.send(b.toFlat());
+          this.sendFlat(b.toFlat());
         };
         // As capnp-C++ does: wait for the target to settle (for example
         // behind an embargo on a middle hop), then let calls already queued
@@ -2589,7 +2639,7 @@ export class RpcConnection implements RemoteHost {
     ret.setU16(OFF.returnUnion, Return.exception);
     ret.setBool(OFF.returnReleaseParamCaps, false, true);
     this.writeException(ret.initStruct(0, EXCEPTION_DWORDS, EXCEPTION_PWORDS), error);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
   }
 
   /** Echo a message we did not understand, per the spec. */
@@ -2603,7 +2653,7 @@ export class RpcConnection implements RemoteHost {
     }
     const { b, root } = newMessage(Message.unimplemented);
     root.setP(0, incoming);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
   }
 
   /**
@@ -2666,10 +2716,11 @@ export class RpcConnection implements RemoteHost {
    */
   abort(error: RpcError): void {
     if (this.gone !== undefined) return;
+    this.outFds = [];
     try {
       const { b, root } = newMessage(Message.abort);
       this.writeException(root.initStruct(0, EXCEPTION_DWORDS, EXCEPTION_PWORDS), error);
-      this.transport.send(b.toFlat());
+      this.sendFlat(b.toFlat());
     } catch {
       // The transport may be what failed; the connection is going either way.
     }

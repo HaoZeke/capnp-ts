@@ -267,3 +267,41 @@ describe("unimplemented level 3 and 4 echoes abort", () => {
     });
   }
 });
+
+describe("attachedFd on a capability descriptor", () => {
+  test("the receiver's import reports the sender's fd index", () => {
+    const server: RpcServer = {
+      getFd: () => 7,
+      dispatch() {},
+    };
+    const pair = new MemoryTransportPair();
+    const a = new RpcConnection(pair.a, server);
+    const b = new RpcConnection(pair.b);
+    const cap = b.bootstrap();
+    for (let i = 0; i < 4; i++) {
+      a.pump();
+      b.pump();
+    }
+    expect(cap.getFd()).toBe(7);
+    const sent = pair.b.receive();
+    expect(sent).toBeNull();
+  });
+
+  test("the Return cap table stores attachedFd as the fd list index", () => {
+    const server: RpcServer = {
+      getFd: () => 7,
+      dispatch() {},
+    };
+    const pair = new MemoryTransportPair();
+    const a = new RpcConnection(pair.a, server);
+    new RpcConnection(pair.b).bootstrap();
+    a.pump();
+    const frame = pair.b.receive();
+    expect(frame).not.toBeNull();
+    expect(pair.b.receivedFds?.()).toEqual([7]);
+    const ret = CapnpMessage.fromFlat(frame!).root().getP(0);
+    expect(Return_which(ret)).toBe(Return.results);
+    const table = Payload_getCapTable(Return_getResults(ret));
+    expect(CapDescriptor_getAttachedFd(table.listGetP(0))).toBe(0);
+  });
+});

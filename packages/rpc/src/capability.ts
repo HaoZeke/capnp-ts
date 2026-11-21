@@ -375,6 +375,11 @@ export interface ClientHook {
   readonly brand: unknown;
   /** The error a broken capability fails with. */
   readonly brokenError: RpcError | undefined;
+  /**
+   * File descriptor attached to this capability, as `ClientHook::getFd`.
+   * Absent when the capability has none.
+   */
+  getFd?(): number | undefined;
 }
 
 /** A stream promise that can be canceled, dropping the underlying call. */
@@ -545,6 +550,8 @@ export interface RpcServer {
   isStreaming?(interfaceId: bigint, methodId: number): boolean;
   /** Called when the last reference to this capability is dropped. */
   dispose?(): void;
+  /** `Capability::Server::getFd`. The connection sends this with the descriptor. */
+  getFd?(): number | undefined;
 }
 
 class LocalCallContext implements CallContext {
@@ -693,6 +700,10 @@ export class LocalClient extends RefHook implements ClientHook {
     return undefined;
   }
 
+  /** `Capability::Server::getFd`, when the server implements it. */
+  getFd(): number | undefined {
+    return this.server.getFd?.();
+  }
 
   call(interfaceId: bigint, methodId: number, params: Payload, opts?: CallOptions): CallState {
     if (this.broken !== undefined) {
@@ -1114,6 +1125,10 @@ export class Client {
     this.release();
   }
 
+  /** `ClientHook::getFd` of the resolved capability. */
+  getFd(): number | undefined {
+    return this.resolved().getFd?.();
+  }
 
   /** The hook with every resolved promise looked through. */
   resolved(): ClientHook {

@@ -318,6 +318,10 @@ class MembraneHook extends RefHook implements ClientHook {
     return this.resolvedWrap;
   }
 
+  getFd(): number | undefined {
+    return this.inner.getFd?.();
+  }
+
   whenMoreResolved(): Promise<ClientHook> | undefined {
     if (this.resolvedWrap !== undefined) return Promise.resolve(this.resolvedWrap);
     const more = this.inner.whenMoreResolved();
