@@ -550,6 +550,20 @@ const SCENARIOS: Record<string, Step[]> = {
     call({ q: 1, method: M.slow, target: (t) => targetAnswer(t, 0) }),
     callSendingTo(1, 7),
   ],
+  // `handleResolve` reads the replacement before it looks up the import.
+  "resolve-non-promise": [bootstrap(0), hold(1, 5, 1), W(100), resolveCap(5, 1, 6)],
+  "resolve-exception-non-promise": [bootstrap(0), hold(1, 5, 1), W(100), resolveException(5, "x")],
+  "resolve-unknown-non-promise": [
+    bootstrap(0),
+    hold(1, 5, 1),
+    W(100),
+    frame(Message.resolve, (m) => {
+      const r = m.initStruct(0, 1, 1);
+      r.setU32(0, 5);
+      r.setU16(4, 7);
+    }),
+  ],
+  "resolve-missing-import": [bootstrap(0), W(100), resolveCap(77, 1, 6), W(100)],
   "disembargo-provide": [bootstrap(0), W(100), disembargoProvide(1)],
   "disembargo-accept": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0, [0, 2]), 2)],
   "disembargo-unknown": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0), 9)],

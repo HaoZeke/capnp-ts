@@ -1643,3 +1643,34 @@ describe("Call checks in capnp-C++ order (rpc.c++ handleCall)", () => {
     expect(abortReasonOf(r)).toBe("expected !answer.active; questionId is already in use; answerId = 0");
   });
 });
+
+describe("Resolve reads its replacement first (rpc.c++ handleResolve)", () => {
+  const withImport = (): Raw => {
+    const r = raw(echoCap);
+    r.send(bootstrap(0));
+    r.send(callWithCap(1, (t) => toAnswer(t, 0), CapDescriptor.senderHosted, 5));
+    r.take();
+    return r;
+  };
+
+  test("a capability resolving a non-promise import is released before the Abort", () => {
+    const r = withImport();
+    r.send(resolveTo(5, CapDescriptor.senderHosted, 6));
+    const out = r.take();
+    expect(out.map((m) => m.which)).toEqual([Message.release, Message.abort]);
+    expect(out[0]!.body.getU32(0)).toBe(6);
+    expect(Exception_getReason(out[1]!.body)).toBe("Got 'Resolve' for a non-promise import.");
+  });
+
+  test("an unknown Resolve type wins over a non-promise import", () => {
+    const r = withImport();
+    r.send(
+      frame(Message.resolve, (m) => {
+        const res = m.initStruct(0, 1, 1);
+        res.setU32(0, 5);
+        res.setU16(4, 7);
+      }),
+    );
+    expect(abortReasonOf(r)).toBe("Unknown 'Resolve' type.");
+  });
+});

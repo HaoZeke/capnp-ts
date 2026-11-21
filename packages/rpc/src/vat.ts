@@ -2201,9 +2201,28 @@ export class RpcConnection implements RemoteHost {
 
   // --- resolution and embargo -----------------------------------------
 
+  /**
+   * A Resolve, read as capnp-C++ `handleResolve` does: the replacement
+   * first, so a bad descriptor aborts before the import is looked up and
+   * a replacement nobody can take is released.
+   */
   private handleResolve(resolve: Ptr): void {
-    const id = Resolve_getPromiseId(resolve);
-    const imp = this.imports.get(id);
+    let hook: ClientHook | undefined;
+    let error: RpcError | undefined;
+    if (Resolve_which(resolve) === Resolve.cap) {
+      const desc = Resolve_getCap(resolve);
+      if (desc.kind !== PtrKind.Struct || CapDescriptor_which(desc) === CapDescriptor.none) {
+        this.abort(new RpcError("'Resolve' contained 'CapDescriptor.none'."));
+        return;
+      }
+      hook = this.receiveCap(desc);
+    } else if (Resolve_which(resolve) === Resolve.exception) {
+      error = readException(Resolve_getException(resolve));
+    } else {
+      this.abort(new RpcError("Unknown 'Resolve' type."));
+      return;
+    }
+    const imp = this.imports.get(Resolve_getPromiseId(resolve));
     // C++ disconnects when Resolve names an import that was never a
     // promise. A second Resolve of a real promise does not: the fulfiller
     // is still in the table and a second fulfill is ignored.
@@ -2213,25 +2232,19 @@ export class RpcConnection implements RemoteHost {
       !imp.wasPromise &&
       imp.importClient !== undefined
     ) {
-      this.abort(new RpcError("Got Resolve for a non-promise import"));
+      hook?.release();
+      this.abort(new RpcError("Got 'Resolve' for a non-promise import."));
       return;
     }
     const resolver = imp?.resolver;
     if (imp !== undefined) imp.resolver = undefined;
-    if (Resolve_which(resolve) === Resolve.cap) {
-      const desc = Resolve_getCap(resolve);
-      if (desc.kind !== PtrKind.Struct || CapDescriptor_which(desc) === CapDescriptor.none) {
-        this.abort(new RpcError("'Resolve' contained 'CapDescriptor.none'."));
-        return;
-      }
-      const hook = this.receiveCap(desc);
+    if (hook === undefined) {
+      if (error !== undefined) resolver?.reject(error);
+    } else if (resolver === undefined) {
       // A promise nobody holds any more still sent us a reference.
-      if (resolver === undefined) hook.release();
-      else resolver.resolve(hook);
-    } else if (Resolve_which(resolve) === Resolve.exception) {
-      resolver?.reject(readException(Resolve_getException(resolve)));
+      hook.release();
     } else {
-      this.abort(new RpcError("Unknown 'Resolve' type."));
+      resolver.resolve(hook);
     }
   }
 
