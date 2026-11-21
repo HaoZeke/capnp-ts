@@ -872,11 +872,15 @@ export class RpcConnection implements RemoteHost {
     if (this.gone !== undefined) return;
     const slot = this.exports.get(id);
     if (slot === undefined) {
-      this.abort(new RpcError(`Tried to release invalid export ID ${id}`));
+      this.abort(new RpcError("Tried to release invalid export ID."));
       return;
     }
     if (count < 0 || count > slot.refcount) {
-      this.abort(new RpcError(`Tried to drop export ${id} refcount below zero`));
+      this.abort(
+        new RpcError(
+          `expected refcount <= exp->refcount [${count} <= ${slot.refcount}]; Tried to drop export's refcount below zero.`,
+        ),
+      );
       return;
     }
     slot.refcount -= count;
@@ -1735,7 +1739,7 @@ export class RpcConnection implements RemoteHost {
     }
     const sendTo = Call_sendResultsTo_which(call);
     if (sendTo !== Call_sendResultsTo.caller && sendTo !== Call_sendResultsTo.yourself) {
-      this.abort(new RpcError("unsupported Call.sendResultsTo"));
+      this.abort(new RpcError("Unsupported `Call.sendResultsTo`."));
       return;
     }
     // The cap table describes the message, not the dispatch: a call this
@@ -2257,7 +2261,7 @@ export class RpcConnection implements RemoteHost {
         const id = Disembargo_context_getReceiverLoopback(context);
         const embargo = this.embargoes.get(id);
         if (embargo === undefined) {
-          this.abort(new RpcError("Invalid embargo ID in Disembargo.context.receiverLoopback"));
+          this.abort(new RpcError("Invalid embargo ID in 'Disembargo.context.receiverLoopback'."));
           return;
         }
         this.embargoes.delete(id);

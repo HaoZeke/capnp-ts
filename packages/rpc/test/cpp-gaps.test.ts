@@ -1453,3 +1453,54 @@ describe("a call's param capabilities (rpc.c++ RpcCallContext paramsCapTable)", 
     }
   });
 });
+
+function abortReasonOf(r: Raw): string | undefined {
+  const abort = r.take().find((m) => m.which === Message.abort);
+  return abort === undefined ? undefined : Exception_getReason(abort.body);
+}
+
+describe("protocol abort texts (rpc.c++ releaseExport, handleCall, handleDisembargo)", () => {
+  const release = (id: number, count: number): Uint8Array =>
+    frame(Message.release, (m) => {
+      const r = m.initStruct(0, 1, 0);
+      r.setU32(0, id);
+      r.setU32(4, count);
+    });
+
+  test("a Release of an unknown export", () => {
+    const r = raw(ping);
+    r.send(bootstrap(0));
+    r.send(release(99, 1));
+    expect(abortReasonOf(r)).toBe("Tried to release invalid export ID.");
+  });
+
+  test("a Release below an export's refcount", () => {
+    const r = raw(ping);
+    r.send(bootstrap(0));
+    r.send(release(0, 5));
+    expect(abortReasonOf(r)).toBe(
+      "expected refcount <= exp->refcount [5 <= 1]; Tried to drop export's refcount below zero.",
+    );
+  });
+
+  test("a Call with an unknown `sendResultsTo`", () => {
+    const r = raw(ping);
+    r.send(bootstrap(0));
+    r.send(call(1, (t) => toAnswer(t, 0), (c) => c.setU16(6, 7)));
+    expect(abortReasonOf(r)).toBe("Unsupported `Call.sendResultsTo`.");
+  });
+
+  test("a receiver-loopback Disembargo for an unknown embargo", () => {
+    const r = raw(ping);
+    r.send(bootstrap(0));
+    r.send(
+      frame(Message.disembargo, (m) => {
+        const d = m.initStruct(0, 1, 1);
+        d.initStruct(0, 1, 1).setU32(0, 0);
+        d.setU16(4, 1);
+        d.setU32(0, 99);
+      }),
+    );
+    expect(abortReasonOf(r)).toBe("Invalid embargo ID in 'Disembargo.context.receiverLoopback'.");
+  });
+});

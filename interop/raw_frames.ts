@@ -187,6 +187,26 @@ function resolveException(promiseId: number, reason: string): Uint8Array {
   });
 }
 
+function release(id: number, count: number): Uint8Array {
+  return frame(Message.release, (m) => {
+    const r = m.initStruct(0, 1, 0);
+    r.setU32(0, id);
+    r.setU32(4, count);
+  });
+}
+
+/** A Call on the bootstrap answer whose `sendResultsTo` union is `which`. */
+function callSendingTo(q: number, which: number, target = (t: StructBuilder) => targetAnswer(t, 0)): Uint8Array {
+  return frame(Message.call, (m) => {
+    const c = m.initStruct(0, 3, 3);
+    c.setU32(0, q);
+    c.setU64(8, ECHO);
+    c.setU16(6, which);
+    target(c.initStruct(0, 1, 1));
+    c.initStruct(1, 0, 2).initStruct(0, 1, 0);
+  });
+}
+
 function finish(q: number, releaseResultCaps = true): Uint8Array {
   return frame(Message.finish, (m) => {
     const f = m.initStruct(0, 1, 0);
@@ -393,6 +413,21 @@ const SCENARIOS: Record<string, Step[]> = {
     call({ q: 3, method: M.ping, target: (t) => targetAnswer(t, 1, [0, 0]), params: (p) => p.setU32(0, 1) }),
     W(100),
     call({ q: 0x80000004, method: M.unblock, target: (t) => targetAnswer(t, 0), onlyPromisePipeline: true }),
+  ],
+  // Abort texts of `releaseExport`, `handleCall` and `handleDisembargo`.
+  "release-invalid": [bootstrap(0), W(100), release(99, 1)],
+  "release-below-zero": [bootstrap(0), W(100), release(0, 5)],
+  "send-results-third-party": [bootstrap(0), callSendingTo(1, 2)],
+  "send-results-unknown": [bootstrap(0), callSendingTo(1, 7)],
+  "disembargo-unknown-embargo": [
+    bootstrap(0),
+    W(100),
+    frame(Message.disembargo, (m) => {
+      const d = m.initStruct(0, 1, 1);
+      targetImport(d.initStruct(0, 1, 1), 0);
+      d.setU16(4, 1);
+      d.setU32(0, 99);
+    }),
   ],
   "disembargo-provide": [bootstrap(0), W(100), disembargoProvide(1)],
   "disembargo-accept": [bootstrap(0), W(100), disembargoOther((t) => targetAnswer(t, 0, [0, 2]), 2)],
