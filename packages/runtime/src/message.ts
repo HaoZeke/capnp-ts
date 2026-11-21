@@ -292,13 +292,8 @@ export class Message {
       }
       offset += segmentSize;
     }
-    // A short body is "ends prematurely" even when the table claims a huge size.
-    // The total-size check runs only once every segment is present.
-    assertCapnp(
-      totalWords <= (opts?.traversalWords ?? DEFAULT_TRAVERSAL_WORDS),
-      "TRAVERSAL",
-      "Message is too large.",
-    );
+    // FlatArrayMessageReader accepts the segments that are present. The
+    // stream reader is what refuses a total past the traversal limit.
     const body = tableBytes + totalWords * WORD_BYTES;
 
     const owned = copy ? data.slice(0, body) : undefined;
