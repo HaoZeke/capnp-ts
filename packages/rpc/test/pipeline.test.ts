@@ -11,6 +11,7 @@ import {
   Message as CapnpMessage,
   MessageBuilder,
   Ptr,
+  PtrKind,
   type StructBuilder,
 } from "../../runtime/src/index.ts";
 
@@ -126,7 +127,10 @@ function readReturn(t: Transport): { answerId: number; value: number } {
   const ret = Message_getReturn(root);
   return {
     answerId: Return_getAnswerId(ret),
-    value: Payload_getContent(Return_getResults(ret)).getU32(0),
+    value: (() => {
+      const content = Payload_getContent(Return_getResults(ret));
+      return content.kind === PtrKind.Struct ? content.getU32(0) : 0;
+    })(),
   };
 }
 

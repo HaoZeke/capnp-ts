@@ -223,7 +223,12 @@ export class Message {
   }
 
   charge(words: number): void {
-    assertCapnp(words <= this.traversalLeft, "TRAVERSAL");
+    if (words > this.traversalLeft) {
+      throw new CapnpError(
+        "TRAVERSAL",
+        "Exceeded message traversal limit.  See capnp::ReaderOptions.",
+      );
+    }
     this.traversalLeft -= words;
   }
 
@@ -281,7 +286,6 @@ export class Message {
       offset += segmentSize;
     }
     const body = tableBytes + totalWords * WORD_BYTES;
-
 
     const owned = copy ? data.slice(0, body) : undefined;
     const base = owned ?? data.subarray(0, body);
@@ -501,9 +505,6 @@ function readWord(m: Message, seg: number, word: number): bigint {
 function chargeWords(m: Message, words: number | bigint): void {
   const w = typeof words === "bigint" ? words : BigInt(words);
   assertCapnp(w >= 0n, "BOUNDS");
-  if (m.traversalLeft !== Infinity && w > BigInt(m.traversalLeft)) {
-    throw new CapnpError("TRAVERSAL");
-  }
   m.charge(Number(w));
 }
 
@@ -548,14 +549,21 @@ function resolveWord(
   // nestingLimit is decremented once per struct or list pointer, including the
   // root. Null pointers are answered before the limit is consulted.
   if (kind !== WireKind.Cap && depth >= m.depthLimit) {
-    throw new CapnpError("DEPTH", DEPTH_MSG);
+    throw new CapnpError(
+      "DEPTH",
+      expected === "copy"
+        ? "expected nestingLimit > 0 [0 > 0]; Message is too deeply-nested."
+        : DEPTH_MSG,
+    );
   }
   if (kind === WireKind.Far) {
     // followFars is one hop. A second far word is a non-struct/non-list pointer.
+    // totalSize reports a far landing that is itself far as an unexpected far.
     if (fromFar) {
       if (expected === "text" || expected === "data") {
         throw new CapnpError("KIND", nonListBlobMessage(expected, kind));
       }
+      if (expected === "copy") throw new CapnpError("KIND", "Unexpected FAR pointer.");
       throw new CapnpError("KIND", nonStructPointerMessage(kind));
     }
     const tseg = wpFarSeg(w);
@@ -604,12 +612,28 @@ function resolveWord(
         if (expected === "struct") {
           throw new CapnpError("KIND", nonStructPointerMessage(WireKind.List));
         }
-        return finishList(m, cseg, coff, tag, depth, listDetail(expected, tag));
+        return finishList(
+          m,
+          cseg,
+          coff,
+          tag,
+          depth,
+          listDetail(expected, tag),
+          expected === "copy",
+        );
+      }
+      // totalSize / copyPointer: a far tag after the double-far hop.
+      if (wpKind(tag) === WireKind.Far && expected === "copy") {
+        throw new CapnpError("KIND", "Unexpected FAR pointer.");
       }
       if (expected === "text" || expected === "data") {
         throw new CapnpError("KIND", nonListBlobMessage(expected, wpKind(tag)));
       }
       throw new CapnpError("KIND", nonStructPointerMessage(wpKind(tag)));
+    }
+    // tryGetSegment treats a missing or empty segment as absent.
+    if (tseg < 0 || tseg >= m.segs.length || m.segs[tseg]!.words === 0) {
+      throw new CapnpError("SEGMENT", FAR_UNKNOWN);
     }
     boundsWord(m, tseg, toff, FAR_OOB, FAR_UNKNOWN);
     m.charge(1);
@@ -642,7 +666,15 @@ function resolveWord(
       throw new CapnpError("KIND", nonBytesBlobMessage(expected));
     }
     const off = wpOffset(w);
-    return finishList(m, seg, word + 1 + off, w, depth, listDetail(expected, w));
+    return finishList(
+      m,
+      seg,
+      word + 1 + off,
+      w,
+      depth,
+      listDetail(expected, w),
+      expected === "copy",
+    );
   }
 
   if (kind === WireKind.Cap) {
@@ -654,7 +686,7 @@ function resolveWord(
     assertCapnp(
       ((w >> 2n) & 0x3fff_ffffn) === 0n,
       "KIND",
-      "capability reserved bits nonzero",
+      "Unknown pointer type.",
     );
     return Ptr.cap(m, seg, word, Number((w >> 32n) & 0xffff_ffffn), depth);
   }
@@ -673,14 +705,37 @@ function finishList(
   w: bigint,
   depth: number,
   boundsDetail: string = LIST_OOB,
+  copy = false,
 ): Ptr {
   const esize = wpListEsize(w);
   const wireCount = wpListCount(w);
 
   if (esize === ElemSize.Composite) {
-    // contentWords = words after the tag; charge tag + content up front so a
-    // zero-size-element amp still pays the declared word budget.
+    // contentWords = words after the tag.
     const contentWords = wireCount;
+    if (copy) {
+      // totalSize bounds-checks, then rejects a non-struct tag, then an overrun,
+      // and only then charges the words a copy would keep.
+      boundsWord(m, seg, start, boundsDetail);
+      if (contentWords > 0) boundsWord(m, seg, start + contentWords, boundsDetail);
+      const tag = readWord(m, seg, start);
+      if (wpKind(tag) !== WireKind.Struct) {
+        throw new CapnpError("KIND", "Don't know how to handle non-STRUCT inline composite.");
+      }
+      const nelem = wpCompositeElementCount(tag);
+      const dwords = wpStructDwords(tag);
+      const pwords = wpStructPwords(tag);
+      const step = dwords + pwords;
+      const actual = BigInt(nelem) * BigInt(step);
+      if (actual > BigInt(contentWords)) {
+        throw new CapnpError(
+          "BOUNDS",
+          `expected actualSize <= wordCount [${actual} <= ${contentWords}]; Struct list pointer's elements overran size. ${OUT_OF_BOUNDS_DETAIL}`,
+        );
+      }
+      chargeWords(m, actual + 1n);
+      return Ptr.list(m, seg, start + 1, esize, nelem, dwords, pwords, step, depth);
+    }
     const totalWords = BigInt(contentWords) + 1n;
     chargeWords(m, totalWords);
     boundsWord(m, seg, start, boundsDetail);
@@ -688,41 +743,48 @@ function finishList(
       boundsWord(m, seg, start + contentWords, boundsDetail);
     }
     const tag = readWord(m, seg, start);
-    assertCapnp(wpKind(tag) === WireKind.Struct, "KIND");
-    // C++ masks this to 29 bits. The extra offset bit is not an element.
+    assertCapnp(
+      wpKind(tag) === WireKind.Struct,
+      "KIND",
+      "INLINE_COMPOSITE lists of non-STRUCT type are not supported.",
+    );
     const nelem = wpCompositeElementCount(tag);
     const dwords = wpStructDwords(tag);
     const pwords = wpStructPwords(tag);
     const step = dwords + pwords;
-    // nelem * (dwords+pwords) must fit the declared content words.
     if (BigInt(nelem) * BigInt(step) > BigInt(contentWords)) {
-      throw new CapnpError("BOUNDS");
+      throw new CapnpError("BOUNDS", boundsDetail);
     }
     if (step === 0) {
-      // Zero-sized structs carry no words. C++ amplifiedRead charges one
-      // word per element so the count cannot outrun the traversal limit.
+      // Zero-sized structs carry no words. The reader charges one word per
+      // element so the count cannot outrun the traversal limit.
       chargeWords(m, nelem);
     }
     return Ptr.list(m, seg, start + 1, esize, nelem, dwords, pwords, step, depth);
+  }
+
+  if (esize === ElemSize.Void) {
+    // totalSize does nothing for void elements. The reader still charges one
+    // word per element so a huge count cannot slip past the traversal limit.
+    if (!copy) chargeWords(m, wireCount);
+    return Ptr.list(m, seg, start, esize, wireCount, 0, 0, 0, depth);
   }
 
   const stepBits = listStepBits(esize);
   if (stepBits < 0) throw new CapnpError("KIND");
   const words = primitiveListWords(wireCount, stepBits);
   if (words > 0n) {
-    // Charge first (capnp-fortran fill_list) so wrap/amp cannot under-pay;
-    // then bounds-check content against the segment.
-    chargeWords(m, words);
     const last = BigInt(start) + words - 1n;
     if (start < 0 || last > BigInt(Number.MAX_SAFE_INTEGER)) {
-      throw new CapnpError("BOUNDS");
+      throw new CapnpError("BOUNDS", boundsDetail);
     }
-    boundsWord(m, seg, Number(last), boundsDetail);
-  }
-  if (esize === ElemSize.Void) {
-    // Void elements occupy no bytes. Charge one word per element so a huge
-    // count cannot slip past the traversal limit.
-    chargeWords(m, wireCount);
+    if (copy) {
+      boundsWord(m, seg, Number(last), boundsDetail);
+      chargeWords(m, words);
+    } else {
+      chargeWords(m, words);
+      boundsWord(m, seg, Number(last), boundsDetail);
+    }
   }
   return Ptr.list(m, seg, start, esize, wireCount, 0, 0, 0, depth);
 }
@@ -739,11 +801,16 @@ export function decodeWireText(list: Ptr): string {
   const start = list.word * WORD_BYTES;
   const count = list.count;
   if (count === 0) throw new CapnpError("TEXT", TEXT_EMPTY);
-  assertCapnp(
-    s.data[start + count - 1] === 0,
-    "TEXT",
-    "Message contains text that is not NUL-terminated.",
-  );
+  const last = s.data[start + count - 1]!;
+  if (last !== 0) {
+    // kj stringifies `char` as the raw code unit, including NUL on the right.
+    const left = String.fromCharCode(last);
+    const right = String.fromCharCode(0);
+    throw new CapnpError(
+      "TEXT",
+      `expected cptr[unboundedSize] == '\\0' [${left} == ${right}]; Message contains text that is not NUL-terminated.`,
+    );
+  }
   return new TextDecoder("utf-8", { ignoreBOM: true }).decode(s.data.subarray(start, start + count - 1));
 }
 
@@ -872,49 +939,59 @@ export class Ptr {
    * Cap'n Proto stores each scalar as `wire = logical XOR default` so a zeroed
    * data section yields schema defaults without per-field writes. Pass the
    * field's schema default as `dflt` (codegen does this); omit when default is
-   * zero. Past-end / non-struct reads return `dflt` (older-schema evolution).
-   * Float defaults XOR the IEEE bit pattern; bool defaults XOR the bit.
+   * zero. A null pointer and a read past the struct return `dflt`. A list
+   * or capability throws the struct mismatch capnp-C++ raises from
+   * `getAs<Struct>()`. Float defaults XOR the IEEE bit pattern; bool
+   * defaults XOR the bit.
    */
+  private isStructData(): boolean {
+    if (this.kind === PtrKind.Struct) return true;
+    if (this.kind === PtrKind.Null) return false;
+    const wire =
+      this.kind === PtrKind.List ? WireKind.List : this.kind === PtrKind.Cap ? WireKind.Cap : WireKind.Struct;
+    throw new CapnpError("KIND", nonStructPointerMessage(wire));
+  }
+
   getU8(byteOffset: number, dflt = 0): number {
-    if (this.kind !== PtrKind.Struct) return dflt;
+    if (!this.isStructData()) return dflt;
     if ((byteOffset + 1) * 8 > this.dataBitCount()) return dflt;
     return (this.dataBytes()[byteOffset]! ^ dflt) & 0xff;
   }
 
   getU16(byteOffset: number, dflt = 0): number {
-    if (this.kind !== PtrKind.Struct) return dflt;
+    if (!this.isStructData()) return dflt;
     if ((byteOffset + 2) * 8 > this.dataBitCount()) return dflt;
     return (loadU16(this.dataBytes(), byteOffset) ^ dflt) & 0xffff;
   }
 
   getU32(byteOffset: number, dflt = 0): number {
-    if (this.kind !== PtrKind.Struct) return dflt;
+    if (!this.isStructData()) return dflt;
     if ((byteOffset + 4) * 8 > this.dataBitCount()) return dflt;
     return (loadU32(this.dataBytes(), byteOffset) ^ dflt) >>> 0;
   }
 
   getU64(byteOffset: number, dflt = 0n): bigint {
-    if (this.kind !== PtrKind.Struct) return dflt;
+    if (!this.isStructData()) return dflt;
     if ((byteOffset + 8) * 8 > this.dataBitCount()) return dflt;
     return loadU64(this.dataBytes(), byteOffset) ^ dflt;
   }
 
   getF32(byteOffset: number, dflt = 0): number {
-    if (this.kind !== PtrKind.Struct) return dflt;
+    if (!this.isStructData()) return dflt;
     if ((byteOffset + 4) * 8 > this.dataBitCount()) return dflt;
     const wire = loadU32(this.dataBytes(), byteOffset);
     return bitsToF32((wire ^ f32ToBits(dflt)) >>> 0);
   }
 
   getF64(byteOffset: number, dflt = 0): number {
-    if (this.kind !== PtrKind.Struct) return dflt;
+    if (!this.isStructData()) return dflt;
     if ((byteOffset + 8) * 8 > this.dataBitCount()) return dflt;
     const wire = loadU64(this.dataBytes(), byteOffset);
     return bitsToF64(wire ^ f64ToBits(dflt));
   }
 
   getBool(bitOffset: number, dflt = false): boolean {
-    if (this.kind !== PtrKind.Struct) return dflt;
+    if (!this.isStructData()) return dflt;
     if (bitOffset >= this.dataBitCount()) return dflt;
     const byteOffset = (bitOffset / 8) | 0;
     const bit = 1 << (bitOffset % 8);
@@ -928,6 +1005,11 @@ export class Ptr {
    * as capnp-C++ `readStructPointer` / `readTextPointer` do.
    */
   getP(ptrIndex: number, expected?: "struct" | "text" | "data" | "copy"): Ptr {
+    // A null struct reads as empty: every pointer slot is null, and getters
+    // then return the schema default. A list or capability still mismatches.
+    if (this.kind === PtrKind.Null) {
+      return Ptr.nullPtr(this.msg, this.seg, 0, this.depth);
+    }
     assertCapnp(this.kind === PtrKind.Struct, "KIND");
     if (ptrIndex >= this.pwords) {
       return Ptr.nullPtr(this.msg, this.seg, 0, this.depth);

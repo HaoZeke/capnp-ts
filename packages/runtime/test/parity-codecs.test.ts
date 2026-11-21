@@ -492,3 +492,38 @@ describe("composite list bounds against capnp 1.4.0", () => {
     );
   });
 });
+
+describe("reader sentences against capnp 1.4.0", () => {
+  test("non-NUL text uses the raw code unit on both sides", () => {
+    const msg = Message.fromSegments([
+      words(wpMakeStruct(0, 0, 1), wpMakeList(0, ElemSize.Byte, 1), 0x41n),
+    ]);
+    let message = "";
+    try {
+      msg.root().getText(0);
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e);
+    }
+    expect(message).toContain(`[A == ${String.fromCharCode(0)}]`);
+
+    const control = Message.fromSegments([
+      words(wpMakeStruct(0, 0, 1), wpMakeList(0, ElemSize.Byte, 1), 0x01n),
+    ]);
+    try {
+      control.root().getText(0);
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e);
+    }
+    expect(message).toContain(`[${String.fromCharCode(1)} == ${String.fromCharCode(0)}]`);
+  });
+
+  test("a double-far landing on a far pointer is Unexpected FAR pointer", () => {
+    const flat = new Uint8Array([
+      0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01,
+      0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00,
+    ]);
+    const root = Message.fromFlat(flat).root();
+    expect(() => root.getP(0, "copy")).toThrow("Unexpected FAR pointer.");
+  });
+});
