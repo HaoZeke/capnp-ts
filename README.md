@@ -253,10 +253,14 @@ const unpacked = unpack(packed); // same bytes as framed input
 const canonical = canonicalizeFlat(bytes); // single-segment preorder form
 ```
 
-`pack()` encodes the buffer it is given, so `unpack(pack(x))` is the same
-bytes as `x`. Pass `{ compactFramed: true }` to compact a stream-framed
-message into one segment first, which is what `capnp convert binary:packed`
-does. That option changes the unpacked bytes of a multi-segment frame.
+`pack()` encodes the buffer it is given. `unpack(pack(x))` is the same
+bytes as `x`, except when `x` is a stream frame whose packed zero run
+crosses a segment boundary. An all-zero buffer of 16 bytes or more does
+that and throws, matching `PackedMessageReader`. A packed message with a
+partial trailing tag yields the first message. Pass `{ compactFramed: true }`
+to compact a stream-framed message into one segment first, which is what
+`capnp convert binary:packed` does. That option changes the unpacked bytes
+of a multi-segment frame.
 
 Dynamic reflection, text format, JSON codec, and `capnp-ts` CLI:
 

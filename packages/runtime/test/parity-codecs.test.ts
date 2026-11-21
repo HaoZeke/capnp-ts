@@ -81,6 +81,9 @@ describe("stream framing against capnp 1.4.0", () => {
     expect(Message.fromFlat(one(511)).segmentCount).toBe(511);
     expect(Message.fromFlat(one(512)).segmentCount).toBe(512);
     expect(Message.fromFlat(one(513)).segmentCount).toBe(513);
+    expect(() => unpack(pack(one(512)))).toThrow(/too many segments/);
+    expect(() => unpack(pack(one(513)))).toThrow(/\[512 < 511\]/);
+    expect(() => unpack(pack(one(600)))).toThrow(/too many segments/);
     expect(() => canonicalizeFlat(one(513))).not.toThrow();
   });
 
@@ -278,6 +281,16 @@ describe("canonical form against capnp 1.4.0", () => {
     const padded = [wpMakeStruct(0, 0, 1), wpMakeList(0, ElemSize.Composite, 1), wpMakeStruct(3, 0, 0), 0n];
     expect(at(padded, 7)()).toBe(false);
     expect(at(padded, 6)).toThrow(/traversal limit/);
+  });
+
+  test("a list root is not a struct to canonicalize", () => {
+    const list = words(wpMakeList(0, ElemSize.Byte, 2), 0x6162n);
+    expect(() => canonicalize(Message.fromSegments([list]))).toThrow(/pointerwas expected/);
+  });
+
+  test("an amplified void list hits the traversal limit", () => {
+    const amp = words(wpMakeStruct(0, 0, 1), wpMakeList(0, ElemSize.Void, 10_000_000));
+    expect(() => isCanonical(Message.fromSegments([amp]))).toThrow(/traversal limit/);
   });
 
   test("C-03 a null root canonicalizes to the empty-struct pointer", () => {
@@ -505,11 +518,12 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 
 describe("packed round trips against capnp 1.4.0", () => {
   test("unpack returns raw word buffers that pack produced", () => {
-    const zeros = new Uint8Array(48);
-    expect(unpack(pack(zeros))).toEqual(zeros);
     const dense = new Uint8Array(40).fill(7);
     expect(unpack(pack(dense))).toEqual(dense);
-    expect(unpack(new Uint8Array([0x00, 0x05]))).toEqual(zeros);
+    // A zero run past a 0-word segment 0 is the segment-boundary error.
+    expect(() => unpack(new Uint8Array([0x00, 0x05]))).toThrow(/segment boundary/);
+    expect(() => unpack(new Uint8Array([0x00, 0x84]))).toThrow(/\[1056 <= 0\]/);
+    expect(() => unpack(pack(new Uint8Array(48)))).toThrow(/segment boundary/);
   });
 
   test("concatenated frames pack and unpack piece by piece", () => {
