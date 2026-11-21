@@ -2146,11 +2146,11 @@ export class RpcConnection implements RemoteHost {
           }
           const inner = innermost(resolved);
           if (inner.brand !== this) {
-            const broken = inner.brokenError;
             resolved.release();
             this.abort(
-              broken ??
-                new RpcError("Disembargo senderLoopback sent to an object that does not point back"),
+              new RpcError(
+                "'Disembargo' of type 'senderLoopback' sent to an object that does not point back to the sender.",
+              ),
             );
             return;
           }
@@ -2166,30 +2166,27 @@ export class RpcConnection implements RemoteHost {
           out.setU32(OFF.disembargoContextValue, id);
           this.transport.send(b.toFlat());
         };
-        const current = innermost(hook);
-        if (current.whenMoreResolved() === undefined) {
-          finishLoopback(hook);
-          return;
-        }
-        // Target is still a pending promise (for example behind an embargo on
-        // a middle hop); wait until it settles before checking and echoing.
+        // As capnp-C++ does: wait for the target to settle (for example
+        // behind an embargo on a middle hop), then let calls already queued
+        // towards it go first, then echo.
         void (async () => {
           let h = hook;
           try {
             for (;;) {
-              const cur = innermost(h);
-              const more = cur.whenMoreResolved();
+              const more = innermost(h).whenMoreResolved();
               if (more === undefined) break;
               const next = (await more).addRef();
               h.release();
               h = next;
             }
-            finishLoopback(h);
+            await new Promise<void>((res) => afterQueuedWork(res));
           } catch (e) {
             h.release();
             // capnp-C++ fails the connection with the target's own error.
             this.abort(toRpcError(e));
+            return;
           }
+          finishLoopback(h);
         })();
         return;
       }

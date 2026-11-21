@@ -297,6 +297,8 @@ const SCENARIOS: Record<string, Step[]> = {
     W(100),
     disembargoLoopback((t) => targetAnswer(t, 1, [0]), 3),
   ],
+  // Gap 13: senderLoopback aimed at the peer's own local bootstrap.
+  "loopback-local": [bootstrap(0), W(100), disembargoLoopback((t) => targetImport(t, 0), 3)],
   // Gap 14: Abort with a null exception and with a trace.
   "abort-null": [abortWith(null)],
   "abort-trace": [abortWith("bye", "trace text")],
@@ -328,10 +330,18 @@ const CAP_NAMES = ["none", "senderHosted", "senderPromise", "receiverHosted", "r
 const MSG_NAMES = Object.fromEntries(Object.entries(Message).map(([k, v]) => [v, k])) as Record<number, string>;
 const TYPES = ["failed", "overloaded", "disconnected", "unimplemented"];
 
+/**
+ * A `KJ_REQUIRE` that compared two pointers prints their addresses in a
+ * prefix no other process can reproduce, so the prefix is dropped.
+ */
+function reason(r: string): string {
+  return r.replace(/^expected [^;\[]*\[[0-9a-f]+ == [0-9a-f]+\]; /, "");
+}
+
 function exc(e: Ptr): string {
   if (e.kind !== PtrKind.Struct) return "exc(null)";
   const trace = Exception_getTrace(e);
-  return `${TYPES[Exception_getType(e)] ?? "?"} ${JSON.stringify(Exception_getReason(e))}${trace ? ` trace=${JSON.stringify(trace)}` : ""}`;
+  return `${TYPES[Exception_getType(e)] ?? "?"} ${JSON.stringify(reason(Exception_getReason(e)))}${trace ? ` trace=${JSON.stringify(trace)}` : ""}`;
 }
 
 function caps(payload: Ptr): string {

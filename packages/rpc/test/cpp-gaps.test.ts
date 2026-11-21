@@ -639,3 +639,36 @@ describe("outgoing call hints (rpc.c++ RpcRequest::send, sendForPipeline)", () =
     expect(Call_getQuestionId(second)).toBeLessThan(0x80000000);
   });
 });
+
+describe("Disembargo senderLoopback (rpc.c++ handleDisembargo)", () => {
+  test("the echo waits for work already queued", async () => {
+    const r = raw(echoCap);
+    r.send(bootstrap(0));
+    r.send(callWithCap(1, (t) => toAnswer(t, 0), CapDescriptor.senderHosted, 5));
+    r.take();
+    r.send(loopback((t) => toAnswer(t, 1, [0]), 4));
+    expect(r.take()).toEqual([]);
+    await nextTurn();
+    const out = r.take();
+    expect(out.map((m) => m.which)).toEqual([Message.disembargo]);
+  });
+
+  test("a null capability does not point back to the sender", async () => {
+    const r = raw({
+      dispatch(_i, _m, _p, _r, ctx) {
+        const results = ctx.initResults(0, 2);
+        ctx.setResultCap(results, 0, Client.local(ping).hook);
+      },
+    });
+    r.send(bootstrap(0));
+    r.send(call(1, (t) => toAnswer(t, 0)));
+    r.take();
+    r.send(loopback((t) => toAnswer(t, 1, [1]), 4));
+    await nextTurn();
+    const out = r.take();
+    expect(out.map((m) => m.which)).toEqual([Message.abort]);
+    expect(Exception_getReason(out[0]!.body)).toBe(
+      "'Disembargo' of type 'senderLoopback' sent to an object that does not point back to the sender.",
+    );
+  });
+});
