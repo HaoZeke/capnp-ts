@@ -481,3 +481,14 @@ describe("packed round trips against capnp 1.4.0", () => {
     expect(() => unpack(straddle)).toThrow(/segment boundary/);
   });
 });
+
+describe("composite list bounds against capnp 1.4.0", () => {
+  test("an out of bounds composite list names the tag word", () => {
+    const msg = Message.fromSegments([
+      words(wpMakeStruct(0, 0, 1), wpMakeList(0, ElemSize.Composite, 4)),
+    ]);
+    expect(() => msg.root().getP(0)).toThrow(
+      "boundsCheck(segment, ptr, wordCount + POINTER_SIZE_IN_WORDS)",
+    );
+  });
+});

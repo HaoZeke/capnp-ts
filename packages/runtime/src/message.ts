@@ -175,11 +175,11 @@ export class Message {
     return new Message(views, opts);
   }
 
-  root(): Ptr {
+  root(expected?: "struct" | "text" | "data" | "copy"): Ptr {
     assertCapnp(this.segs.length > 0, "ARG");
     // C++ charges the root word in MessageReader::getRootInternal and again
     // in PointerReader::getRoot. Nesting limit 0 rejects this read.
-    return resolvePtr(this, 0, 0, 0, 2);
+    return resolvePtr(this, 0, 0, 0, 2, expected);
   }
 
   /** Word count of segment `seg`. */
@@ -373,10 +373,121 @@ function pointerWordIsNull(m: Message, seg: number, word: number): boolean {
   }
 }
 
-function boundsWord(m: Message, seg: number, word: number): void {
-  assertCapnp(seg >= 0 && seg < m.segs.length, "SEGMENT");
+/** A capnp-C++ `KJ_REQUIRE` description, including the compared values. */
+function kjExpected(cond: string, detail: string, values?: string): string {
+  const bracket = values === undefined ? "" : ` [${values}]`;
+  return `expected ${cond}${bracket}; ${detail}`;
+}
+
+/** `readStructPointer` when the pointer is not a struct. `wireKind` is the wire enum value. */
+export function nonStructPointerMessage(wireKind: number): string {
+  return kjExpected(
+    "ref->kind() == WirePointer::STRUCT",
+    "Schema mismatch: Message contains non-struct pointer where struct pointerwas expected.",
+    `${wireKind} == 0`,
+  );
+}
+
+function nonListBlobMessage(blob: "text" | "data", wireKind: number): string {
+  return kjExpected(
+    "ref->kind() == WirePointer::LIST",
+    `Schema mismatch: Message contains non-list pointer where ${blob} was expected.`,
+    `${wireKind} == 1`,
+  );
+}
+
+function nonBytesBlobMessage(blob: "text" | "data"): string {
+  // `ElementSize` is an enum class. capnp-C++ 1.4.0 prints it as "(can't stringify)".
+  return kjExpected(
+    "ref->listRef.elementSize() == ElementSize::BYTE",
+    `Schema mismatch: Message contains list pointer of non-bytes where ${blob} was expected.`,
+    "(can't stringify) == (can't stringify)",
+  );
+}
+
+function resolvedWireKind(p: Ptr): number {
+  if (p.kind === PtrKind.List) return WireKind.List;
+  if (p.kind === PtrKind.Cap) return WireKind.Cap;
+  return WireKind.Struct;
+}
+
+const FAR_UNKNOWN = kjExpected(
+  "segment != nullptr",
+  "Message contains far pointer to unknown segment.",
+  "0 != nullptr",
+);
+const DOUBLE_FAR_UNKNOWN = kjExpected(
+  "newSegment != nullptr",
+  "Message contains double-far pointer to unknown segment.",
+  "0 != nullptr",
+);
+const FAR_OOB = kjExpected(
+  "boundsCheck(segment, ptr, padWords)",
+  `Message contains out-of-bounds far pointer. ${OUT_OF_BOUNDS_DETAIL}`,
+);
+const STRUCT_OOB = kjExpected(
+  "boundsCheck(segment, ptr, ref->structRef.wordSize())",
+  `Message contained out-of-bounds struct pointer. ${OUT_OF_BOUNDS_DETAIL}`,
+);
+const LIST_OOB = kjExpected(
+  "boundsCheck(segment, ptr, wordCount)",
+  `Message contains out-of-bounds list pointer. ${OUT_OF_BOUNDS_DETAIL}`,
+);
+const TEXT_OOB = kjExpected(
+  "boundsCheck(segment, ptr, roundBytesUpToWords(size))",
+  `Message contained out-of-bounds text pointer. ${OUT_OF_BOUNDS_DETAIL}`,
+);
+const DATA_OOB = kjExpected(
+  "boundsCheck(segment, ptr, roundBytesUpToWords(size))",
+  `Message contained out-of-bounds data pointer. ${OUT_OF_BOUNDS_DETAIL}`,
+);
+
+type Expect = "struct" | "text" | "data" | "copy";
+
+/** Bounds sentence for a list, matching the capnp-C++ read or copy path. */
+function listDetail(expected: Expect | undefined, w: bigint): string {
+  if (expected === "text") return TEXT_OOB;
+  if (expected === "data") return DATA_OOB;
+  if (expected === "copy") {
+    const esize = wpListEsize(w);
+    const cond =
+      esize === ElemSize.Pointer
+        ? "boundsCheck(segment, ptr, count * WORDS_PER_POINTER)"
+        : esize === ElemSize.Composite
+          ? "boundsCheck(segment, ptr, wordCount + POINTER_SIZE_IN_WORDS)"
+          : "boundsCheck(segment, ptr, totalWords)";
+    return kjExpected(cond, `Message contained out-of-bounds list pointer. ${OUT_OF_BOUNDS_DETAIL}`);
+  }
+  // readListPointer checks the tag word as well as the element body.
+  if (wpListEsize(w) === ElemSize.Composite) {
+    return kjExpected(
+      "boundsCheck(segment, ptr, wordCount + POINTER_SIZE_IN_WORDS)",
+      `Message contains out-of-bounds list pointer. ${OUT_OF_BOUNDS_DETAIL}`,
+    );
+  }
+  return LIST_OOB;
+}
+const DEPTH_MSG = kjExpected(
+  "nestingLimit > 0",
+  "Message is too deeply-nested or contains cycles.  See capnp::ReaderOptions.",
+  "0 > 0",
+);
+const TEXT_EMPTY = kjExpected(
+  "size > ZERO * BYTES",
+  "Message contains text that is not NUL-terminated.",
+  "0 > 0",
+);
+
+function boundsWord(
+  m: Message,
+  seg: number,
+  word: number,
+  boundsDetail?: string,
+  segmentDetail?: string,
+): void {
+  assertCapnp(seg >= 0 && seg < m.segs.length, "SEGMENT", segmentDetail);
   // Negative word offsets must not reach loadU64 (would throw TypeError/RangeError).
-  assertCapnp(word >= 0 && word < m.segs[seg]!.words, "BOUNDS");
+  assertCapnp(word >= 0 && word < m.segs[seg]!.words, "BOUNDS", boundsDetail);
 }
 
 function readWord(m: Message, seg: number, word: number): bigint {
@@ -412,12 +523,13 @@ function resolvePtr(
   word: number,
   depth: number,
   pointerWords: number,
+  expected?: Expect,
 ): Ptr {
   boundsWord(m, seg, word);
   // Child pointer words are already inside a charged struct or list. The root
   // word is charged twice, matching getRootInternal plus PointerReader::getRoot.
   if (pointerWords > 0) m.charge(pointerWords);
-  return resolveWord(m, seg, word, readWord(m, seg, word), depth, false);
+  return resolveWord(m, seg, word, readWord(m, seg, word), depth, false, expected);
 }
 
 function resolveWord(
@@ -427,6 +539,7 @@ function resolveWord(
   w: bigint,
   depth: number,
   fromFar: boolean,
+  expected?: Expect,
 ): Ptr {
   // A far landing pad of all zeros is an empty struct. Null is only a direct zero word.
   if (w === 0n && !fromFar) return Ptr.nullPtr(m, seg, word, depth);
@@ -435,54 +548,76 @@ function resolveWord(
   // nestingLimit is decremented once per struct or list pointer, including the
   // root. Null pointers are answered before the limit is consulted.
   if (kind !== WireKind.Cap && depth >= m.depthLimit) {
-    throw new CapnpError("DEPTH");
+    throw new CapnpError("DEPTH", DEPTH_MSG);
   }
   if (kind === WireKind.Far) {
     // followFars is one hop. A second far word is a non-struct/non-list pointer.
     if (fromFar) {
-      throw new CapnpError(
-        "KIND",
-        "Schema mismatch: Message contains non-struct pointer where struct pointer was expected.",
-      );
+      if (expected === "text" || expected === "data") {
+        throw new CapnpError("KIND", nonListBlobMessage(expected, kind));
+      }
+      throw new CapnpError("KIND", nonStructPointerMessage(kind));
     }
     const tseg = wpFarSeg(w);
     const toff = wpFarOff(w);
     if (wpFarTwo(w)) {
       // Far hops do not consume nesting depth. The landing object stays at `depth`.
-      boundsWord(m, tseg, toff);
-      boundsWord(m, tseg, toff + 1);
+      boundsWord(m, tseg, toff, FAR_OOB, FAR_UNKNOWN);
+      boundsWord(m, tseg, toff + 1, FAR_OOB, FAR_UNKNOWN);
       m.charge(2);
       const pad = readWord(m, tseg, toff);
       const tag = readWord(m, tseg, toff + 1);
-      // C++ checks kind == FAR and does not reject a landing pad with the double-far bit set.
-      assertCapnp(wpKind(pad) === WireKind.Far, "KIND");
       const cseg = wpFarSeg(pad);
       const coff = wpFarOff(pad);
+      // followFars checks the landing segment before the pad's kind.
       // ReaderArena::tryGetSegment treats an empty segment as absent.
       assertCapnp(
         cseg >= 0 && cseg < m.segs.length && m.segs[cseg]!.words > 0,
         "SEGMENT",
-        "Message contains double-far pointer to unknown segment.",
+        DOUBLE_FAR_UNKNOWN,
+      );
+      // C++ checks kind == FAR and does not reject a landing pad with the double-far bit set.
+      assertCapnp(
+        wpKind(pad) === WireKind.Far,
+        "KIND",
+        kjExpected(
+          "pad->kind() == WirePointer::FAR",
+          "Second word of double-far pad must be far pointer.",
+          `${wpKind(pad)} == 2`,
+        ),
       );
       if (wpKind(tag) === WireKind.Struct) {
+        if (expected === "text" || expected === "data") {
+          throw new CapnpError("KIND", nonListBlobMessage(expected, WireKind.Struct));
+        }
         const dwords = wpStructDwords(tag);
         const pwords = wpStructPwords(tag);
         if (dwords || pwords) {
           const end = coff + dwords + pwords;
-          boundsWord(m, cseg, coff);
-          if (end > 0) boundsWord(m, cseg, end - 1);
+          boundsWord(m, cseg, coff, STRUCT_OOB);
+          if (end > 0) boundsWord(m, cseg, end - 1, STRUCT_OOB);
         }
         chargeWords(m, dwords + pwords);
         return Ptr.struct(m, cseg, coff, dwords, pwords, depth);
       }
       if (wpKind(tag) === WireKind.List) {
-        return finishList(m, cseg, coff, tag, depth);
+        if (expected === "struct") {
+          throw new CapnpError("KIND", nonStructPointerMessage(WireKind.List));
+        }
+        return finishList(m, cseg, coff, tag, depth, listDetail(expected, tag));
       }
-      throw new CapnpError("KIND");
+      if (expected === "text" || expected === "data") {
+        throw new CapnpError("KIND", nonListBlobMessage(expected, wpKind(tag)));
+      }
+      throw new CapnpError("KIND", nonStructPointerMessage(wpKind(tag)));
     }
-    boundsWord(m, tseg, toff);
+    boundsWord(m, tseg, toff, FAR_OOB, FAR_UNKNOWN);
     m.charge(1);
-    return resolveWord(m, tseg, toff, readWord(m, tseg, toff), depth, true);
+    return resolveWord(m, tseg, toff, readWord(m, tseg, toff), depth, true, expected);
+  }
+
+  if ((expected === "text" || expected === "data") && kind !== WireKind.List) {
+    throw new CapnpError("KIND", nonListBlobMessage(expected, kind));
   }
 
   if (kind === WireKind.Struct) {
@@ -492,19 +627,28 @@ function resolveWord(
     const pwords = wpStructPwords(w);
     if (dwords || pwords) {
       const end = body + dwords + pwords;
-      boundsWord(m, seg, body);
-      if (end > 0) boundsWord(m, seg, end - 1);
+      boundsWord(m, seg, body, STRUCT_OOB);
+      if (end > 0) boundsWord(m, seg, end - 1, STRUCT_OOB);
     }
     chargeWords(m, dwords + pwords);
     return Ptr.struct(m, seg, body, dwords, pwords, depth);
   }
 
   if (kind === WireKind.List) {
+    if (expected === "struct") {
+      throw new CapnpError("KIND", nonStructPointerMessage(WireKind.List));
+    }
+    if ((expected === "text" || expected === "data") && wpListEsize(w) !== ElemSize.Byte) {
+      throw new CapnpError("KIND", nonBytesBlobMessage(expected));
+    }
     const off = wpOffset(w);
-    return finishList(m, seg, word + 1 + off, w, depth);
+    return finishList(m, seg, word + 1 + off, w, depth, listDetail(expected, w));
   }
 
   if (kind === WireKind.Cap) {
+    if (expected === "struct") {
+      throw new CapnpError("KIND", nonStructPointerMessage(WireKind.Cap));
+    }
     // encoding.html: B (30 bits after the kind) must be zero; other values
     // are reserved for future "other" pointer forms.
     assertCapnp(
@@ -528,6 +672,7 @@ function finishList(
   start: number,
   w: bigint,
   depth: number,
+  boundsDetail: string = LIST_OOB,
 ): Ptr {
   const esize = wpListEsize(w);
   const wireCount = wpListCount(w);
@@ -538,9 +683,9 @@ function finishList(
     const contentWords = wireCount;
     const totalWords = BigInt(contentWords) + 1n;
     chargeWords(m, totalWords);
-    boundsWord(m, seg, start);
+    boundsWord(m, seg, start, boundsDetail);
     if (contentWords > 0) {
-      boundsWord(m, seg, start + contentWords);
+      boundsWord(m, seg, start + contentWords, boundsDetail);
     }
     const tag = readWord(m, seg, start);
     assertCapnp(wpKind(tag) === WireKind.Struct, "KIND");
@@ -572,7 +717,7 @@ function finishList(
     if (start < 0 || last > BigInt(Number.MAX_SAFE_INTEGER)) {
       throw new CapnpError("BOUNDS");
     }
-    boundsWord(m, seg, Number(last));
+    boundsWord(m, seg, Number(last), boundsDetail);
   }
   if (esize === ElemSize.Void) {
     // Void elements occupy no bytes. Charge one word per element so a huge
@@ -580,6 +725,26 @@ function finishList(
     chargeWords(m, wireCount);
   }
   return Ptr.list(m, seg, start, esize, wireCount, 0, 0, 0, depth);
+}
+
+/** Byte list as Text. The list must be non-empty and end with NUL. */
+export function decodeWireText(list: Ptr): string {
+  if (list.kind !== PtrKind.List) {
+    throw new CapnpError("KIND", nonListBlobMessage("text", resolvedWireKind(list)));
+  }
+  if (list.esize !== ElemSize.Byte) {
+    throw new CapnpError("KIND", nonBytesBlobMessage("text"));
+  }
+  const s = list.msg.segs[list.seg]!;
+  const start = list.word * WORD_BYTES;
+  const count = list.count;
+  if (count === 0) throw new CapnpError("TEXT", TEXT_EMPTY);
+  assertCapnp(
+    s.data[start + count - 1] === 0,
+    "TEXT",
+    "Message contains text that is not NUL-terminated.",
+  );
+  return new TextDecoder("utf-8", { ignoreBOM: true }).decode(s.data.subarray(start, start + count - 1));
 }
 
 /** Resolved object handle (struct or list). Never a far landing pad. */
@@ -757,8 +922,12 @@ export class Ptr {
     return wire !== dflt;
   }
 
-  /** Resolve struct pointer slot. Out-of-range → null. */
-  getP(ptrIndex: number): Ptr {
+  /**
+   * Resolve struct pointer slot. Out-of-range → null.
+   * `expected` checks the wire kind before the pointed-to object's bounds,
+   * as capnp-C++ `readStructPointer` / `readTextPointer` do.
+   */
+  getP(ptrIndex: number, expected?: "struct" | "text" | "data" | "copy"): Ptr {
     assertCapnp(this.kind === PtrKind.Struct, "KIND");
     if (ptrIndex >= this.pwords) {
       return Ptr.nullPtr(this.msg, this.seg, 0, this.depth);
@@ -770,6 +939,7 @@ export class Ptr {
       this.word + this.dwords + ptrIndex,
       this.depth + 1,
       0,
+      expected,
     );
   }
 
@@ -788,29 +958,26 @@ export class Ptr {
   }
 
   getText(ptrIndex: number, dflt = ""): string {
-    const list = this.getP(ptrIndex);
+    const list = this.getP(ptrIndex, "text");
     if (list.kind === PtrKind.Null) return dflt;
-    assertCapnp(
-      list.kind === PtrKind.List && list.esize === ElemSize.Byte,
-      "KIND",
-    );
-    const s = list.msg.segs[list.seg]!;
-    const start = list.word * WORD_BYTES;
-    assertCapnp(
-      list.count > 0 && s.data[start + list.count - 1] === 0,
-      "TEXT",
-      "Text pointer is not NUL-terminated",
-    );
-    return new TextDecoder("utf-8", { ignoreBOM: true }).decode(s.data.subarray(start, start + list.count - 1));
+    if (list.kind !== PtrKind.List) {
+      throw new CapnpError("KIND", nonListBlobMessage("text", resolvedWireKind(list)));
+    }
+    if (list.esize !== ElemSize.Byte) {
+      throw new CapnpError("KIND", nonBytesBlobMessage("text"));
+    }
+    return decodeWireText(list);
   }
 
   getData(ptrIndex: number, dflt: Uint8Array = EMPTY_DATA): Uint8Array {
-    const list = this.getP(ptrIndex);
+    const list = this.getP(ptrIndex, "data");
     if (list.kind === PtrKind.Null) return dflt;
-    assertCapnp(
-      list.kind === PtrKind.List && list.esize === ElemSize.Byte,
-      "KIND",
-    );
+    if (list.kind !== PtrKind.List) {
+      throw new CapnpError("KIND", nonListBlobMessage("data", resolvedWireKind(list)));
+    }
+    if (list.esize !== ElemSize.Byte) {
+      throw new CapnpError("KIND", nonBytesBlobMessage("data"));
+    }
     const s = list.msg.segs[list.seg]!;
     const start = list.word * WORD_BYTES;
     return s.data.subarray(start, start + list.count);
@@ -821,7 +988,7 @@ export class Ptr {
     return this.count;
   }
 
-  listGetP(index: number): Ptr {
+  listGetP(index: number, expected?: "struct" | "text" | "data" | "copy"): Ptr {
     assertCapnp(this.kind === PtrKind.List, "KIND");
     assertCapnp(index >= 0 && index < this.count, "BOUNDS");
     if (this.esize === ElemSize.Pointer) {
@@ -831,6 +998,7 @@ export class Ptr {
         this.word + index,
         this.depth + 1,
         0,
+        expected,
       );
     }
     if (this.esize === ElemSize.Composite) {
