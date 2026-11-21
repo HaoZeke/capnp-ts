@@ -953,3 +953,21 @@ describe("eval -o json goldens from capnp 1.4.0", () => {
     }
   }
 });
+
+describe("eval of an unset struct field", () => {
+  const unionCgr = join(goldenDir, "eval-unions.cgr.bin");
+  const expected: [string, number[]][] = [
+    ["binary", [0, 0, 0, 0, 1, 0, 0, 0, 0xfc, 0xff, 0xff, 0xff, 0, 0, 0, 0]],
+    ["flat", [0xfc, 0xff, 0xff, 0xff, 0, 0, 0, 0]],
+    ["packed", [0x10, 0x01, 0x0f, 0xfc, 0xff, 0xff, 0xff]],
+    ["canonical", [0xfc, 0xff, 0xff, 0xff, 0, 0, 0, 0]],
+    ["flat-packed", [0x0f, 0xfc, 0xff, 0xff, 0xff]],
+  ];
+  for (const [format, bytes] of expected) {
+    test(`-o${format} writes a zero-sized root struct like capnp 1.4.0`, async () => {
+      const ours = await execCliInMemory(["eval", `-o${format}`, unionCgr, "customEmpty.flatTag"]);
+      expect(ours.code).toBe(0);
+      expect([...ours.stdout]).toEqual(bytes);
+    });
+  }
+});

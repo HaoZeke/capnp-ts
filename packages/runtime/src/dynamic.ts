@@ -3469,6 +3469,11 @@ export function setDynamicRoot(
   value: DynamicStructReader,
 ): void {
   const slot = builder.rootSlot();
+  if (value.ptr.kind === PtrKind.Null) {
+    // C++ `setRoot` copies a null-backed reader as a zero-sized struct.
+    builder.initStructAt(slot, 0, 0);
+    return;
+  }
   deepCopyPtrToSlot(builder, slot, value.ptr, 0);
 }
 
