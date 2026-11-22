@@ -3,6 +3,18 @@
   "version": "0.1.0-dev",
   "description": "Cap'n Proto RPC vat for the pure TypeScript runtime (levels 1 through 4)",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HaoZeke/capnp-ts.git",
+    "directory": "packages/rpc"
+  },
+  "homepage": "https://github.com/HaoZeke/capnp-ts#readme",
+  "bugs": {
+    "url": "https://github.com/HaoZeke/capnp-ts/issues"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
