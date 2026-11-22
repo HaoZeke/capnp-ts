@@ -209,11 +209,6 @@ dist/
 .DS_Store
 coverage/
 .turbo/
-
-# Grok Build local workflows (session-local; user copy in ~/.grok/workflows)
-.grok/
-
-
 .venv-pycapnp/
 # capnp-C++ interop peer build output
 /build-interop/
