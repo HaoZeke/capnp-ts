@@ -487,6 +487,15 @@ describe("json codec against capnp 1.4.0", () => {
     expect(f64("0x1p-99999999999999999999")).toBe(0);
     expect(f64("0x1p99999999999999999999")).toBe(Infinity);
   });
+
+  test("a non-number in a Data array decodes as a zero byte", () => {
+    const codec = new JsonCodec();
+    const raw = (json: string) => codec.decode(`{"raw":${json}}`, sink).get("raw").asData();
+    expect(raw('["x"]')).toEqual(new Uint8Array([0]));
+    expect(raw("[null,{}]")).toEqual(new Uint8Array([0, 0]));
+    expect(raw('[1,"x",2,[3],{"a":4},true,255]')).toEqual(new Uint8Array([1, 0, 2, 0, 0, 0, 255]));
+    for (const bad of ["[1.5]", "[256]", "[-1]"]) expect(() => raw(bad)).toThrow(CapnpError);
+  });
 });
 
 describe("nesting limit against capnp 1.4.0 pointer reads", () => {

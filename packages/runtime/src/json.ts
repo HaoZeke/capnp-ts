@@ -1744,9 +1744,11 @@ export class JsonCodec {
         const bytes = new Uint8Array(input.value.length);
         for (let i = 0; i < input.value.length; i++) {
           const item = input.value[i]!;
+          // json.c++ calls getNumber() unchecked; with NDEBUG a non-number
+          // Value reads its zero number word, so the byte is 0.
+          if (item.which !== "number") continue;
           assertCapnp(
-            item.which === "number" &&
-              Number.isInteger(item.value) &&
+            Number.isInteger(item.value) &&
               item.value >= 0 &&
               item.value <= 255,
             "JSON",
