@@ -403,6 +403,19 @@ describe("text format against capnp 1.4.0", () => {
     expect(() => readText("(raw = 0x'dead')")).toThrow(/Parse error/);
     expect(readText("(title = `hello\n)").get("title").asText()).toBe("hello\n");
   });
+
+  test("T-06 integer literals wrap modulo 2^64 before the range check", () => {
+    expect(readText("(u64 = 18446744073709551616)").get("u64").asUInt64()).toBe(0n);
+    expect(readText("(i64 = 99999999999999999999999)").get("i64").asInt64()).toBe(200376420520689663n);
+    expect(readText("(i64 = -18446744073709551617)").get("i64").asInt64()).toBe(-1n);
+    expect(readText("(u64 = 0x10000000000000000)").get("u64").asUInt64()).toBe(0n);
+    expect(readText("(u64 = 02000000000000000000000)").get("u64").asUInt64()).toBe(0n);
+    expect(readText("(u32 = 18446744073709551617)").get("u32").asUInt32()).toBe(1);
+    expect(readText("(f64 = 18446744073709551616)").get("f64").asFloat64()).toBe(0);
+    expect(() => readText("(u8 = 18446744073709551872)")).toThrow(CapnpError);
+    expect(() => readText("(i64 = 9223372036854775808)")).toThrow(CapnpError);
+    expect(() => readText("(i8 = -18446744073709551488)")).toThrow(/too big to be negative/);
+  });
 });
 
 describe("json codec against capnp 1.4.0", () => {
