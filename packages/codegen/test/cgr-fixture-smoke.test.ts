@@ -167,6 +167,36 @@ describe("CGR fixture smoke", () => {
     expect(statSync(fixture).size).toBeGreaterThan(10_000);
   });
 
+  test("capnpc-ts CLI --help and --version exit 0 with consumer -ots usage", async () => {
+    const bin = join(here, "..", "bin", "capnpc-ts");
+    const helpProc = Bun.spawn([bin, "--help"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [helpOut, helpErr, helpCode] = await Promise.all([
+      new Response(helpProc.stdout).text(),
+      new Response(helpProc.stderr).text(),
+      helpProc.exited,
+    ]);
+    expect(helpCode).toBe(0);
+    expect(helpErr).toBe("");
+    expect(helpOut).toContain("capnp compile -ots");
+    expect(helpOut).not.toContain("-o./packages/codegen");
+
+    const verProc = Bun.spawn([bin, "--version"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [verOut, verErr, verCode] = await Promise.all([
+      new Response(verProc.stdout).text(),
+      new Response(verProc.stderr).text(),
+      verProc.exited,
+    ]);
+    expect(verCode).toBe(0);
+    expect(verErr).toBe("");
+    expect(verOut.trim()).toMatch(/^capnpc-ts \d+\.\d+\.\d+/);
+  });
+
   test("addressbook.cgr.bin emit has Person getters and enum const map", async () => {
     const src = emitSourceString(await walkCgr(loadFixture("addressbook.cgr.bin")));
     expect(src).toContain("Person_getId");

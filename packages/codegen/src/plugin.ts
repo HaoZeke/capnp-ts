@@ -2,12 +2,12 @@
  * capnpc-ts entry: read framed CodeGeneratorRequest from stdin or a file arg,
  * walk full CGR AST (Message.fromFlat), emit typed TypeScript modules.
  *
- * Usage (from repo root or any cwd):
- *   capnp compile -o./packages/codegen/bin/capnpc-ts schema.capnp
+ * Usage:
+ *   capnp compile -ots schema.capnp
  *
  * Offline:
  *   capnp compile -o- schema.capnp > req.cgr.bin
- *   ./packages/codegen/bin/capnpc-ts req.cgr.bin
+ *   capnpc-ts req.cgr.bin
  */
 
 import { readFileSync } from "node:fs";
@@ -17,6 +17,22 @@ import {
   type CgrAst,
 } from "./cgr-walk.ts";
 import { emitFromAst, emitSourceString } from "./emit.ts";
+
+const HELP_TEXT = `Usage:
+  capnp compile -ots <schema.capnp>
+  capnp compile -o- <schema.capnp> > req.cgr.bin && capnpc-ts [--stdout] req.cgr.bin
+
+Options:
+  --stdout     Write generated TypeScript to stdout
+  --help, -h   Show this help message and exit
+  --version    Show version and exit
+`;
+
+function readPackageVersion(): string {
+  const raw = readFileSync(new URL("../package.json", import.meta.url), "utf8");
+  const parsed = JSON.parse(raw) as { version?: string };
+  return parsed.version ?? "0.0.0";
+}
 
 async function readInput(argv: string[]): Promise<Uint8Array> {
   const fileArg = argv.find((a) => a !== "--stdout" && a !== "-");
@@ -28,7 +44,7 @@ async function readInput(argv: string[]): Promise<Uint8Array> {
     throw new Error(
       "capnpc-ts: no file argument and stdin is a TTY.\n" +
         "  Pass a framed CodeGeneratorRequest file, or pipe from capnp:\n" +
-        "    capnp compile -o./packages/codegen/bin/capnpc-ts schema.capnp\n" +
+        "    capnp compile -ots schema.capnp\n" +
         "    capnp compile -o- schema.capnp > req.cgr.bin && capnpc-ts req.cgr.bin",
     );
   }
@@ -74,7 +90,7 @@ async function openCgr(bytes: Uint8Array): Promise<CgrAst> {
       console.error("  Message.fromFlat CGR walk failed on this buffer.");
     }
     console.error(
-      "  Usage: capnp compile -o./packages/codegen/bin/capnpc-ts schema.capnp",
+      "  Usage: capnp compile -ots schema.capnp",
     );
     process.exitCode = 1;
     throw err;
@@ -82,6 +98,15 @@ async function openCgr(bytes: Uint8Array): Promise<CgrAst> {
 }
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    process.stdout.write(HELP_TEXT);
+    return;
+  }
+  if (argv.includes("--version")) {
+    process.stdout.write(`capnpc-ts ${readPackageVersion()}\n`);
+    return;
+  }
+
   let bytes: Uint8Array;
   try {
     bytes = await readInput(argv);
@@ -96,7 +121,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       "capnpc-ts: empty input (0 bytes). Expected framed CodeGeneratorRequest.",
     );
     console.error(
-      "  Usage: capnp compile -o./packages/codegen/bin/capnpc-ts schema.capnp",
+      "  Usage: capnp compile -ots schema.capnp",
     );
     process.exitCode = 1;
     return;
