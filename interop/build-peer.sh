@@ -3,10 +3,11 @@
 # server and the Echo peer. Needs capnp-rpc and capnpc-c++ on the
 # toolchain; the CI job supplies both through pixi.
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 OUT="${1:-$ROOT/build-interop}"
 INC="$(pkg-config --variable=includedir capnp)"
-mkdir -p "$OUT"
+mkdir -p -- "$OUT"
+OUT="$(CDPATH='' cd -- "$OUT" && pwd)"
 cd "$OUT"
 capnp compile --src-prefix="$ROOT/schema" -oc++:"$OUT" "$ROOT/schema/adder.capnp"
 ${CXX:-c++} -std=c++17 -o rpc_peer_server \

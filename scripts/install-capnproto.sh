@@ -12,6 +12,9 @@ sha256=fa02378ad522b318916b9ad928d1372fc9abd43dd1f4f0392e50450f5c87828f
 prefix=${1:-"${HOME}/.local/capnproto-${version}"}
 url="https://capnproto.org/capnproto-c++-${version}.tar.gz"
 
+mkdir -p -- "${prefix}"
+prefix="$(CDPATH='' cd -- "${prefix}" && pwd)"
+
 if [[ -x "${prefix}/bin/capnp" ]]; then
   echo "Cap'n Proto ${version} already installed at ${prefix}"
   "${prefix}/bin/capnp" --version
