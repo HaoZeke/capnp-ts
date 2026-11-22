@@ -94,11 +94,9 @@ mkdir -p "$FIX/eval-json"
 EVAL_JSON_FILES="eval-unions.cgr.bin"
 (cd "$ROOT/schema" && capnp compile -o- capability-fields.capnp) >"$FIX/capability-fields.cgr.bin"
 EVAL_JSON_FILES="$EVAL_JSON_FILES capability-fields.cgr.bin"
-for c in extremeConst; do
-  capnp eval -o json "$ROOT/schema/dynamic-kitchen.capnp" "$c" >"$FIX/eval-json/$c.json"
-  capnp eval --short -o json "$ROOT/schema/dynamic-kitchen.capnp" "$c" >"$FIX/eval-json/$c.short.json"
-  EVAL_JSON_FILES="$EVAL_JSON_FILES eval-json/$c.json eval-json/$c.short.json"
-done
+capnp eval -o json "$ROOT/schema/dynamic-kitchen.capnp" extremeConst >"$FIX/eval-json/extremeConst.json"
+capnp eval --short -o json "$ROOT/schema/dynamic-kitchen.capnp" extremeConst >"$FIX/eval-json/extremeConst.short.json"
+EVAL_JSON_FILES="$EVAL_JSON_FILES eval-json/extremeConst.json eval-json/extremeConst.short.json"
 for c in $EVAL_JSON_CONSTS; do
   capnp eval -o json "$ROOT/schema/eval-unions.capnp" "$c" >"$FIX/eval-json/$c.json"
   capnp eval --short -o json "$ROOT/schema/eval-unions.capnp" "$c" >"$FIX/eval-json/$c.short.json"
