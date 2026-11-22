@@ -21,10 +21,16 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: latest
+          bun-version: "1.4.5"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Build packages
+        run: bun run build
+
+      - name: Typecheck packages
+        run: bun run typecheck
 
       # Install before tests: live capnp compile paths use test.skipIf(!hasCapnp).
       # Critical codegen suites use offline CGR fixtures and must not soft-pass.
@@ -51,15 +57,14 @@ jobs:
           python3 -m venv .venv-pycapnp
           .venv-pycapnp/bin/pip install --quiet --upgrade pip
           .venv-pycapnp/bin/pip install --quiet pycapnp
-          .venv-pycapnp/bin/python -c "import capnp; print('pycapnp ok')"
+          .venv-pycapnp/bin/python scripts/pycapnp_interop.py check
+          .venv-pycapnp/bin/python scripts/pycapnp_interop.py write-all
+          git diff --exit-code -- packages/runtime/test/golden
 
       - name: Test
         env:
           CAPNP_REQUIRE_PYCAPNP: "1"
         run: bun test --timeout 10000
-
-      - name: Typecheck packages
-        run: bun run build
 
       # Regenerating and checking only for non-empty would accept a golden
       # that drifted; --check asserts the bytes still match the capnp CLI,
@@ -83,6 +88,107 @@ jobs:
           "$GITHUB_WORKSPACE/packages/codegen/bin/capnpc-ts.mjs" addressbook.cgr.bin
           test -s addressbook.ts
 
+  node-smoke:
+    name: Node ${{ matrix.node-version }} tarball smoke
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["18.12.1", "18.18.2", "18", "20", "22"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.4.5"
+
+      - name: Cache Cap'n Proto 1.4.0
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.tool_cache }}/capnproto-1.4.0
+          key: capnproto-1.4.0-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install Cap'n Proto 1.4.0
+        run: |
+          prefix="${{ runner.tool_cache }}/capnproto-1.4.0"
+          bash scripts/install-capnproto.sh "$prefix"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          "$prefix/bin/capnp" --version
+
+      - name: Build and pack workspace tarballs
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bun run build
+          out_dir="$(pwd)/smoke-dist"
+          rm -rf "$out_dir"
+          mkdir -p "$out_dir"
+          for pkg in packages/runtime packages/codegen packages/rpc; do
+            (cd "$pkg" && npm pack --pack-destination "$out_dir")
+          done
+
+      - name: Install and smoke tarballs under Node and Bun
+        run: |
+          set -euo pipefail
+          workspace="$(pwd)"
+          dist_dir="$workspace/smoke-dist"
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "$scratch"' EXIT
+          rt_matches=("$dist_dir"/haozeke-capnp-[0-9]*.tgz)
+          cg_matches=("$dist_dir"/haozeke-capnpc-ts-*.tgz)
+          rpc_matches=("$dist_dir"/haozeke-capnp-rpc-*.tgz)
+          cat > "$scratch/package.json" <<EOF
+          {
+            "name": "capnp-ts-node-smoke",
+            "private": true,
+            "type": "module",
+            "scripts": {
+              "codegen": "capnp compile --src-prefix=$workspace/schema -ots $workspace/schema/addressbook.capnp"
+            },
+            "dependencies": {
+              "@haozeke/capnp": "file:${rt_matches[0]}",
+              "@haozeke/capnpc-ts": "file:${cg_matches[0]}",
+              "@haozeke/capnp-rpc": "file:${rpc_matches[0]}"
+            }
+          }
+          EOF
+          cd "$scratch"
+          npm install --no-audit --no-fund
+          node --input-type=module -e '
+            const rt = await import("@haozeke/capnp");
+            const packed = await import("@haozeke/capnp/packed");
+            const cg = await import("@haozeke/capnpc-ts");
+            const rpc = await import("@haozeke/capnp-rpc");
+            if (
+              typeof rt.Message !== "function" ||
+              typeof packed.pack !== "function" ||
+              typeof cg.emitFromAst !== "function" ||
+              typeof rpc.Vat !== "function"
+            ) {
+              process.exit(1);
+            }
+          '
+          node_dir="$(dirname "$(command -v node)")"
+          bun_dir="$(dirname "$(command -v bun)")"
+          capnp_dir="$(dirname "$(command -v capnp)")"
+          node_path="$PWD/node_modules/.bin:$node_dir:$capnp_dir:/usr/bin:/bin"
+          PATH="$node_path" node -v
+          PATH="$node_path" capnp-ts --version
+          PATH="$node_path" capnpc-ts --version
+          PATH="$node_path" capnpc-ts --help >/dev/null
+          PATH="$node_path" capnp compile --src-prefix="$workspace/schema" -ots "$workspace/schema/addressbook.capnp"
+          test -s addressbook.ts
+          rm -f addressbook.ts
+          bun_path="$bun_dir:$capnp_dir:/usr/bin:/bin"
+          PATH="$bun_path" bunx --no-install capnp-ts --version
+          PATH="$bun_path" bunx --no-install capnpc-ts --version
+          PATH="$bun_path" bun run codegen
+          test -s addressbook.ts
+
   rpc-interop:
     name: live capnp-C++ RPC peer
     runs-on: ubuntu-latest
@@ -90,13 +196,15 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: latest
+          bun-version: "1.4.5"
       - uses: prefix-dev/setup-pixi@92815284c57faa15cd896c4d5cfb2d59f32dc43d # v0.8.3
         with:
           environments: default
           locked: false
       - name: Install dependencies
         run: bun install --frozen-lockfile
+      - name: Build packages
+        run: bun run build
       # Byte equality against our own encoders says nothing about whether
       # the reference implementation will talk to us. This bootstraps a
       # real EzRpcServer and calls it.
