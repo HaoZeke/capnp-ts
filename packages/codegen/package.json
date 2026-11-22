@@ -33,7 +33,7 @@
     "build": "tsup",
     "prepack": "tsup",
     "prepublishOnly": "tsup",
-    "test": "bun test --timeout 10000 test"
+    "test": "bun run --cwd ../.. build && bun test --timeout 10000 test"
   },
   "devDependencies": {
     "tsup": "^8.5.0"

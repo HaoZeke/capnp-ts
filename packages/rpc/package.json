@@ -28,6 +28,7 @@
   "files": ["dist", "LICENSE", "README.md"],
   "license": "MIT",
   "scripts": {
+    "test": "bun run --cwd ../.. build && bun test --timeout 10000 test",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "tsup",
     "prepack": "tsup",

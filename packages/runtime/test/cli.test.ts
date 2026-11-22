@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -275,10 +275,12 @@ describe("capnp-ts CLI (encode, decode, convert, eval)", () => {
 
     // Subprocess smoke under Node (when dist/cli.js is built)
     if (hasNode) {
-      const buildRes = spawnSync("bun", ["run", "--filter", "@haozeke/capnp", "build"], {
-        cwd: repoRoot,
-      });
-      expect(buildRes.status).toBe(0);
+      if (!existsSync(join(here, "..", "dist", "cli.js"))) {
+        const buildRes = spawnSync("bun", ["run", "--filter", "@haozeke/capnp", "build"], {
+          cwd: repoRoot,
+        });
+        expect(buildRes.status).toBe(0);
+      }
       const nodeProc = spawnSync(
         "node",
         [cliBin, "decode", "--short", join(goldenDir, "addressbook.cgr.bin"), "AddressBook"],
