@@ -1,6 +1,6 @@
 {
   "name": "@haozeke/capnpc-ts",
-  "version": "0.1.0-dev",
+  "version": "0.1.0",
   "description": "Cap'n Proto schema compiler plugin for TypeScript",
   "type": "module",
   "engines": {
@@ -39,7 +39,7 @@
     "tsup": "^8.5.0"
   },
   "dependencies": {
-    "@haozeke/capnp": "^0.1.0-dev"
+    "@haozeke/capnp": "^0.1.0"
   },
   "license": "MIT",
   "files": ["bin", "dist", "README.md", "LICENSE"]

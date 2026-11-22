@@ -11,19 +11,19 @@
     },
     "examples/pi-admit-harness": {
       "name": "@haozeke/capnp-pi-admit-harness",
-      "version": "0.1.0-dev",
+      "version": "0.1.0",
       "dependencies": {
         "@haozeke/capnp": "workspace:*",
       },
     },
     "packages/codegen": {
       "name": "@haozeke/capnpc-ts",
-      "version": "0.1.0-dev",
+      "version": "0.1.0",
       "bin": {
         "capnpc-ts": "./bin/capnpc-ts.mjs",
       },
       "dependencies": {
-        "@haozeke/capnp": "^0.1.0-dev",
+        "@haozeke/capnp": "^0.1.0",
       },
       "devDependencies": {
         "tsup": "^8.5.0",
@@ -31,9 +31,9 @@
     },
     "packages/rpc": {
       "name": "@haozeke/capnp-rpc",
-      "version": "0.1.0-dev",
+      "version": "0.1.0",
       "dependencies": {
-        "@haozeke/capnp": "^0.1.0-dev",
+        "@haozeke/capnp": "^0.1.0",
       },
       "devDependencies": {
         "tsup": "^8.5.0",
@@ -41,7 +41,7 @@
     },
     "packages/runtime": {
       "name": "@haozeke/capnp",
-      "version": "0.1.0-dev",
+      "version": "0.1.0",
       "bin": {
         "capnp-ts": "./bin/capnp-ts.mjs",
       },

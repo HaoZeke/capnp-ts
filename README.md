@@ -8,7 +8,7 @@ Pure TypeScript [Cap'n Proto](https://capnproto.org) wire runtime and
 zero-copy segment views, defensive traversal limits, and CLI golden parity
 where claimed.
 
-**Status:** early (`0.1.0-dev`). Runtime ships a message reader, stream
+**Status:** early (`0.1.0`). Runtime ships a message reader, stream
 framing, multi-segment builder, packed codec, canonical form, orphans,
 deep-copy, and list upgrade/downgrade views. Packed and canonical match
 Cap'n C++ 1.4.0 AddressBook goldens **byte-for-byte** (see
@@ -166,7 +166,7 @@ workspace tarball):
 $ npm install @haozeke/capnp @haozeke/capnp-rpc
 $ npm install --save-dev @haozeke/capnpc-ts
 # or from a release / local tarball:
-$ bun add ./haozeke-capnp-0.1.0-dev.tgz
+$ bun add ./haozeke-capnp-0.1.0.tgz
 ```
 
 Published packages export compiled ESM and `.d.ts` declarations from `dist/`

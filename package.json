@@ -15,7 +15,7 @@
     "typescript": "^5.8.2",
     "@types/bun": "latest"
   },
-  "version": "0.1.0-dev",
+  "version": "0.1.0",
   "type": "module",
   "exports": {
     ".": {

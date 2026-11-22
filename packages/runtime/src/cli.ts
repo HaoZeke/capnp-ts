@@ -1265,7 +1265,7 @@ export async function runCli(
       return 0;
     }
     if (flags.version) {
-      writeOut(UTF8_ENC.encode("capnp-ts 0.1.0-dev\n"));
+      writeOut(UTF8_ENC.encode("capnp-ts 0.1.0\n"));
       return 0;
     }
 

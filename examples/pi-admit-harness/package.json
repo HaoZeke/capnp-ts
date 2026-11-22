@@ -1,6 +1,6 @@
 {
   "name": "@haozeke/capnp-pi-admit-harness",
-  "version": "0.1.0-dev",
+  "version": "0.1.0",
   "private": true,
   "description": "Standalone Cap'n admit (prepare) harness for OMP/Pi extensions; pure ESM, no native addon",
   "type": "module",

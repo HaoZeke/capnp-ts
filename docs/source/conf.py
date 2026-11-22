@@ -1,7 +1,7 @@
 project = "capnp-ts"
 copyright = "2026, Rohit Goswami"
 author = "Rohit Goswami"
-release = "0.1.0-dev"
+release = "0.1.0"
 
 extensions = [
     "sphinx_copybutton",

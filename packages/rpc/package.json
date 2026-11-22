@@ -1,6 +1,6 @@
 {
   "name": "@haozeke/capnp-rpc",
-  "version": "0.1.0-dev",
+  "version": "0.1.0",
   "description": "Cap'n Proto RPC vat for the pure TypeScript runtime (levels 1 through 4)",
   "type": "module",
   "engines": {
@@ -38,6 +38,6 @@
     "tsup": "^8.5.0"
   },
   "dependencies": {
-    "@haozeke/capnp": "^0.1.0-dev"
+    "@haozeke/capnp": "^0.1.0"
   }
 }
