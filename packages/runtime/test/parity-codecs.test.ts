@@ -416,6 +416,12 @@ describe("text format against capnp 1.4.0", () => {
     expect(() => readText("(i64 = 9223372036854775808)")).toThrow(CapnpError);
     expect(() => readText("(i8 = -18446744073709551488)")).toThrow(/too big to be negative/);
   });
+
+  test("T-07 a negated integer zero is a positive float zero", () => {
+    expect(Object.is(readText("(f64 = -0)").get("f64").asFloat64(), 0)).toBe(true);
+    expect(Object.is(readText("(f32 = -0x0)").get("f32").asFloat32(), 0)).toBe(true);
+    expect(Object.is(readText("(f64 = -0.0)").get("f64").asFloat64(), -0)).toBe(true);
+  });
 });
 
 describe("json codec against capnp 1.4.0", () => {
