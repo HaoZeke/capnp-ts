@@ -1,9 +1,5 @@
 import { defineConfig } from "tsup";
 
-/**
- * Optional publish build for Node / non-Bun consumers.
- * Bun resolves the package "bun" export condition to src/ directly.
- */
 export default defineConfig({
   entry: {
     index: "src/index.ts",

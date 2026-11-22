@@ -15,12 +15,8 @@ $ bun add @haozeke/capnp
 
 Node ≥ 18 or Bun. Pure ESM; no native addon.
 
-Package exports:
-
-| Condition | Resolution |
-|-----------|------------|
-| `bun` | TypeScript sources under `src/` (no build step) |
-| `types` / `import` / `default` | `dist/` (run `bun run build` / `tsup` before publish) |
+Package exports resolve compiled ESM and `.d.ts` declarations from `dist/`
+(built with `bun run build` / `tsup`).
 
 ## Public surface
 

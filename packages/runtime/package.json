@@ -3,6 +3,18 @@
   "version": "0.1.0-dev",
   "description": "Pure TypeScript Cap'n Proto wire runtime (HaoZeke family)",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HaoZeke/capnp-ts.git",
+    "directory": "packages/runtime"
+  },
+  "homepage": "https://github.com/HaoZeke/capnp-ts#readme",
+  "bugs": {
+    "url": "https://github.com/HaoZeke/capnp-ts/issues"
+  },
   "bin": {
     "capnp-ts": "./bin/capnp-ts"
   },
@@ -10,49 +22,41 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "bun": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
     "./packed": {
-      "bun": "./src/packed.ts",
       "types": "./dist/packed.d.ts",
       "import": "./dist/packed.js",
       "default": "./dist/packed.js"
     },
     "./canonical": {
-      "bun": "./src/canonical.ts",
       "types": "./dist/canonical.d.ts",
       "import": "./dist/canonical.js",
       "default": "./dist/canonical.js"
     },
     "./schema": {
-      "bun": "./src/schema.ts",
       "types": "./dist/schema.d.ts",
       "import": "./dist/schema.js",
       "default": "./dist/schema.js"
     },
     "./dynamic": {
-      "bun": "./src/dynamic.ts",
       "types": "./dist/dynamic.d.ts",
       "import": "./dist/dynamic.js",
       "default": "./dist/dynamic.js"
     },
     "./text": {
-      "bun": "./src/text.ts",
       "types": "./dist/text.d.ts",
       "import": "./dist/text.js",
       "default": "./dist/text.js"
     },
     "./json": {
-      "bun": "./src/json.ts",
       "types": "./dist/json.d.ts",
       "import": "./dist/json.js",
       "default": "./dist/json.js"
     },
     "./cli": {
-      "bun": "./src/cli.ts",
       "types": "./dist/cli.d.ts",
       "import": "./dist/cli.js",
       "default": "./dist/cli.js"
@@ -71,5 +75,5 @@
   },
   "license": "MIT",
   "sideEffects": false,
-  "files": ["bin", "src", "dist", "LICENSE", "README.md"]
+  "files": ["bin", "dist", "LICENSE", "README.md"]
 }

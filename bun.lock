@@ -25,6 +25,9 @@
       "dependencies": {
         "@haozeke/capnp": "^0.1.0-dev",
       },
+      "devDependencies": {
+        "tsup": "^8.5.0",
+      },
     },
     "packages/rpc": {
       "name": "@haozeke/capnp-rpc",
@@ -39,6 +42,9 @@
     "packages/runtime": {
       "name": "@haozeke/capnp",
       "version": "0.1.0-dev",
+      "bin": {
+        "capnp-ts": "./bin/capnp-ts",
+      },
       "devDependencies": {
         "tsup": "^8.5.0",
       },
