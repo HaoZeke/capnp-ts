@@ -17,6 +17,7 @@ import {
   TextCodec,
   canonicalize,
   canonicalizeFlat,
+  decodeJson,
   decodeText,
   isCanonical,
   pack,
@@ -505,6 +506,25 @@ describe("json codec against capnp 1.4.0", () => {
     expect(f64(`0x0.${zeros}1p1038930`)).toBe(5e-324);
     expect(f64("0x1p-99999999999999999999")).toBe(0);
     expect(f64("0x1p99999999999999999999")).toBe(Infinity);
+  });
+
+  test("NaN float strings keep the sign and payload glibc strtod gives", () => {
+    const f64 = sink.getFieldByName("f64").offset * 8;
+    const f32 = sink.getFieldByName("f32").offset * 4;
+    const root = (json: string) => Message.fromFlat(decodeJson(json, sink).copyFlat()).root();
+    // KitchenSink defaults: f64 = -2.25, f32 = 1.5.
+    const bits64 = (s: string) => root(`{"f64":${JSON.stringify(s)}}`).getU64(f64, 0xc002000000000000n);
+    const bits32 = (s: string) => root(`{"f32":${JSON.stringify(s)}}`).getU32(f32, 0x3fc00000);
+    expect(bits64("nan")).toBe(0x7ff8000000000000n);
+    expect(bits64("-nan")).toBe(0xfff8000000000000n);
+    expect(bits64("nan(123)")).toBe(0x7ff800000000007bn);
+    expect(bits64(" -nan(0x7b)")).toBe(0xfff800000000007bn);
+    expect(bits64("nan(0173)")).toBe(0x7ff800000000007bn);
+    expect(bits64("nan(99999999999999999999)")).toBe(0x7fffffffffffffffn);
+    expect(bits64("nan(12abc)")).toBe(0x7ff8000000000000n);
+    expect(bits32("-nan")).toBe(0xffc00000);
+    expect(bits32("nan(0x7fffffffffffff)")).toBe(0x7fffffff);
+    expect(bits32("nan(123)")).toBe(0x7fc00000);
   });
 
   test("a non-number in a Data array decodes as a zero byte", () => {
