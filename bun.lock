@@ -20,7 +20,7 @@
       "name": "@haozeke/capnpc-ts",
       "version": "0.1.0-dev",
       "bin": {
-        "capnpc-ts": "./bin/capnpc-ts",
+        "capnpc-ts": "./bin/capnpc-ts.mjs",
       },
       "dependencies": {
         "@haozeke/capnp": "^0.1.0-dev",
@@ -43,7 +43,7 @@
       "name": "@haozeke/capnp",
       "version": "0.1.0-dev",
       "bin": {
-        "capnp-ts": "./bin/capnp-ts",
+        "capnp-ts": "./bin/capnp-ts.mjs",
       },
       "devDependencies": {
         "tsup": "^8.5.0",

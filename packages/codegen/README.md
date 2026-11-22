@@ -10,7 +10,7 @@ const-map enums, and union `which()` helpers. UInt64/Int64 always use `getU64`
 
 ## Requirements
 
-- [Bun](https://bun.sh) on `PATH` (plugin shebang: `#!/usr/bin/env bun`)
+- Node.js ≥ 18 on `PATH` for direct `capnp compile -ots` or `./packages/codegen/bin/capnpc-ts.mjs` execution (plugin shebang: `#!/usr/bin/env node`), or [Bun](https://bun.sh) via `bun run` / `bunx @haozeke/capnpc-ts`
 - Cap'n Proto CLI **1.4.x** (`capnp compile`). Workspace pin: root `pixi.toml`
 
 ```console
@@ -18,11 +18,35 @@ $ pixi install          # from monorepo root
 $ pixi run -- capnp --version
 ```
 
-## Compile examples (from monorepo root)
+## Compile examples
 
-Plugin binary: `packages/codegen/bin/capnpc-ts`. Output files are written into
-the **process working directory** (not next to the schema), named
-`<schema-stem>.ts`.
+In a consumer project with `@haozeke/capnpc-ts` installed (`node` and
+`node_modules/.bin` on `PATH`):
+
+```console
+$ capnp compile -ots schema.capnp
+```
+
+In a Bun-only consumer project (with `@haozeke/capnpc-ts` installed locally and
+no `node` on `PATH`), run `capnp compile -ots` through a `package.json` script
+with `bun run` (which prepends a `node` shim onto `PATH`), or invoke
+`bunx @haozeke/capnpc-ts` (or `bun ./node_modules/@haozeke/capnpc-ts/bin/capnpc-ts.mjs`)
+on a dumped CGR:
+
+```console
+$ bun run codegen                 # e.g. "codegen": "capnp compile -ots schema.capnp"
+$ bunx @haozeke/capnpc-ts schema.cgr.bin
+```
+
+Note on binary naming: `capnp compile -ots` looks up an executable named
+`capnpc-ts`, which collides with an unrelated unscoped `capnpc-ts` package on
+npm. Always install `@haozeke/capnpc-ts` locally first or pass the scoped
+`bunx @haozeke/capnpc-ts` package name; bare `bunx capnpc-ts` without a local
+install downloads that unrelated unscoped package.
+
+From the monorepo root, plugin binary `packages/codegen/bin/capnpc-ts.mjs`
+writes output files into the **process working directory** (named
+`<schema-stem>.ts`).
 
 ### AddressBook via `capnp compile -o`
 
@@ -30,7 +54,7 @@ the **process working directory** (not next to the schema), named
 $ mkdir -p /tmp/capnpc-ts-out && cd /tmp/capnpc-ts-out
 $ capnp compile \
     --src-prefix=/path/to/capnp-ts \
-    -o/path/to/capnp-ts/packages/codegen/bin/capnpc-ts \
+    -o/path/to/capnp-ts/packages/codegen/bin/capnpc-ts.mjs \
     /path/to/capnp-ts/schema/addressbook.capnp
 ```
 
@@ -39,7 +63,7 @@ From the monorepo root:
 ```console
 $ cd /path/to/capnp-ts
 $ capnp compile --src-prefix=. \
-    -o./packages/codegen/bin/capnpc-ts \
+    -o./packages/codegen/bin/capnpc-ts.mjs \
     schema/addressbook.capnp
 # → addressbook.ts in cwd
 ```
@@ -105,28 +129,29 @@ current directory. Relative schemas under the monorepo root work with
 ```console
 $ cd /path/to/capnp-ts
 $ capnp compile --src-prefix=. -o- schema/addressbook.capnp > /tmp/addressbook.cgr.bin
-$ ./packages/codegen/bin/capnpc-ts /tmp/addressbook.cgr.bin
+$ ./packages/codegen/bin/capnpc-ts.mjs /tmp/addressbook.cgr.bin
+# (or with Bun only: bun ./packages/codegen/bin/capnpc-ts.mjs /tmp/addressbook.cgr.bin)
 # writes addressbook.ts into cwd
 ```
 
 Dry-run to stdout (no files written):
 
 ```console
-$ ./packages/codegen/bin/capnpc-ts --stdout /tmp/addressbook.cgr.bin
+$ ./packages/codegen/bin/capnpc-ts.mjs --stdout /tmp/addressbook.cgr.bin
 ```
 
 ### u64probe
 
 ```console
 $ capnp compile --src-prefix=. \
-    -o./packages/codegen/bin/capnpc-ts \
+    -o./packages/codegen/bin/capnpc-ts.mjs \
     schema/u64probe.capnp
 # → u64probe.ts with U64Probe_getId / getSigned via getU64
 ```
 
 ## How it works
 
-1. `capnp compile -o…/capnpc-ts` spawns this plugin with a framed CGR on stdin
+1. `capnp compile -ots` (or `-o…/capnpc-ts.mjs`) spawns this plugin with a framed CGR on stdin
    (or you pass a CGR file path offline).
 2. `plugin.ts` uses `@haozeke/capnp` `Message.fromFlat` + `walkCgr` (full Node /
    Field / Type AST; hand-offset walk remains for summary-only fallbacks).
@@ -152,7 +177,8 @@ $ capnp compile --src-prefix=. \
 ## Package scripts
 
 ```console
-$ bun run --filter @haozeke/capnpc-ts build   # tsc --noEmit
+$ bun run --filter @haozeke/capnpc-ts build
+$ bun run --filter @haozeke/capnpc-ts typecheck
 $ bun test packages/codegen
 ```
 

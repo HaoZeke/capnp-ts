@@ -1,7 +1,0 @@
-#!/usr/bin/env node
-const entry =
-  typeof globalThis.Bun !== "undefined"
-    ? new URL("../src/cli.ts", import.meta.url)
-    : new URL("../dist/cli.js", import.meta.url);
-const { main } = await import(entry.href);
-process.exitCode = await main(process.argv.slice(2));

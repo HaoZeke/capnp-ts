@@ -175,7 +175,7 @@ describe("text and data edge cases", () => {
     expect(cli.stderr).toContain("not NUL-terminated");
     const ts = spawnSync(
       process.execPath,
-      [join(repoRoot, "packages/runtime/bin/capnp-ts"), ...args],
+      [join(repoRoot, "packages/runtime/bin/capnp-ts.mjs"), ...args],
       { input: buf, encoding: "utf8" },
     );
     expect(ts.stdout).toBe("");

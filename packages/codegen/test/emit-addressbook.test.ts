@@ -9,10 +9,11 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
   existsSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
@@ -36,9 +37,25 @@ const goldenPath = join(
 const addressbookSchema = join(repoRoot, "schema", "addressbook.capnp");
 const u64probeSchema = join(repoRoot, "schema", "u64probe.capnp");
 const u64probeFixture = join(fixturesDir, "u64probe.cgr.bin");
-const pluginBin = join(repoRoot, "packages", "codegen", "bin", "capnpc-ts");
+const pluginBin = join(repoRoot, "packages", "codegen", "bin", "capnpc-ts.mjs");
 
 const hasCapnp = Bun.spawnSync(["which", "capnp"]).exitCode === 0;
+
+let cachedPluginEnv: Record<string, string | undefined> | undefined;
+function pluginSpawnEnv(): Record<string, string | undefined> {
+  if (cachedPluginEnv) return cachedPluginEnv;
+  if (Bun.spawnSync(["which", "node"]).exitCode === 0) {
+    cachedPluginEnv = { ...process.env };
+    return cachedPluginEnv;
+  }
+  const shimDir = mkdtempSync(join(tmpdir(), "capnpc-ts-node-shim-"));
+  symlinkSync(process.execPath, join(shimDir, "node"));
+  cachedPluginEnv = {
+    ...process.env,
+    PATH: `${shimDir}${delimiter}${process.env.PATH ?? ""}`,
+  };
+  return cachedPluginEnv;
+}
 
 async function loadAddressbookAst() {
   const bytes = new Uint8Array(
@@ -174,6 +191,7 @@ describe("generated AddressBook decode", () => {
         ],
         {
           cwd: outDir,
+          env: pluginSpawnEnv(),
           stdout: "pipe",
           stderr: "pipe",
         },
@@ -250,7 +268,7 @@ describe("u64probe codegen smoke", () => {
           `-o${pluginBin}`,
           u64probeSchema,
         ],
-        { cwd: outDir, stdout: "pipe", stderr: "pipe" },
+        { cwd: outDir, env: pluginSpawnEnv(), stdout: "pipe", stderr: "pipe" },
       );
       const exitCode = await proc.exited;
       expect(exitCode).toBe(0);

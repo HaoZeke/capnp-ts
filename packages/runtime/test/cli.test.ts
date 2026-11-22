@@ -23,7 +23,7 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..", "..");
 const goldenDir = join(here, "golden");
-const cliBin = join(here, "..", "bin", "capnp-ts");
+const cliBin = join(here, "..", "bin", "capnp-ts.mjs");
 const hasCapnp = spawnSync("capnp", ["--version"]).status === 0;
 const hasNode = spawnSync("node", ["--version"]).status === 0;
 
@@ -1564,4 +1564,27 @@ describe("eval of an unset struct field", () => {
       expect([...ours.stdout]).toEqual(bytes);
     });
   }
+});
+
+describe("capnp-ts.mjs launcher without dist", () => {
+  test("prints a one-line hint to run bun run build without a stack trace", () => {
+    const dir = mkdtempSync(join(tmpdir(), "capnp-ts-nodist-"));
+    try {
+      const binDir = join(dir, "bin");
+      mkdirSync(binDir, { recursive: true });
+      const copiedBin = join(binDir, "capnp-ts.mjs");
+      writeFileSync(copiedBin, readFileSync(cliBin));
+      const res = spawnSync(process.execPath, [copiedBin, "--version"], {
+        encoding: "utf8",
+      });
+      expect(res.status).toBe(1);
+      expect(res.stdout).toBe("");
+      const lines = res.stderr.trimEnd().split("\n");
+      expect(lines.length).toBe(1);
+      expect(lines[0]).toContain("bun run build");
+      expect(res.stderr).not.toContain("at ");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

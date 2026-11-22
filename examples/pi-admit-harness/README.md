@@ -23,12 +23,17 @@ step.
 
 ## Run (standalone)
 
-From the monorepo root (after `bun install` at the workspace root):
+From the monorepo root (after `bun install` and `bun run build` at the workspace
+root):
 
 ```bash
+bun install
+bun run build
 bun examples/pi-admit-harness/admit-harness.ts
 # or
 bun run --filter @haozeke/capnp-pi-admit-harness start
+# or from examples/pi-admit-harness/:
+(cd examples/pi-admit-harness && bun run admit)
 ```
 
 Default: admit the AddressBook golden via `Message.fromFlat` and print Alice /
@@ -147,9 +152,9 @@ and the generated `AddressBook_*` / `Person_*` helpers (no hand frame scan).
 Regenerate the checked-in module when the schema changes:
 
 ```bash
-# from monorepo root; plugin binary is packages/codegen/bin/capnpc-ts
+# from monorepo root (after bun run build; plugin binary is packages/codegen/bin/capnpc-ts.mjs)
 capnp compile --src-prefix=. \
-  -o./packages/codegen/bin/capnpc-ts:examples/pi-admit-harness/gen \
+  -o./packages/codegen/bin/capnpc-ts.mjs:examples/pi-admit-harness/gen \
   schema/addressbook.capnp
 ```
 

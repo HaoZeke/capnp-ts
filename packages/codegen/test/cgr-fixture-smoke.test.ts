@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -148,8 +149,8 @@ describe("CGR fixture smoke", () => {
 
   test("capnpc-ts CLI --stdout on schema.cgr.bin exits 0 and emits", async () => {
     const fixture = join(fixturesDir, "schema.cgr.bin");
-    const bin = join(here, "..", "bin", "capnpc-ts");
-    const proc = Bun.spawn([bin, "--stdout", fixture], {
+    const bin = join(here, "..", "bin", "capnpc-ts.mjs");
+    const proc = Bun.spawn([process.execPath, bin, "--stdout", fixture], {
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -168,8 +169,8 @@ describe("CGR fixture smoke", () => {
   });
 
   test("capnpc-ts CLI --help and --version exit 0 with consumer -ots usage", async () => {
-    const bin = join(here, "..", "bin", "capnpc-ts");
-    const helpProc = Bun.spawn([bin, "--help"], {
+    const bin = join(here, "..", "bin", "capnpc-ts.mjs");
+    const helpProc = Bun.spawn([process.execPath, bin, "--help"], {
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -183,7 +184,7 @@ describe("CGR fixture smoke", () => {
     expect(helpOut).toContain("capnp compile -ots");
     expect(helpOut).not.toContain("-o./packages/codegen");
 
-    const verProc = Bun.spawn([bin, "--version"], {
+    const verProc = Bun.spawn([process.execPath, bin, "--version"], {
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -195,6 +196,36 @@ describe("CGR fixture smoke", () => {
     expect(verCode).toBe(0);
     expect(verErr).toBe("");
     expect(verOut.trim()).toMatch(/^capnpc-ts \d+\.\d+\.\d+/);
+
+    if (spawnSync("node", ["--version"]).status === 0) {
+      const nodeVer = spawnSync("node", [bin, "--version"], {
+        encoding: "utf8",
+      });
+      expect(nodeVer.status).toBe(0);
+      expect(nodeVer.stdout).toBe(verOut);
+    }
+  });
+
+  test("capnpc-ts.mjs without dist prints a one-line bun run build hint", () => {
+    const bin = join(here, "..", "bin", "capnpc-ts.mjs");
+    const dir = mkdtempSync(join(tmpdir(), "capnpc-ts-nodist-"));
+    try {
+      const binDir = join(dir, "bin");
+      mkdirSync(binDir, { recursive: true });
+      const copiedBin = join(binDir, "capnpc-ts.mjs");
+      writeFileSync(copiedBin, readFileSync(bin));
+      const res = spawnSync(process.execPath, [copiedBin, "--version"], {
+        encoding: "utf8",
+      });
+      expect(res.status).toBe(1);
+      expect(res.stdout).toBe("");
+      const lines = res.stderr.trimEnd().split("\n");
+      expect(lines.length).toBe(1);
+      expect(lines[0]).toContain("bun run build");
+      expect(res.stderr).not.toContain("at ");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("addressbook.cgr.bin emit has Person getters and enum const map", async () => {

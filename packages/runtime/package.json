@@ -16,7 +16,7 @@
     "url": "https://github.com/HaoZeke/capnp-ts/issues"
   },
   "bin": {
-    "capnp-ts": "./bin/capnp-ts"
+    "capnp-ts": "./bin/capnp-ts.mjs"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

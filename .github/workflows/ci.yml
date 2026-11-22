@@ -77,10 +77,10 @@ jobs:
             > /tmp/capnpc-ts-smoke/addressbook.cgr.bin
           test -s /tmp/capnpc-ts-smoke/addressbook.cgr.bin
           cd /tmp/capnpc-ts-smoke
-          "$GITHUB_WORKSPACE/packages/codegen/bin/capnpc-ts" \
+          "$GITHUB_WORKSPACE/packages/codegen/bin/capnpc-ts.mjs" \
             --stdout addressbook.cgr.bin | head -c 400
           echo
-          "$GITHUB_WORKSPACE/packages/codegen/bin/capnpc-ts" addressbook.cgr.bin
+          "$GITHUB_WORKSPACE/packages/codegen/bin/capnpc-ts.mjs" addressbook.cgr.bin
           test -s addressbook.ts
 
   rpc-interop:
