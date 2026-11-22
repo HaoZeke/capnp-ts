@@ -2,12 +2,12 @@
 
 ## Supported versions
 
-Security fixes land on `main` first and ship through normal semantic-version
-tags once releases exist.
+Security fixes land on `main` first and are published in semantic-versioned
+release tags (`v0.1.x`).
 
 | Version | Supported |
 | ------- | --------- |
-| 0.1.x-dev / `main` | yes (fixes land here first) |
+| 0.1.x / `main` | yes (fixes land here first) |
 
 ## Reporting a vulnerability
 
@@ -27,8 +27,7 @@ is tagged.
 ## Scope
 
 **In scope:** decoding of Cap'n Proto messages (stream framing, pointer
-graphs, packed and canonical codecs), and any future RPC package that this
-repo ships.
+graphs, packed and canonical codecs), `capnpc-ts`, and `@haozeke/capnp-rpc`.
 
 **Out of scope (unless trivially fixed):** issues only in unreleased
 experimental branches; misconfiguration of peer applications; third-party
@@ -38,7 +37,7 @@ schema plugins unrelated to `capnpc-ts`.
 
 This library parses Cap'n Proto messages. Treat every network or IPC buffer
 as hostile. A crafted message can attempt large allocations, deep pointer
-graphs, or (once RPC exists) method invocations exposed by the application.
+graphs, or RPC method invocations exposed by the application.
 
 Defensive defaults match Cap'n C++ readers, not a trust-the-peer model:
 

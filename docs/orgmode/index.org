@@ -22,26 +22,33 @@ produced by upstream =capnp= rather than by each other.
 
 * Install
 
-Two package names are reserved for release, both ESM:
+Three ESM packages are published under =@haozeke/*=:
 
-| Package             | Role                                                    |
-|---------------------+---------------------------------------------------------|
-| =@haozeke/capnp=    | Wire runtime, dynamic reflection, text/JSON codecs, =capnp-ts= CLI |
-| =@haozeke/capnpc-ts= | =capnp compile -o= plugin emitting typed ESM            |
+| Package              | Role                                                               |
+|----------------------+--------------------------------------------------------------------|
+| =@haozeke/capnp=     | Wire runtime, dynamic reflection, text/JSON codecs, =capnp-ts= CLI |
+| =@haozeke/capnpc-ts= | =capnp compile -o= plugin emitting typed ESM                       |
+| =@haozeke/capnp-rpc= | Cap'n Proto RPC vat (levels 1-4, streaming, membranes)             |
+
+#+begin_src console
+$ npm install @haozeke/capnp @haozeke/capnp-rpc
+$ npm install --save-dev @haozeke/capnpc-ts
+#+end_src
+
+From a repository checkout:
 
 #+begin_src console
 $ bun install
+$ bun run build
 $ bun run test
 #+end_src
 
-Registry publication is staged; until release tags are cut, consume from the
-workspace path or a local packed tarball.
-
-The toolchain (=capnp= 1.4, node) is pinned in =pixi.toml=:
+The toolchain (=capnp= 1.4, node) is configured in =pixi.toml=:
 
 #+begin_src console
 $ pixi install
 $ pixi run test
+$ pixi run rpc-interop
 #+end_src
 
 * First message
@@ -68,10 +75,22 @@ rather than copying, so that buffer must outlive the message.
 * Generating types
 
 =capnpc-ts= is a =capnp compile= plugin, so it takes a schema the same way
-every other Cap'n Proto backend does:
+every other Cap'n Proto backend does.
+
+In a consumer project with =@haozeke/capnpc-ts= installed (=node= and
+=node_modules/.bin= on =PATH=, or via a =bun run= script in a Bun-only
+environment):
 
 #+begin_src console
-$ capnp compile -o./packages/codegen/bin/capnpc-ts schema/addressbook.capnp
+$ PATH="$PWD/node_modules/.bin:$PATH" capnp compile -ots my-schema.capnp
+$ ls my-schema.ts
+#+end_src
+
+From a repository checkout (after =bun run build=, with =node= on =PATH=;
+workspace installs do not create =node_modules/.bin/capnpc-ts=):
+
+#+begin_src console
+$ capnp compile --src-prefix=. -o./packages/codegen/bin/capnpc-ts.mjs schema/addressbook.capnp
 $ ls addressbook.ts
 #+end_src
 

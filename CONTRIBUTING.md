@@ -16,10 +16,15 @@ context lives in the root README and `docs/orgmode/architecture.org`.
 git clone https://github.com/HaoZeke/capnp-ts.git
 cd capnp-ts
 bun install
+bun run build
 bun run test
 ```
 
-`bun run test` covers the core runtime/codegen/RPC suites. To run the optional
+`bun run test` builds `dist/` first (`bun run build`) and covers the core
+runtime/codegen/RPC suites; bare `bun test` at the workspace root also
+preloads `scripts/test-preload.ts` when `dist/` is missing. Run `bun run build`
+before invoking `./packages/runtime/bin/capnp-ts.mjs` or
+`./packages/codegen/bin/capnpc-ts.mjs` directly. To run the optional
 pycapnp bidirectional interop suite locally, provision the venv and fixtures:
 
 ```console
@@ -77,8 +82,8 @@ Prefer wire-format, codecs, and `capnpc-ts` work here. Product policy packs
 and OMP/Pi extensions belong in downstream trees; keep this library
 schema-agnostic beyond sample schemas under `schema/`.
 
-RPC is Phase 2 (`@haozeke/capnp-rpc`); do not grow RPC into the runtime
-package without an explicit product decision.
+RPC lives in `@haozeke/capnp-rpc`; do not grow RPC into `@haozeke/capnp`
+without an explicit product decision.
 
 ## Pull requests
 

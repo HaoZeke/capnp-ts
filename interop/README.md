@@ -1,9 +1,14 @@
 # Interop
 
-CLI goldens under `packages/runtime/test/golden/` are the primary oracle
-(`capnp encode` / `convert binary:packed` / `binary:canonical` with Cap'n 1.4.0).
+CLI goldens under `packages/runtime/test/golden/` are the primary serialization
+oracle (`capnp encode` / `convert binary:packed` / `binary:canonical` with
+Cap'n Proto C++ 1.4.0).
 
-Live twin vs HaoZeke/c-capnproto is Phase 2 (not a v1 claim).
+## Live Cap'n Proto C++ 1.4.0 RPC peer
+
+`rpc_peer.c++`, `build-peer.sh`, and `run_rpc_interop.sh` test
+`@haozeke/capnp-rpc` against a real `capnp::EzRpcServer` / `EzRpcClient` in
+both directions over TCP (`pixi run rpc-interop`).
 
 ## Offline c-capnproto twin sketch
 

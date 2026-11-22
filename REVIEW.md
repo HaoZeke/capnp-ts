@@ -1,13 +1,14 @@
-# capnp-ts review (2026-08-06)
+# capnp-ts review
 
-Scope: workspace unit tests (`bun install` + `bun test`), pack/canonical
-golden identity, codegen emit, and honest Tier A gaps.
+Scope: workspace unit and interop suites (`bun install`, `bun run build`,
+`bun run test`, `pixi run rpc-interop`), pack/canonical golden identity,
+`capnpc-ts` emit, `@haozeke/capnp-rpc`, and known limits.
 
 ## Test result: PASS
 
 ```text
-bun test packages/runtime packages/codegen
-  → runtime + codegen suites green (see `bun test` for current counts)
+bun run build && bun test packages/runtime packages/codegen packages/rpc
+  → runtime + codegen + rpc suites green (see `bun run test` for current counts)
 ```
 
 | Suite | Result | Notes |
@@ -59,11 +60,15 @@ bytes stay in the verbatim run). AddressBook covers the `bob@exam` /
 - Orphans (`disown` / `adopt` same-message) and deep-copy (`deepCopyPtr`,
   `structSetP` / `deepCopyPtrToSlot` across messages)
 - Schema-default XOR on runtime scalar get/set (`dflt`); codegen emits
-  `Field.defaultValue` into getter default args (incl. non-zero); `getF32`/`setF32`
+  `Field.defaultValue` into scalar and Text/Data getters and setters; `getF32`/`setF32`
 - List upgrade/downgrade views: encoding.html Void upgrade + Bool refuse; prim
   / pointer upgrade + composite downgrade (not every demotion edge)
 - `capnpc-ts` typed emit: structs, const-map enums (Bun strip-safe), union
-  `which`, List(Text) via `listGetText`, UInt64/Int64 via `getU64`/`bigint`
+  `which` and setters, struct, group, and `List(Struct)` initializers,
+  List(Text) via `listGetText`, UInt64/Int64 via `getU64`/`bigint`
+- `@haozeke/capnp-rpc`: capability vat (levels 1-4, `Persistent`, streaming flow
+  control, membranes, tail calls) tested in both directions against a live
+  Cap'n Proto C++ 1.4.0 peer (`interop/run_rpc_interop.sh`)
 - Public kinds use const objects (`WireKind` / `PtrKind` / `ElemSize`), not
   TypeScript `const enum`
 - Pi admit harness dogfoods `Message.fromFlat` AddressBook + optional builder
@@ -86,38 +91,39 @@ packed + canonical CLI identity, list evolution / deep-copy / orphans,
 | M7 Pi/OMP harness example | **yes** | `examples/pi-admit-harness` Message API dogfood |
 | Family parity audit note | **yes** (vault) | `Software/capnp-ts/serialization-parity-audit-2026-08-06.org` |
 
-**Verdict: Tier A serialization core green.** Remaining polish: generated
-setters, cross-width demotion edges beyond the suite, live c-capnproto twin.
-**RPC is not claimed** (Phase 2 only).
+**Verdict: Tier A serialization core and RPC interop green.** Remaining limits:
+generated primitive/pointer-list element builders and cross-width demotion edges
+beyond the covered suite.
 
 ## Remaining gaps (ordered by impact)
 
-1. **Generated setters / full builders** — getters emit defaults; setters not
-   generated yet.
+1. **Generated primitive/pointer-list element builders** — composite
+   `List(Struct)` and group initializers are generated; primitive and pointer
+   lists use the runtime `Ptr` helpers.
 2. **List-evolution demotion matrix** — suite covers key shapes; not every
    cross-width refusal C++ accepts.
-3. **Builder byte identity** — not claimed (correct: non-goal without
-   documented alloc order); semantic round-trip is the bar and is green for
-   AddressBook.
+3. **Builder byte identity** — not claimed (non-goal without documented alloc
+   order); semantic round-trip is the bar and is green for AddressBook.
 
-## Non-goals (correctly out of Tier A)
+## Non-goals (out of `@haozeke/capnp` wire runtime)
 
-- RPC (`@haozeke/capnp-rpc`) — Phase 2; do not claim
-- Live twin vs `HaoZeke/c-capnproto` — Phase 2 (offline sketch under `interop/`)
+- RPC inside `@haozeke/capnp` (RPC lives in the separate `@haozeke/capnp-rpc`
+  package)
 - Cap'n Web / node-capnp FFI
 
 ## Commands
 
 ```console
 bun install
-bun test                 # packages/runtime + packages/codegen
+bun run build            # compile dist/ bundles
+bun run test             # build + runtime, codegen, and rpc suites
 bun run fixtures         # regen CLI goldens (needs capnp 1.4 via pixi)
+pixi run rpc-interop     # build + live C++ 1.4.0 RPC peer interop
 ```
 
 ## Conclusion
 
 Runtime pack and canonical are **byte-identical** to Cap'n C++ 1.4.0 AddressBook
 goldens (`addressbook.packed.bin` 151 B, `addressbook.canonical.bin` 272 B).
-Reader, multi-seg builder, orphans, deep-copy, calculator Expression decode,
-and `capnpc-ts` v1 emit are green under Bun. **Do not claim full family
-parity until an in-repo parity audit closes with evidence.**
+Reader, multi-seg builder, orphans, deep-copy, dynamic reflection, text/JSON
+codecs, `capnpc-ts` emit, and `@haozeke/capnp-rpc` live C++ interop are green.

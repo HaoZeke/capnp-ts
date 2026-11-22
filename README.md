@@ -26,6 +26,7 @@ npm packages:
 |---------|------|
 | [`@haozeke/capnp`](packages/runtime) | Wire runtime, dynamic reflection, text/JSON codecs, `capnp-ts` CLI |
 | [`@haozeke/capnpc-ts`](packages/codegen) | `capnp compile -o` plugin (typed struct/enum/union emit) |
+| [`@haozeke/capnp-rpc`](packages/rpc) | Cap'n Proto RPC vat (levels 1 through 4, streaming, membranes) |
 
 Not a soft fork of the unmaintained `jdiaz5513/capnp-ts`, not a libcapnp /
 node-capnp FFI wrapper, and not Cap'n Web.
@@ -65,7 +66,7 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
 - Cap'n Proto compat JSON codec (`JsonCodec`, `encodeJson`, `decodeJson`,
   `splitJsonMessages`) matching `capnp/compat/json.h` defaults and `$Json`
   annotations (`name`, `flatten`, `discriminator`, `hex`, `base64`)
-- `capnp-ts` CLI (`packages/runtime/bin/capnp-ts`, `@haozeke/capnp/cli`)
+- `capnp-ts` CLI (`packages/runtime/bin/capnp-ts.mjs`, `@haozeke/capnp/cli`)
   implementing `encode`, `decode`, `convert` across `binary`, `packed`, `flat`,
   `flat-packed`, `canonical`, `text`, and `json`, plus `eval` for schema
   constants and field defaults
@@ -77,8 +78,8 @@ Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURI
   (`calculator_add_2_3.bin`, `calculator_mul_add.bin`, `calculator_value_5.bin`)
 - `capnpc-ts` plugin: framed CGR on stdin/file, typed `.ts` per requested schema
   (layout constants, getters and setters with defaults, const-map enums, union
-  `which`, Text/Data setters, shape-aware struct and `List(Struct)` initializers,
-  List(Text) via `listGetText`, u64probe-safe `getU64`/`bigint`)
+  `which`, Text/Data setters, shape-aware struct, group, and `List(Struct)`
+  initializers, List(Text) via `listGetText`, u64probe-safe `getU64`/`bigint`)
 
 Current limits: generated primitive/pointer-list element builders.
 
@@ -132,10 +133,13 @@ Runtime is pure TypeScript ESM (Node ≥ 18 or Bun). Workspace root:
 
 ```console
 $ bun install
+$ bun run build
 $ bun run test
 ```
 
-`bun run test` runs the core suites by default. The pycapnp bidirectional interop
+`bun run test` builds `dist/` first (`bun run build`) and runs the core suites
+by default (`bun test` at the workspace root also preloads
+`scripts/test-preload.ts` when `dist/` is missing). The pycapnp bidirectional interop
 suite requires an explicit local Python environment (the CI job sets this up
 and enforces it with `CAPNP_REQUIRE_PYCAPNP=1`):
 
@@ -155,22 +159,23 @@ $ pixi run fixtures   # or: bun run fixtures
 $ pixi run test
 ```
 
-Consume the runtime from a workspace path or local tarball today. Registry
-publication for `@haozeke/*` is staged but not live yet.
+Install published packages from npm or GitHub Release tarballs (or pack a local
+workspace tarball):
 
 ```console
-$ bun add /path/to/capnp-ts/packages/runtime
-# or
-$ cd packages/runtime && npm pack
+$ npm install @haozeke/capnp @haozeke/capnp-rpc
+$ npm install --save-dev @haozeke/capnpc-ts
+# or from a release / local tarball:
 $ bun add ./haozeke-capnp-0.1.0-dev.tgz
 ```
 
-Package exports (dual):
+Published packages export compiled ESM and `.d.ts` declarations from `dist/`
+(built via `bun run build` / `tsup`) and target Node >= 18 and Bun.
 
-| Consumer | Resolution |
-|----------|------------|
-| **Bun** | TypeScript `packages/runtime/src/` via the `bun` export condition (no build) |
-| **Node / other** | `dist/` from `bun run build` / `tsup` in `@haozeke/capnp` before publish or Node use |
+TypeScript consumers importing `@haozeke/capnp-rpc` with `skipLibCheck: false`
+need `esnext.disposable` (or `es2025`+) in `tsconfig.json` `compilerOptions.lib`
+for `Symbol.dispose`, and `AbortSignal` from `DOM`, `@types/node`, or
+`@types/bun`.
 
 Generated modules import `import type { Ptr } from "@haozeke/capnp"`. In this
 workspace, Bun resolves that to the runtime package via the workspace link.
@@ -273,9 +278,9 @@ console.log(encodeJson(book)); // capnp/compat/json.h format
 ```
 
 ```console
-$ ./packages/runtime/bin/capnp-ts decode schema/addressbook.capnp AddressBook < packages/runtime/test/golden/addressbook.bin
-$ ./packages/runtime/bin/capnp-ts convert binary:json schema/addressbook.capnp AddressBook < packages/runtime/test/golden/addressbook.bin
-$ ./packages/runtime/bin/capnp-ts eval schema/dynamic-kitchen.capnp extremeConst.matrix[0][1]
+$ ./packages/runtime/bin/capnp-ts.mjs decode schema/addressbook.capnp AddressBook < packages/runtime/test/golden/addressbook.bin
+$ ./packages/runtime/bin/capnp-ts.mjs convert binary:json schema/addressbook.capnp AddressBook < packages/runtime/test/golden/addressbook.bin
+$ ./packages/runtime/bin/capnp-ts.mjs eval schema/dynamic-kitchen.capnp extremeConst.matrix[0][1]
 ```
 
 Regenerate goldens (needs system `capnp` 1.4.*):
@@ -287,11 +292,23 @@ $ ./scripts/gen-sample-fixtures.sh
 Codegen plugin usage (typed readers and builders): see
 [packages/codegen/README.md](packages/codegen/README.md).
 
+From a monorepo checkout (after `bun run build`, with `node` on `PATH`; workspace
+installs do not create `node_modules/.bin/capnpc-ts`):
+
 ```console
 $ capnp compile --src-prefix=. \
-    -o./packages/codegen/bin/capnpc-ts \
+    -o./packages/codegen/bin/capnpc-ts.mjs \
     schema/addressbook.capnp
 # → addressbook.ts in cwd (Person get/set, list init, enum const map, which)
+```
+
+In a consumer project with `@haozeke/capnpc-ts` installed (`node` and
+`node_modules/.bin` on `PATH`, or via a `bun run` script in a Bun-only
+environment):
+
+```console
+$ PATH="$PWD/node_modules/.bin:$PATH" capnp compile -ots my-schema.capnp
+# → my-schema.ts in cwd
 ```
 
 ## Layout
@@ -299,10 +316,11 @@ $ capnp compile --src-prefix=. \
 ```
 packages/runtime/   @haozeke/capnp wire runtime + golden tests
 packages/codegen/   @haozeke/capnpc-ts plugin (typed readers and builders)
-schema/             addressbook, calculator Expression, u64probe
-scripts/            fixture regen against capnp CLI
-interop/            offline twin sketch; live twin is Phase 2
-docs/orgmode/       architecture layering
+packages/rpc/       @haozeke/capnp-rpc vat (levels 1-4, streaming, membranes)
+schema/             addressbook, calculator Expression, u64probe, rpc
+scripts/            fixture regen and release checks against capnp CLI
+interop/            live capnp-C++ 1.4.0 RPC peer + offline c-capnproto sketch
+docs/orgmode/       architecture and RPC notes
 examples/           pi-admit-harness (Message.fromFlat Alice/Bob dogfood)
 ```
 
@@ -313,7 +331,7 @@ examples/           pi-admit-harness (Message.fromFlat Alice/Bob dogfood)
 | RPC inside `@haozeke/capnp` | Stays a separate package, `@haozeke/capnp-rpc`; the runtime does not depend on it |
 | Wrapping node-capnp / libcapnp | Pure TS only (Bun strip loaders and extension packs) |
 | Cap'n Web | Separate ecosystem |
-| Byte-identical *builder* output without documented alloc order | Semantic round-trip first; live twin is Phase 2 |
+| Byte-identical *builder* output without documented alloc order | Semantic round-trip is the parity bar |
 
 ## Family
 
@@ -322,7 +340,7 @@ examples/           pi-admit-harness (Message.fromFlat Alice/Bob dogfood)
 | TypeScript | this repo | Wire runtime + `capnpc-ts` typed code generation |
 | Fortran | [capnp-fortran](https://github.com/HaoZeke/capnp-fortran) | Serialization + RPC parity bar |
 | Janet | [capnp-janet](https://github.com/HaoZeke/capnp-janet) | Ship lessons (`List(Text)` C=6, pack 0xff) |
-| C | [c-capnproto](https://github.com/HaoZeke/c-capnproto) | Live golden peer; shares `schema/rpc-threeparty.capnp` |
+| C | [c-capnproto](https://github.com/HaoZeke/c-capnproto) | Offline twin sketch (`interop/emit_c_twin.c`); shares `schema/rpc-threeparty.capnp` |
 | Spec CLI | Cap'n C++ 1.4.0 `capnp` | encode / packed / canonical oracle |
 
 Shared AddressBook schema id: `@0x9eb32e19f86ee174`.

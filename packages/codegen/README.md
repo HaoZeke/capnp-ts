@@ -8,6 +8,13 @@ module per requested schema file with layout constants, field accessors,
 const-map enums, and union `which()` helpers. UInt64/Int64 always use `getU64`
 / `bigint` (never `getU32`).
 
+## Install
+
+```console
+$ npm install @haozeke/capnp
+$ npm install -D @haozeke/capnpc-ts
+```
+
 ## Requirements
 
 - Node.js ≥ 18 on `PATH` for direct `capnp compile -ots` or `./packages/codegen/bin/capnpc-ts.mjs` execution (plugin shebang: `#!/usr/bin/env node`), or [Bun](https://bun.sh) via `bun run` / `bunx @haozeke/capnpc-ts`
@@ -171,7 +178,7 @@ $ capnp compile --src-prefix=. \
 | Scalar getter defaults from `Field.defaultValue` | **yes** (incl. non-zero; signed + getF32/getF64) |
 | u64probe `bigint` field paths | **yes** |
 | Scalar/Text/Data/pointer setters | **yes** (union setters also select the arm) |
-| Struct and `List(Struct)` initializers | **yes** (shape resolved from CGR nodes) |
+| Struct, group, and `List(Struct)` initializers | **yes** (shape resolved from CGR nodes; union group arms set discriminant) |
 | Primitive/pointer-list element builders | **no** |
 
 ## Package scripts

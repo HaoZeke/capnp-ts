@@ -8,138 +8,86 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
-### Changed
+## [0.1.0] - 2026-11-22
 
-- `@haozeke/capnp-rpc` is rebuilt on a capability layer. `RpcConnection`
-  exports and imports `ClientHook`s with explicit reference counts,
-  answers calls through them, and sends `Release` when the last import
-  reference goes. `RpcServer.dispatch` takes a fifth `CallContext`
-  argument and may return a promise.
-- `RpcStream` now wraps `Client.callStreaming` and `Client.flush`, its
-  methods return promises, and `StreamError` is gone: a failed stream
-  call rejects with the call's own error.
-- A `senderLoopback` `Disembargo` aimed at an object that does not point
-  back at the sender, an unknown `receiverLoopback` embargo id, and
-  over-releasing an export now abort the connection, as capnp-C++ does.
+First release of the pure TypeScript ESM Cap'n Proto family for Node >= 18
+and Bun: `@haozeke/capnp`, `@haozeke/capnpc-ts`, and `@haozeke/capnp-rpc`.
 
 ### Added
 
-- RPC: `Client`, `RpcPromise`, local, queued and broken capabilities,
-  promise pipelining on local and remote calls, `Resolve` and `Disembargo`
-  in both directions, call cancellation (`Finish`, `allowCancellation`,
-  `CallContext.signal`, `Return.canceled`), `Abort` and disconnect handling,
-  outgoing and incoming tail calls (`CallContext.tailCall`,
-  `sendResultsTo.yourself`, `takeFromOtherQuestion`), `Unimplemented`
-  handling, `sendJoin`.
-- RPC streaming: a fixed 64 KiB window, or the transport send buffer
-  when one is reported, matching capnp-C++ two-party.
-  `AdaptiveStreamWindow` remains available as an explicit `streamWindow`
-  opt-in. Serialised server-side stream calls break the capability on
-  failure, and `waitAllAcked` resolves after that failure.
-- RPC membranes, ported from `capnp/membrane.h` with the C++
-  `membrane-test.c++` suite: `membrane`, `reverseMembrane`,
-  `MembranePolicy`, `RevocablePolicy`, `copyIntoMembrane` and
-  `copyOutOfMembrane`.
-- RPC level 2: `savePersistent` and `servePersistent` for capnp-C++'s
-  `Persistent` interface; the docs state what C++ leaves unimplemented at
-  levels 2, 3 and 4.
-- `schema/interop.capnp` and a C++ peer (`interop/rpc_peer.c++`) that both
-  serves and dials, so `rpc-interop` runs lifecycle, promise, embargo,
-  cancellation, streaming, membrane and persistence scenarios against
-  capnp-C++ in both directions.
-- `docs/orgmode/rpc.org`.
-- `capnp-ts` CLI (`packages/runtime/bin/capnp-ts`, `@haozeke/capnp/cli`)
-  implementing `encode`, `decode`, `convert` across `binary`, `packed`, `flat`,
-  `flat-packed`, `canonical`, `text`, and `json`, plus `eval` for schema
-  constants, field defaults, and subscripted expressions.
-- Cap'n Proto compat JSON codec (`JsonCodec`, `encodeJson`, `decodeJson`,
-  `splitJsonMessages`) matching `capnp/compat/json.h` defaults and `$Json`
-  annotations (`name`, `flatten`, `discriminator`, `hex`, `base64`).
-- Cap'n Proto text-format encoder and decoder (`TextCodec`, `prettyPrint`,
-  `stringify`, `encodeText`, `decodeText`, `splitTextMessages`) matching
-  `capnp decode` pretty/short formatting and `capnp encode` input syntax.
-- Runtime schema reflection (`SchemaLoader`, `Schema`, `StructSchema`,
-  `EnumSchema`, `InterfaceSchema`, `ConstSchema`, `AnnotationSchema`,
-  `ListSchema`, `Type`, generic `Brand` substitution, annotation inspection) and
-  dynamic value API (`DynamicStruct`, `DynamicList`, `DynamicEnum`,
-  `DynamicCapability`, `DynamicValue`, `DynamicOrphan`) with full schema
-  defaults and evolution semantics.
-- `@haozeke/capnp-rpc` covers RPC level 3, both halves. `Provide` holds a
-  capability under the recipient's nonce and `Accept` claims it; an
-  `Accept` with `embargo` waits for `Disembargo` with `context.provide`.
-  A `thirdPartyHosted` CapDescriptor records an introduction, handed
-  over by `pendingIntroductions` and finished by `introductionDone`,
-  which releases the vine. `sendProvide`, `sendAccept` and
-  `sendDisembargoProvide` are the introducer's side.
-- `schema/rpc-threeparty.capnp`, the network layer that names a third
-  vat, shared verbatim with c-capnproto, capnp-fortran and capnp-janet.
-  `rpc.capnp` leaves those ids to the network, and `rpc-twoparty.capnp`
-  declares them empty because a two-party connection has no third to
-  name.
-- `Vat`: level 3 arrangements belong to a vat rather than a connection,
-  since a handoff is made on one and claimed on another. A connection
-  given no `Vat` gets one to itself.
-- `answerCapId`, without which a capability returned in an answer could
-  not be called.
-- Level 3 goldens the reference `capnp` CLI encodes
-  (`packages/rpc/test/golden/rpc-{provide,accept,introduce}.bin`),
-  regenerated and verified by `scripts/gen-rpc-frames.sh`.
-- `capnpc-ts` v1 typed emit: structs (word counts + getters), enums as const
-  maps (no TS `enum` / no public `const enum`), union `which()` + arm tags,
-  List(Struct) via `listGetP` and List(Text) via `listGetText`;
-  UInt64/Int64 always via `getU64`/`bigint` (offline u64probe CGR fixture).
-- Generated AddressBook decodes runtime golden Alice/Bob; live
-  `capnp compile -o…/capnpc-ts` gated with `test.skipIf` (no soft-skip pass).
-- CGR walk of `Field.slot.defaultValue` / `hadExplicitDefault` (bit 128) into
-  the AST; `capnpc-ts` emits non-zero scalar defaults into getter `dflt` args.
-- Generated scalar, Text, Data, and pointer setters; union setters select their
-  discriminant, and struct / `List(Struct)` initializers use CGR word counts.
-- Generated interface metadata, typed client helpers, and abstract server
-  dispatch bases carry the schema interface id, method ordinal, and parameter
-  and result struct dimensions.
-- Text and Data schema defaults on null pointers, with module-level Data
-  constants so generated getters do not allocate the default on every read.
-- `Ptr.getF32` / `StructBuilder.setF32` (IEEE-754 bit XOR, same model as f64).
-- Scalar get/set schema-default XOR (`wire = logical XOR default`) on
-  `Ptr.get*` / `StructBuilder.set*`; float defaults XOR IEEE bit patterns.
-- Same-message orphan `disown` / `adopt` (`Orphan` handle) on
-  `MessageBuilder` / `StructBuilder`.
-- Cross-message deep-copy (`deepCopyPtr`, `deepCopyPtrToSlot`, `structSetP`).
-- `@haozeke/capnp` package exports: `types` / `import` / `default` →
-  optional `tsup` `dist/`; `bun` condition keeps TypeScript `src/` for Bun.
-- Codegen: rich CGR AST walk (nodes, fields, types, enumerants, defaults) via
-  `Message.fromFlat`.
-- Pi admit harness (`examples/pi-admit-harness`) uses `@haozeke/capnp`
-  `Message.fromFlat` / optional `MessageBuilder` for AddressBook Alice/Bob.
-- Offline c-capnproto twin emitter sketch under `interop/`.
-- Monorepo scaffold: `@haozeke/capnp` (runtime) and `@haozeke/capnpc-ts`
-  (codegen plugin), MIT license, Bun/pixi workspace.
-- Runtime layers: `kinds`, `endian`, `pointer`, `message`, `builder`,
-  `copy`, `serialize`, `packed`, `canonical` (public re-exports from
-  `@haozeke/capnp`).
-- Packed codec with Cap'n C++ 1.4.0 post-`0xff` fewer-than-two-zeros
-  verbatim-run heuristic; **byte-identical** to CLI golden
-  `packages/runtime/test/golden/addressbook.packed.bin` (151 B) via
-  `pack(addressbook.bin)` / `unpack` round-trip (`packed.test.ts`).
-- Canonical form **byte-identical** to
-  `capnp convert binary:canonical` on AddressBook:
-  `canonicalizeFlat(addressbook.bin)` equals
-  `packages/runtime/test/golden/addressbook.canonical.bin` (272 B;
-  `canonical.test.ts`).
-- AddressBook sample schema (`@0x9eb32e19f86ee174`) and CLI golden fixtures
-  under `packages/runtime/test/golden/`:
-  `addressbook.bin` (288 B encode), `addressbook.packed.bin` (151 B),
-  `addressbook.canonical.bin` (272 B); calculator Expression goldens
-  (`calculator_add_2_3.bin`, `calculator_mul_add.bin`,
-  `calculator_value_5.bin`); regen via `scripts/gen-sample-fixtures.sh`.
-- Suite coverage beyond goldens: multi-segment far/double-far stress,
-  text/data edges, untrusted-buffer fuzz, list upgrade/downgrade subset,
-  CGR fixture smoke + u64probe codegen (offline fixtures first).
-- Docs: root README with honest family parity table, `SECURITY.md`,
-  `CONTRIBUTING.md`, runtime package README, architecture org note.
+- **Wire runtime (`@haozeke/capnp`)**:
+  - Stream-framed message reader (`Message.fromFlat`), zero-copy buffer view
+    (`Message.viewFlat`), and stream serializer (`serializeToFlat`,
+    `frameSegments`).
+  - Multi-segment `MessageBuilder` supporting far and double-far pointers,
+    schema-default XOR on scalar getters and setters, same-message orphans
+    (`disown` / `adopt`), and cross-message `deepCopyPtr`.
+  - Schema-evolution list upgrade and downgrade views, plus Cap'n Proto C++
+    default reader limits (8 Mi-word traversal budget and 64-level nesting
+    depth).
+- **Packing and canonical form**:
+  - Packed wire codec (`pack` / `unpack`, with optional `compactFramed`
+    multi-segment compaction) matching Cap'n Proto C++ 1.4.0 output
+    byte-for-byte.
+  - Single-segment preorder canonicalization (`canonicalize` /
+    `canonicalizeFlat`) matching `capnp convert binary:canonical`
+    byte-for-byte.
+- **Dynamic codecs and CLI**:
+  - Runtime schema reflection (`SchemaLoader`, `StructSchema`, `EnumSchema`,
+    `InterfaceSchema`, `ConstSchema`, `AnnotationSchema`, `ListSchema`, generic
+    `Brand` substitution) and dynamic values (`DynamicStruct`, `DynamicList`,
+    `DynamicEnum`, `DynamicCapability`, `DynamicOrphan`).
+  - Cap'n Proto text codec (`TextCodec`, `encodeText`, `decodeText`,
+    `prettyPrint`, `stringify`) matching `capnp encode` and `capnp decode`
+    formatting and malformed-input recovery.
+  - Cap'n Proto compat JSON codec (`JsonCodec`, `encodeJson`, `decodeJson`,
+    `splitJsonMessages`) matching `capnp/compat/json.h` defaults and `$Json`
+    annotations (`name`, `flatten`, `discriminator`, `hex`, `base64`).
+  - `capnp-ts` CLI (`@haozeke/capnp/cli`) implementing `encode`, `decode`,
+    `convert`, and `eval` across `binary`, `packed`, `flat`, `flat-packed`,
+    `canonical`, `text`, and `json`.
+- **Schema code generator (`@haozeke/capnpc-ts`)**:
+  - `capnp compile -o` plugin (`capnpc-ts`, running under Node >= 18 directly,
+    or Bun via bun run / bunx) reading framed `CodeGeneratorRequest` streams
+    and emitting typed ESM `.ts` modules: struct layout constants,
+    default-aware getters and setters, Text/Data defaults, const-map enums,
+    union `which()` and setters, `UInt64`/`Int64` as `bigint`, struct, group,
+    and `List(Struct)` initializers, generic interfaces, and typed RPC
+    interface metadata.
+- **RPC vat (`@haozeke/capnp-rpc`)**:
+  - Level 1: capability-based `Vat` and `RpcConnection` with explicit reference
+    counting, `Client` and `RpcPromise`, promise pipelining, bidirectional
+    `Resolve` and `Disembargo`, call cancellation (`Finish`,
+    `allowCancellation`, `CallContext.signal`), outgoing and incoming tail
+    calls (`CallContext.tailCall`), abort and disconnect handling, streaming
+    flow control (fixed 64 KiB or transport send-buffer window, plus opt-in
+    `AdaptiveStreamWindow`), and membranes (`membrane`, `reverseMembrane`,
+    `MembranePolicy`, `RevocablePolicy`, ported from `capnp/membrane.h`).
+  - Level 2: `Persistent` interface (`savePersistent`, `servePersistent`),
+    matching Cap'n Proto C++.
+  - Level 3: three-party handoff (`Provide`, `Accept` with embargo,
+    `thirdPartyHosted` introductions over `schema/rpc-threeparty.capnp`)
+    across vats.
+  - Level 4: two-party `Join` (`sendJoin` and answer handling).
+- **Interop with Cap'n Proto C++ 1.4.0**:
+  - Byte-identical AddressBook golden fixtures (framed, packed, canonical) and
+    calculator Expression fixtures checked against the `capnp` 1.4.0 CLI.
+  - Differential CLI, text, JSON, and list-evolution tests against Cap'n Proto
+    1.4.0, plus bidirectional `pycapnp` interop tests.
+  - Live bidirectional TCP RPC interop against a Cap'n Proto C++ 1.4.0 peer
+    (`interop/rpc_peer.c++`, `interop/run_rpc_interop.sh`) covering lifecycle,
+    promises, embargoes, cancellation, streaming, membranes, and persistence.
 
-### Current limits
+### Known limits
 
-- Cross-width list demotion matrix beyond the covered upgrade/downgrade suite
-- Generated primitive/pointer-list element builders and group init wrappers
-- Live c-capnproto twin interop (Phase 2; offline sketch only)
+- Cross-width list demotion edges beyond the covered upgrade/downgrade suite.
+- Generated primitive/pointer-list element builders (composite `List(Struct)`
+  and group initializers are supported).
+- Level 2 covers the `Persistent` interface without a built-in SturdyRef
+  registry; levels 3 and 4 are verified between TypeScript vats because
+  Cap'n Proto C++ leaves them unimplemented.
+- Live `c-capnproto` twin interop (`interop/emit_c_twin.c` is an offline sketch;
+  live RPC interop runs against Cap'n Proto C++ 1.4.0).
+
+[Unreleased]: https://github.com/HaoZeke/capnp-ts/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/HaoZeke/capnp-ts/releases/tag/v0.1.0
