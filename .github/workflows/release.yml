@@ -1,0 +1,370 @@
+# Tag-triggered release: verify main ancestry and versions, run the full CI
+# suite (including pycapnp, CLI goldens, and live C++ 1.4.0 RPC interop),
+# pack dist-only npm tarballs with SHA-256 checksums, create the GitHub
+# release, and optionally publish to npm when NPM_TOKEN is set.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build, verify, and pack
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.4.5"
+
+      - name: Verify tagged commit is on origin/main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "release: tagged commit $(git rev-parse HEAD) is not an ancestor of origin/main" >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Verify release version and tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: bash scripts/check-release-version.sh "$TAG"
+
+      - name: Cache Cap'n Proto 1.4.0
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.tool_cache }}/capnproto-1.4.0
+          key: capnproto-1.4.0-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install Cap'n Proto 1.4.0
+        env:
+          PREFIX: ${{ runner.tool_cache }}/capnproto-1.4.0
+        run: |
+          set -euo pipefail
+          bash scripts/install-capnproto.sh "$PREFIX"
+          echo "$PREFIX/bin" >> "$GITHUB_PATH"
+          "$PREFIX/bin/capnp" --version
+
+      - name: Build packages
+        run: bun run build
+
+      - name: Typecheck packages
+        run: bun run typecheck
+
+      - name: pycapnp venv (bidirectional interop)
+        run: |
+          set -euo pipefail
+          if [[ ! -x .venv-pycapnp/bin/python ]]; then
+            python3 -m venv .venv-pycapnp
+            .venv-pycapnp/bin/pip install --quiet --upgrade pip
+            .venv-pycapnp/bin/pip install --quiet pycapnp
+          fi
+          .venv-pycapnp/bin/python scripts/pycapnp_interop.py check
+          .venv-pycapnp/bin/python scripts/pycapnp_interop.py write-all
+          git diff --exit-code -- packages/runtime/test/golden
+
+      - name: Test packages
+        env:
+          CAPNP_REQUIRE_PYCAPNP: "1"
+        run: bun test --timeout 10000 packages/runtime packages/codegen packages/rpc
+
+      - name: Goldens still match the capnp CLI
+        run: bash scripts/gen-sample-fixtures.sh --check
+
+      - name: Level 3 frames still match the capnp CLI
+        run: bash scripts/gen-rpc-frames.sh --check
+
+      - name: Live capnp-C++ RPC peer interop
+        env:
+          PREFIX: ${{ runner.tool_cache }}/capnproto-1.4.0
+        run: |
+          set -euo pipefail
+          export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          CXX="${CXX:-g++}" bash interop/build-peer.sh build-interop
+          bash interop/run_rpc_interop.sh build-interop/rpc_peer_server interop/rpc_client.ts build-interop/rpc_peer
+
+      - name: Codegen smoke
+        run: |
+          set -euo pipefail
+          workspace="$(pwd)"
+          smoke_dir="$(mktemp -d)"
+          trap 'rm -rf "$smoke_dir"' EXIT
+          capnp compile -o- schema/addressbook.capnp \
+            > "$smoke_dir/addressbook.cgr.bin"
+          test -s "$smoke_dir/addressbook.cgr.bin"
+          cd "$smoke_dir"
+          "$workspace/packages/codegen/bin/capnpc-ts.mjs" \
+            --stdout addressbook.cgr.bin | head -c 400
+          echo
+          "$workspace/packages/codegen/bin/capnpc-ts.mjs" addressbook.cgr.bin
+          test -s addressbook.ts
+
+      - name: Pack npm tarballs and checksums
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          out_dir="$(pwd)/release-dist"
+          rm -rf "$out_dir"
+          mkdir -p "$out_dir"
+          for pkg in packages/runtime packages/codegen packages/rpc; do
+            (cd "$pkg" && bun pm pack --destination "$out_dir")
+          done
+          (
+            cd "$out_dir"
+            for tgz in \
+              "haozeke-capnp-${version}.tgz" \
+              "haozeke-capnpc-ts-${version}.tgz" \
+              "haozeke-capnp-rpc-${version}.tgz"; do
+              test -s "$tgz"
+              if tar -tzf "$tgz" | grep -q '^package/src/'; then
+                echo "release: tarball $tgz unexpectedly contains package/src/" >&2
+                exit 1
+              fi
+              sha256sum "$tgz" > "${tgz}.sha256"
+            done
+            sha256sum \
+              "haozeke-capnp-${version}.tgz" \
+              "haozeke-capnpc-ts-${version}.tgz" \
+              "haozeke-capnp-rpc-${version}.tgz" > SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+
+      - name: Smoke test packed tarballs
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          workspace="$(pwd)"
+          dist_dir="$workspace/release-dist"
+          fixture="$workspace/packages/codegen/test/fixtures/addressbook.cgr.bin"
+          capnp_dir="$(dirname "$(command -v capnp)")"
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "$scratch"' EXIT
+          mkdir -p "$scratch/node-app" "$scratch/bun-app"
+
+          cat > "$scratch/node-app/package.json" <<EOF
+          {
+            "name": "capnp-ts-smoke-node",
+            "private": true,
+            "type": "module",
+            "dependencies": {
+              "@haozeke/capnp": "file:${dist_dir}/haozeke-capnp-${version}.tgz",
+              "@haozeke/capnpc-ts": "file:${dist_dir}/haozeke-capnpc-ts-${version}.tgz",
+              "@haozeke/capnp-rpc": "file:${dist_dir}/haozeke-capnp-rpc-${version}.tgz"
+            }
+          }
+          EOF
+          (
+            set -euo pipefail
+            cd "$scratch/node-app"
+            npm install --no-audit --no-fund
+            node --input-type=module -e '
+              const rt = await import("@haozeke/capnp");
+              const packed = await import("@haozeke/capnp/packed");
+              const cg = await import("@haozeke/capnpc-ts");
+              const rpc = await import("@haozeke/capnp-rpc");
+              if (
+                typeof rt.Message !== "function" ||
+                typeof packed.pack !== "function" ||
+                typeof cg.emitFromAst !== "function" ||
+                typeof rpc.Vat !== "function"
+              ) {
+                process.exit(1);
+              }
+            '
+            node_dir="$(dirname "$(command -v node)")"
+            node_path="$PWD/node_modules/.bin:$node_dir:$capnp_dir:/usr/bin:/bin"
+            PATH="$node_path" capnp-ts --version
+            PATH="$node_path" capnpc-ts --version
+            PATH="$node_path" capnpc-ts --stdout "$fixture" | head -n 5
+            PATH="$node_path" capnp compile --src-prefix="$workspace/schema" -ots "$workspace/schema/addressbook.capnp"
+            test -s addressbook.ts
+          )
+
+          cat > "$scratch/bun-app/package.json" <<EOF
+          {
+            "name": "capnp-ts-smoke-bun",
+            "private": true,
+            "type": "module",
+            "scripts": {
+              "codegen": "capnp compile --src-prefix=$workspace/schema -ots $workspace/schema/addressbook.capnp"
+            },
+            "dependencies": {
+              "@haozeke/capnp": "file:${dist_dir}/haozeke-capnp-${version}.tgz",
+              "@haozeke/capnpc-ts": "file:${dist_dir}/haozeke-capnpc-ts-${version}.tgz",
+              "@haozeke/capnp-rpc": "file:${dist_dir}/haozeke-capnp-rpc-${version}.tgz"
+            },
+            "overrides": {
+              "@haozeke/capnp": "file:${dist_dir}/haozeke-capnp-${version}.tgz"
+            }
+          }
+          EOF
+          (
+            set -euo pipefail
+            cd "$scratch/bun-app"
+            bun install
+            bun -e '
+              import * as rt from "@haozeke/capnp";
+              import * as packed from "@haozeke/capnp/packed";
+              import * as cg from "@haozeke/capnpc-ts";
+              import * as rpc from "@haozeke/capnp-rpc";
+              if (
+                typeof rt.Message !== "function" ||
+                typeof packed.pack !== "function" ||
+                typeof cg.emitFromAst !== "function" ||
+                typeof rpc.Vat !== "function"
+              ) {
+                process.exit(1);
+              }
+            '
+            bun_dir="$(dirname "$(command -v bun)")"
+            bun_path="$bun_dir:$capnp_dir:/usr/bin:/bin"
+            PATH="$bun_path" bunx --no-install capnp-ts --version
+            PATH="$bun_path" bunx --no-install capnpc-ts --version
+            PATH="$bun_path" bunx --no-install capnpc-ts --stdout "$fixture" | head -n 5
+            PATH="$bun_path" bun run codegen
+            test -s addressbook.ts
+          )
+
+      - name: Extract changelog release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-notes
+          bash scripts/extract-changelog.sh "$TAG" > release-notes/RELEASE_NOTES.md
+
+      - name: Upload release tarballs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-tarballs
+          path: release-dist
+          retention-days: 14
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-notes
+          path: release-notes/RELEASE_NOTES.md
+          retention-days: 14
+
+  github-release:
+    name: Create GitHub release
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release tarballs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-tarballs
+          path: release-dist
+
+      - name: Download release notes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-notes
+          path: release-notes
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          args=(
+            release create "$TAG"
+            --verify-tag
+            --title "$TAG"
+            --notes-file release-notes/RELEASE_NOTES.md
+          )
+          if [[ "${TAG#v}" == *-* ]]; then
+            args+=(--prerelease)
+          fi
+          if ! gh "${args[@]}" \
+            release-dist/*.tgz \
+            release-dist/*.tgz.sha256 \
+            release-dist/SHA256SUMS; then
+            existing="$(gh release view "$TAG" --json tagName --jq .tagName 2>/dev/null || true)"
+            if [[ "$existing" == "$TAG" ]]; then
+              echo "::notice::GitHub release ${TAG} already exists; skipping creation"
+            else
+              exit 1
+            fi
+          fi
+
+  npm-publish:
+    name: Publish to npm
+    needs: [github-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check for npm credentials
+        id: npm
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$NPM_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::NPM_TOKEN is not set; skipping npm publish"
+          fi
+
+      - name: Download release tarballs
+        if: steps.npm.outputs.configured == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-tarballs
+          path: release-dist
+
+      - name: Publish tarballs to npm
+        if: steps.npm.outputs.configured == 'true'
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          npmrc="$(mktemp)"
+          trap 'rm -f "$npmrc"' EXIT
+          chmod 600 "$npmrc"
+          printf 'registry=https://registry.npmjs.org/\n//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > "$npmrc"
+          npm_tag="latest"
+          if [[ "$version" == *-* ]]; then
+            npm_tag="next"
+          fi
+          for name in capnp capnpc-ts capnp-rpc; do
+            pkg_spec="@haozeke/${name}@${version}"
+            pkg_tgz="./release-dist/haozeke-${name}-${version}.tgz"
+            published="$(npm --userconfig "$npmrc" view "$pkg_spec" version 2>/dev/null || true)"
+            if [[ "$published" == "$version" ]]; then
+              echo "::notice::${pkg_spec} is already published on npm; skipping"
+              continue
+            fi
+            npm --userconfig "$npmrc" publish "$pkg_tgz" --access public --tag "$npm_tag"
+          done
