@@ -1298,4 +1298,67 @@ describe("pipeline-only calls", () => {
     expect(a.isFailed(mine)).toBe(false);
     expect(a.answerContent(mine)?.getU32(0)).toBe(41);
   });
+
+  test("releasing after a redirect claim settles the pending question", async () => {
+    const pair = new MemoryTransportPair();
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const slow: RpcServer = {
+      async dispatch() {
+        await gate;
+      },
+    };
+    const a = new RpcConnection(pair.a, slow);
+    const peer = pair.b;
+
+    peer.send(
+      frame((root) => {
+        root.setU16(0, Message.bootstrap);
+        root.initStruct(0, BOOTSTRAP_DWORDS, BOOTSTRAP_PWORDS).setU32(0, 1);
+      }),
+    );
+    a.pump();
+    peer.receive();
+    peer.send(
+      frame((root) => {
+        root.setU16(0, Message.call);
+        const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
+        call.setU32(0, 10);
+        call.setU16(6, Call_sendResultsTo.yourself);
+        const target = call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS);
+        target.setU16(4, MessageTarget.importedCap);
+        target.setU32(0, 0);
+        call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+      }),
+    );
+    a.pump();
+
+    const pending = a.sendCallTo(
+      (target) => {
+        target.setU16(4, MessageTarget.importedCap);
+        target.setU32(0, 0);
+      },
+      IFACE,
+      0,
+      new CallBuilder(0, 0).toPayload(),
+    );
+    peer.receive();
+    peer.send(
+      frame((root) => {
+        root.setU16(0, Message.return);
+        const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+        ret.setU32(0, 0);
+        ret.setU16(6, Return.takeFromOtherQuestion);
+        ret.setU32(8, 10);
+      }),
+    );
+    a.pump();
+    pending.release();
+    peer.receive();
+    open();
+    await gate;
+    await expect(pending.result.promise).resolves.toMatchObject({ caps: [] });
+  });
 });
