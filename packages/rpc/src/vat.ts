@@ -1745,10 +1745,12 @@ export class RpcConnection implements RemoteHost {
   private takeResults(q: QuestionState, otherAnswerId: number): void {
     if (q.finished) {
       const other = this.answers.get(otherAnswerId);
+      // capnp-C++ asserts `redirectResults` on any answer whose call context
+      // is alive. A pipeline-only call keeps its context until Finish.
       if (
         other !== undefined &&
         other.isCall &&
-        !other.returned &&
+        (!other.returned || (other.onlyPromisePipeline && !other.tailSent)) &&
         !other.resultsElsewhere &&
         !other.redirectClaimed
       ) {
