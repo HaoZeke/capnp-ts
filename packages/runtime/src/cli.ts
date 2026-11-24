@@ -11,7 +11,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { MessageBuilder } from "./builder.ts";
-import { canonicalize, messageFromRawSegment } from "./canonical.ts";
+import { canonicalize, isCanonical, messageFromRawSegment } from "./canonical.ts";
 import { deepCopyPtrToSlot } from "./copy.ts";
 import {
   DynamicStruct,
@@ -85,14 +85,6 @@ function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
     off += c.byteLength;
   }
   return out;
-}
-
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.byteLength !== b.byteLength) return false;
-  for (let i = 0; i < a.byteLength; i++) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
 }
 
 /**
@@ -477,10 +469,9 @@ function* iterateMessagesInFormat(
         "CANONICAL",
         "canonical input must be non-empty and word-aligned",
       );
-      const msg = Message.fromSegments([input], CLI_READ_LIMITS);
-      const recanon = canonicalize(msg, CLI_READ_LIMITS);
+      const msg = Message.fromSegments([input.subarray(0, wordBytes)], CLI_READ_LIMITS);
       assertCapnp(
-        bytesEqual(recanon, input),
+        isCanonical(msg),
         "CANONICAL",
         "input message is not in canonical form",
       );
