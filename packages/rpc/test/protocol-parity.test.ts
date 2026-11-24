@@ -23,6 +23,7 @@ import {
   type RpcServer,
   Settle,
 } from "../src/index.ts";
+import { CallState } from "../src/capability.ts";
 import {
   BOOTSTRAP_DWORDS,
   BOOTSTRAP_PWORDS,
@@ -340,7 +341,27 @@ describe("return protocol errors", () => {
     }
   });
 
-  test("takeFromOtherQuestion with a bad answer id aborts", async () => {
+  test("a finished question ignores takeFromOtherQuestion with a bad answer id", () => {
+    const pair = new MemoryTransportPair();
+    const a = new RpcConnection(pair.a);
+    const call = a.sendCallTo(
+      (t) => {
+        t.setU16(4, MessageTarget.importedCap);
+        t.setU32(0, 0);
+      },
+      IFACE,
+      0,
+      new CallBuilder(0, 0).toPayload(),
+    );
+    pair.b.receive();
+    call.release();
+    pair.b.receive();
+    sendReturn(pair.b, 0, Return.takeFromOtherQuestion, 99);
+    a.pump();
+    expect(a.disconnected).toBeUndefined();
+  });
+
+  test("a live question rejects takeFromOtherQuestion with a bad answer id", async () => {
     const pair = new MemoryTransportPair();
     const a = new RpcConnection(pair.a);
     const call = a.sendCallTo(
@@ -357,6 +378,70 @@ describe("return protocol errors", () => {
     a.pump();
     expectAbort(pair.b, a, "invalid answer ID");
     await expect(call.result.promise).rejects.toMatchObject({ type: "disconnected" });
+  });
+
+  test("a finished question rejects a live non-redirected answer", async () => {
+    const pair = new MemoryTransportPair();
+    const a = new RpcConnection(pair.a, new Counter());
+    pair.b.send(
+      frame((root) => {
+        root.setU16(0, Message.bootstrap);
+        root.initStruct(0, BOOTSTRAP_DWORDS, BOOTSTRAP_PWORDS).setU32(0, 1);
+      }),
+    );
+    a.pump();
+    pair.b.receive();
+    const call = a.sendCallTo(
+      (t) => {
+        t.setU16(4, MessageTarget.importedCap);
+        t.setU32(0, 0);
+      },
+      IFACE,
+      0,
+      new CallBuilder(0, 0).toPayload(),
+    );
+    pair.b.receive();
+    (a as unknown as { answers: Map<number, unknown> }).answers.set(7, {
+      call: new CallState(),
+      isCall: true,
+      resultsElsewhere: false,
+      redirectClaimed: false,
+      finished: false,
+    });
+    call.release();
+    pair.b.receive();
+    sendReturn(pair.b, 0, Return.takeFromOtherQuestion, 7);
+    a.pump();
+    expectAbort(pair.b, a, "did not use `sendResultsTo.yourself`");
+    await expect(call.result.promise).rejects.toMatchObject({ type: "disconnected" });
+  });
+
+  test("a finished question ignores an embargoed Accept answer", () => {
+    const pair = new MemoryTransportPair();
+    const a = new RpcConnection(pair.a);
+    const call = a.sendCallTo(
+      (t) => {
+        t.setU16(4, MessageTarget.importedCap);
+        t.setU32(0, 0);
+      },
+      IFACE,
+      0,
+      new CallBuilder(0, 0).toPayload(),
+    );
+    pair.b.receive();
+    (a as unknown as { answers: Map<number, unknown> }).answers.set(7, {
+      call: new CallState(),
+      isCall: false,
+      returned: false,
+      resultsElsewhere: false,
+      redirectClaimed: false,
+      finished: false,
+    });
+    call.release();
+    pair.b.receive();
+    sendReturn(pair.b, 0, Return.takeFromOtherQuestion, 7);
+    a.pump();
+    expect(a.disconnected).toBeUndefined();
   });
 
   test("a second Return for the same question aborts", () => {

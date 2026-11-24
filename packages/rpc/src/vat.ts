@@ -1745,6 +1745,20 @@ export class RpcConnection implements RemoteHost {
   private takeResults(q: QuestionState, otherAnswerId: number): void {
     if (q.finished) {
       const other = this.answers.get(otherAnswerId);
+      if (
+        other !== undefined &&
+        other.isCall &&
+        !other.returned &&
+        !other.resultsElsewhere &&
+        !other.redirectClaimed
+      ) {
+        this.abort(
+          new RpcError(
+            "`Return.takeFromOtherQuestion` referenced a call that did not use `sendResultsTo.yourself`.",
+          ),
+        );
+        return;
+      }
       if (other !== undefined && other.resultsElsewhere && !other.redirectClaimed) {
         other.redirectClaimed = true;
         other.call.release();
