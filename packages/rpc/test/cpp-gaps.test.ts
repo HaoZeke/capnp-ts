@@ -641,6 +641,29 @@ describe("tail calls (rpc.c++ directTailCall)", () => {
     );
   });
 
+  test("tailCall() after writing the results struct fails the call", () => {
+    const writes: Array<(results: StructBuilder) => void> = [
+      (results) => results.setU32(0, 7),
+      (results) => results.initStruct(0, 1, 0),
+    ];
+    for (const write of writes) {
+      const r = raw({
+        dispatch(_i, _m, _p, results, ctx) {
+          write(results);
+          return ctx.tailCall(Client.local(ping), IFACE, 0);
+        },
+      });
+      r.send(bootstrap(0));
+      r.send(call(1, (t) => toAnswer(t, 0)));
+      const ret = r.take()[1]!.body;
+      expect(Return_which(ret)).toBe(Return.exception);
+      expect(Exception_getReason(Return_getException(ret))).toBe(
+        "expected response == nullptr [(can't stringify) == nullptr]; " +
+          "Can't call tailCall() after initializing the results struct.",
+      );
+    }
+  });
+
   const forwarder: RpcServer = {
     dispatch(_i, _m, params, _r, ctx) {
       return ctx.tailCall(new Client(ctx.getCap(params.getP(0))), IFACE, 0);

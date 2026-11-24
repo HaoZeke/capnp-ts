@@ -132,6 +132,104 @@ describe("recvmsg fd association", () => {
     expect(closed).toEqual([7, 8]);
   });
 
+  test("a frame error closes descriptors carried from earlier reads", () => {
+    const so = compileSo();
+    expect(so).toBeDefined();
+    const lib = openFdLib(so!);
+    const cases: Array<{ head: number[]; tail: number[]; error: string }> = [
+      { head: [0xff, 0xff, 0xff, 0xff], tail: [0, 0, 0, 0], error: "segment count too large" },
+      { head: [0, 0, 0, 0], tail: [0xff, 0xff, 0xff, 0x7f], error: "exceeds size limit" },
+    ];
+    try {
+      for (const { head, tail, error } of cases) {
+        const [a, b] = socketpair();
+        const pipe = new Int32Array(2);
+        expect(libc.symbols.pipe(ptr(pipe))).toBe(0);
+        const transport = new UnixFdTransport(b, lib, 2);
+        try {
+          sendFds(lib, a, Uint8Array.from(head), [pipe[0]!]);
+          closeSync(pipe[0]!);
+          expect(transport.pull()).toBe(0);
+          sendFds(lib, a, Uint8Array.from(tail), []);
+          expect(() => transport.pull()).toThrow(error);
+          expect(() => writeSync(pipe[1]!, Buffer.from("x"))).toThrow();
+        } finally {
+          transport.close();
+          closeSync(a);
+          closeSync(b);
+          try { closeSync(pipe[1]!); } catch { /* write end */ }
+        }
+      }
+    } finally {
+      lib.close();
+    }
+  });
+
+  test("a recvmsg error closes descriptors carried from earlier reads", () => {
+    const libcWrite = dlopen("libc.so.6", {
+      memcpy: {
+        args: [FFIType.ptr, FFIType.ptr, FFIType.u64],
+        returns: FFIType.ptr,
+      },
+    });
+    const lib = {
+      symbols: {
+        capnp_send_fds: () => 0,
+        capnp_unix_connect: () => -1,
+        capnp_recv_fds: (
+          _sock: number,
+          _buf: unknown,
+          _cap: number,
+          _fds: unknown,
+          _max: number,
+          nfds: number,
+        ) => {
+          // ECONNRESET.
+          libcWrite.symbols.memcpy(nfds, ptr(new Int32Array([104])), 4);
+          return -2;
+        },
+      },
+      close() {},
+    } as ReturnType<typeof openFdLib>;
+    const closed: number[] = [];
+    const transport = new UnixFdTransport(-1, lib, 2);
+    (transport as unknown as { closeFd(fd: number): void }).closeFd = (fd) => {
+      closed.push(fd);
+    };
+    try {
+      expect(transport.ingest(Uint8Array.of(0, 0, 0, 0), [7])).toBe(0);
+      expect(closed).toEqual([]);
+      expect(() => transport.pull()).toThrow("errno = 104");
+      expect(closed).toEqual([7]);
+      transport.close();
+      expect(closed).toEqual([7]);
+    } finally {
+      libcWrite.close();
+    }
+  });
+
+  test("a closed transport takes no more descriptors off the socket", () => {
+    const so = compileSo();
+    expect(so).toBeDefined();
+    const lib = openFdLib(so!);
+    const [a, b] = socketpair();
+    const pipe = new Int32Array(2);
+    expect(libc.symbols.pipe(ptr(pipe))).toBe(0);
+    const transport = new UnixFdTransport(b, lib, 2);
+    try {
+      transport.close();
+      sendFds(lib, a, new Uint8Array(8), [pipe[0]!]);
+      closeSync(pipe[0]!);
+      expect(transport.pull()).toBe(0);
+      closeSync(a);
+      closeSync(b);
+      expect(() => writeSync(pipe[1]!, Buffer.from("x"))).toThrow();
+    } finally {
+      lib.close();
+      try { closeSync(pipe[1]!); } catch { /* write end */ }
+    }
+  });
+
   test("fds from one read belong to the frame that holds its last byte", () => {
     const so = compileSo();
     expect(so).toBeDefined();

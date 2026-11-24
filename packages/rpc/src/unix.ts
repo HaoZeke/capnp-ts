@@ -85,7 +85,9 @@ export class UnixFdTransport extends StreamTransport {
 
   /** Read one `recvmsg` and split complete frames off the buffer. */
   pull(): number {
-    if (this.paused) return 0;
+    // `close()` already released what was queued; a later read would queue
+    // descriptors nothing closes.
+    if (this.paused || this.closed) return 0;
     for (;;) {
       const room = Math.max(0, this.maxFdsPerMessage - this.carriedFds.length);
       // Descriptors already queued belong to the unfinished frame. Reading
@@ -104,6 +106,7 @@ export class UnixFdTransport extends StreamTransport {
       if (n === -1) return 0;
       if (n < 0) {
         if ((this.nfdBuf[0] ?? 0) === EINTR) continue;
+        this.dropCarriedFds();
         throw new Error(`recvmsg failed; errno = ${this.nfdBuf[0] ?? 0}`);
       }
       if (n === 0) {
@@ -127,6 +130,9 @@ export class UnixFdTransport extends StreamTransport {
     try {
       this.feed(chunk);
     } catch (error) {
+      // As kj's `AutoCloseFd` array unwinding: the failed frame owned both
+      // the descriptors carried so far and this read's.
+      this.dropCarriedFds();
       for (const fd of fds) this.closeFd(fd);
       throw error;
     }
@@ -153,6 +159,12 @@ export class UnixFdTransport extends StreamTransport {
       else this.closeFd(fd);
     }
     return keep;
+  }
+
+  private dropCarriedFds(): void {
+    const carried = this.carriedFds;
+    this.carriedFds = [];
+    for (const fd of carried) this.closeFd(fd);
   }
 
   /** Close one OS descriptor received on this socket. */

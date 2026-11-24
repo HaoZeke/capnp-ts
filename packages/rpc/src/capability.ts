@@ -637,7 +637,8 @@ class LocalCallContext implements CallContext {
     if (this.tailCalled) {
       return Promise.reject(new RpcError("tailCall() may only be called once per call"));
     }
-    if (this.resultsInitialized) {
+    const root = this.results.root;
+    if (this.resultsInitialized || (root instanceof ResultsStruct && root.written)) {
       throw new RpcError(
         "expected response == nullptr [(can't stringify) == nullptr]; " +
           "Can't call tailCall() after initializing the results struct.",

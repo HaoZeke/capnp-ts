@@ -416,6 +416,59 @@ describe("return protocol errors", () => {
     await expect(call.result.promise).rejects.toMatchObject({ type: "disconnected" });
   });
 
+  test("a finished question rejects a completed pipeline-only answer until its Finish", async () => {
+    const pipelineOnlyCall = (questionId: number): Uint8Array =>
+      frame((root) => {
+        root.setU16(0, Message.call);
+        const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
+        call.setU32(0, questionId);
+        call.setU64(8, IFACE);
+        call.setBool(130, true);
+        const target = call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS);
+        target.setU16(4, MessageTarget.importedCap);
+        target.setU32(0, 0);
+        call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+      });
+    const setup = (finishFirst: boolean) => {
+      const pair = new MemoryTransportPair();
+      const server = new Counter();
+      const a = new RpcConnection(pair.a, server);
+      pair.b.send(bootstrapFrame(1));
+      a.pump();
+      pair.b.receive();
+      pair.b.send(pipelineOnlyCall(7));
+      a.pump();
+      expect(server.seen).toEqual([0]);
+      expect(pair.b.receive()).toBeNull();
+      if (finishFirst) {
+        pair.b.send(finishFrame(7, false));
+        a.pump();
+      }
+      const call = a.sendCallTo(
+        (t) => {
+          t.setU16(4, MessageTarget.importedCap);
+          t.setU32(0, 0);
+        },
+        IFACE,
+        0,
+        new CallBuilder(0, 0).toPayload(),
+      );
+      pair.b.receive();
+      call.release();
+      pair.b.receive();
+      sendReturn(pair.b, 0, Return.takeFromOtherQuestion, 7);
+      a.pump();
+      return { pair, a, call };
+    };
+
+    const live = setup(false);
+    expectAbort(live.pair.b, live.a, "did not use `sendResultsTo.yourself`");
+    await expect(live.call.result.promise).rejects.toMatchObject({ type: "disconnected" });
+
+    const finished = setup(true);
+    expect(finished.a.disconnected).toBeUndefined();
+  });
+
   test("a finished question ignores an embargoed Accept answer", () => {
     const pair = new MemoryTransportPair();
     const a = new RpcConnection(pair.a);
