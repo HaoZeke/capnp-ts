@@ -14,6 +14,7 @@ import {
   Message,
   MessageBuilder,
   SchemaLoader,
+  Type,
   canonicalize,
   canonicalizeFlat,
   decodeJson,
@@ -25,6 +26,7 @@ import {
   splitJsonMessages,
 } from "../src/index.ts";
 import { convertStream } from "../src/cli.ts";
+import { initDynamicRoot } from "../src/dynamic.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..", "..");
@@ -77,6 +79,25 @@ function decodeJsonCanonicalBounded(
 }
 
 describe("Cap'n Proto compat JSON codec", () => {
+  test("keeps raw CESU-8 Text bytes during value decoding", () => {
+    const loader = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin"));
+    const person = loader.resolveStruct("Person");
+    const value = new JsonCodec().decodeValue('"\\ud800x"', Type.TEXT);
+    const builder = new MessageBuilder();
+    initDynamicRoot(builder, person).set("name", value);
+    const text = Message.fromSegments([canonicalize(Message.fromFlat(builder.toFlat()))])
+      .root()
+      .getP(0);
+
+    expect([...Array(text.listLen()).keys()].map((i) => text.listGetU8(i))).toEqual([
+      0xed,
+      0xa0,
+      0x80,
+      0x78,
+      0,
+    ]);
+  });
+
   test("matches exact AddressBook pretty and short JSON and round-trips to canonical bytes", () => {
     const loader = SchemaLoader.fromCgr(readGolden("addressbook.cgr.bin"));
     const bookSchema = loader.resolveStruct("AddressBook");
