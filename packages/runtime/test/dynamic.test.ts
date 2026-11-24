@@ -28,6 +28,7 @@ import {
   newDynamicStructOrphan,
   stringify,
 } from "../src/index.ts";
+import { DynamicListBuilder } from "../src/dynamic.ts";
 import { loadU32 } from "../src/endian.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -98,6 +99,15 @@ describe("DynamicStruct / DynamicList / DynamicEnum / DynamicCapability", () => 
       }
       expect(threw).toBe(cli.status !== 0);
     }
+  });
+
+  test("setTextBytes rejects an out-of-range list index", () => {
+    const list = DynamicListBuilder.empty(
+      new MessageBuilder(),
+      ListSchema.of(Type.TEXT),
+    );
+
+    expect(() => list.setTextBytes(0, Uint8Array.of(0x78))).toThrow("index");
   });
 
   test("decodes AddressBook golden and builds canonical byte-identical message", () => {

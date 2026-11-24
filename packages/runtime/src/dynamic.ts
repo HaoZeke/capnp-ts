@@ -2869,6 +2869,7 @@ export class DynamicListBuilder implements Iterable<DynamicValueBuilder> {
   }
 
   setTextBytes(index: number, bytes: Uint8Array): void {
+    this.checkIndex(index);
     const elemType = this.schema.getElementType();
     assertCapnp(elemType.isText(), "KIND", "expected a list of text");
     const slot = new BuilderPointer(this.builder, this.seg, this.pointerWord(index));
