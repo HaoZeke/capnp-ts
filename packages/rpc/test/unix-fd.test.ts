@@ -114,6 +114,24 @@ function sendFds(lib: ReturnType<typeof openFdLib>, sock: number, bytes: Uint8Ar
 }
 
 describe("recvmsg fd association", () => {
+  test("ingest closes received descriptors when frame parsing throws", () => {
+    const closed: number[] = [];
+    const transport = new UnixFdTransport(
+      -1,
+      {} as ReturnType<typeof openFdLib>,
+      2,
+    );
+    (transport as unknown as { feed(chunk: Uint8Array): void }).feed = () => {
+      throw new Error("bad frame");
+    };
+    (transport as unknown as { closeFd(fd: number): void }).closeFd = (fd) => {
+      closed.push(fd);
+    };
+
+    expect(() => transport.ingest(Uint8Array.of(1), [7, 8])).toThrow("bad frame");
+    expect(closed).toEqual([7, 8]);
+  });
+
   test("fds from one read belong to the frame that holds its last byte", () => {
     const so = compileSo();
     expect(so).toBeDefined();

@@ -124,7 +124,12 @@ export class UnixFdTransport extends StreamTransport {
    */
   ingest(chunk: Uint8Array, fds: readonly number[]): number {
     const before = this.pending;
-    this.feed(chunk);
+    try {
+      this.feed(chunk);
+    } catch (error) {
+      for (const fd of fds) this.closeFd(fd);
+      throw error;
+    }
     const gained = this.pending - before;
     const incoming = this.keepFds([...this.carriedFds, ...fds]);
     this.carriedFds = [];
