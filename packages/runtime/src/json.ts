@@ -626,7 +626,10 @@ function parseHexFloat64(
   expStr: string | undefined,
 ): number {
   const intTrim = intHex.replace(/^0+/, "");
-  const fracTrim = fracHex.replace(/0+$/, "");
+  // A `/0+$/` replace backtracks from every zero, quadratic on long fractions.
+  let fracEnd = fracHex.length;
+  while (fracEnd > 0 && fracHex.charCodeAt(fracEnd - 1) === 0x30) fracEnd--;
+  const fracTrim = fracHex.slice(0, fracEnd);
   let sig: string;
   if (intTrim.length > 0) {
     sig = intTrim + fracTrim;
@@ -1741,9 +1744,11 @@ export class JsonCodec {
         const bytes = new Uint8Array(input.value.length);
         for (let i = 0; i < input.value.length; i++) {
           const item = input.value[i]!;
+          // json.c++ calls getNumber() unchecked; with NDEBUG a non-number
+          // Value reads its zero number word, so the byte is 0.
+          if (item.which !== "number") continue;
           assertCapnp(
-            item.which === "number" &&
-              Number.isInteger(item.value) &&
+            Number.isInteger(item.value) &&
               item.value >= 0 &&
               item.value <= 255,
             "JSON",

@@ -22,7 +22,7 @@ import {
   WORD_BYTES,
   WireKind,
 } from "./kinds.ts";
-import { Message, type Ptr } from "./message.ts";
+import { Message, nonStructPointerMessage, pointerFieldIsNull, type Ptr } from "./message.ts";
 import {
   wpCompositeElementCount,
   wpKind,
@@ -51,7 +51,7 @@ function trimmedDwords(p: Ptr): number {
 function trimmedPwords(p: Ptr): number {
   let np = p.pwords;
   while (np > 0) {
-    if (p.getP(np - 1).kind !== PtrKind.Null) break;
+    if (p.getP(np - 1, "copy").kind !== PtrKind.Null) break;
     np--;
   }
   return np;
@@ -169,7 +169,7 @@ function copyPtrToWord(
     for (let k = 0; k < np; k++) {
       const cslot = body + nd + k;
       if (k < src.pwords) {
-        copyPtrToWord(b, cslot, src.getP(k), depth + 1);
+        copyPtrToWord(b, cslot, src.getP(k, "copy"), depth + 1);
       } else {
         b.storeWord(cslot, 0n);
       }
@@ -207,7 +207,7 @@ function writeListToSlot(
         for (let k = 0; k < np; k++) {
           const cslot = first + i * step + nd + k;
           if (k < el.pwords) {
-            copyPtrToWord(b, cslot, el.getP(k), depth + 1);
+            copyPtrToWord(b, cslot, el.getP(k, "copy"), depth + 1);
           } else {
             b.storeWord(cslot, 0n);
           }
@@ -257,7 +257,10 @@ export function canonicalize(
 ): Uint8Array {
   // Fresh Message over the same segment bodies so traversal budget is full
   // and the caller's charge counter is left alone.
-  const fresh = Message.fromSegments(message.segments, limits);
+  const fresh = Message.fromSegments(message.segments, {
+    ...limits,
+    segmentLimit: message.segments.length,
+  });
   const root = fresh.root();
   const b = new CanonBuilder(Math.max(64, estimateWords(fresh)));
   const rootWord = b.alloc(1);
@@ -265,6 +268,10 @@ export function canonicalize(
   if (root.kind === PtrKind.Null) {
     b.storeWord(rootWord, wpMakeStruct(-1, 0, 0));
     return b.finish();
+  }
+  if (root.kind !== PtrKind.Struct) {
+    const wire = root.kind === PtrKind.List ? 1 : root.kind === PtrKind.Cap ? 3 : 0;
+    throw new CapnpError("KIND", nonStructPointerMessage(wire));
   }
   copyPtrToWord(b, rootWord, root, 0);
   return b.finish();
@@ -312,6 +319,7 @@ export function isCanonical(message: Message): boolean {
   if (words < 1) return false;
   // tryGetSegment(1) is null for an empty segment, and later ones are not looked at.
   if (message.segmentCount > 1 && message.segWords(1) > 0) return false;
+  chargeCanonical(message, 1);
   const head = { at: 1 };
   if (!pointerCanonical(message, 0, 0, head, 0)) return false;
   return head.at === words;
@@ -319,6 +327,27 @@ export function isCanonical(message: Message): boolean {
 
 function inRange(m: Message, word: number): boolean {
   return word >= 0 && word < m.segWords(0);
+}
+
+const CANON_OOB_TAIL =
+  "This usually indicates that the input data was corrupted, used a different encoding than specified (e.g. packed vs. non-packed), or was not a Cap'n Proto message to begin with. Note that this error is NOT due to a schema mismatch; the input is invalid regardless of schema.";
+
+function listOutOfBounds(): string {
+  return `expected boundsCheck(segment, ptr, wordCount); Message contains out-of-bounds list pointer. ${CANON_OOB_TAIL}`;
+}
+
+function compositeListOutOfBounds(): string {
+  return `expected boundsCheck(segment, ptr, wordCount + POINTER_SIZE_IN_WORDS); Message contains out-of-bounds list pointer. ${CANON_OOB_TAIL}`;
+}
+
+function chargeCanonical(m: Message, words: number): void {
+  if (words > m.traversalLeft) {
+    throw new CapnpError(
+      "TRAVERSAL",
+      "Exceeded message traversal limit.  See capnp::ReaderOptions.",
+    );
+  }
+  m.charge(words);
 }
 
 function pointerCanonical(
@@ -335,12 +364,16 @@ function pointerCanonical(
   if (kind === WireKind.Far || kind === WireKind.Cap) return false;
   if (depth >= m.depthLimit) throw new CapnpError("DEPTH");
   const off = wpOffset(w);
-  const target = word + 1 + off;
+  // `SegmentReader::checkOffset` lands an out-of-range offset on the segment
+  // end, so a zero-sized object there still passes.
+  const raw = word + 1 + off;
+  const limit = m.segWords(seg);
+  const target = raw >= 0 && raw <= limit ? raw : limit;
   if (kind === WireKind.Struct) {
     const dw = wpStructDwords(w);
     const pw = wpStructPwords(w);
     if (dw === 0 && pw === 0) return target === word;
-    const body = structCanonical(m, seg, target, dw, pw, head, head, depth);
+    const body = structCanonical(m, seg, target, dw, pw, head, head, depth, true);
     return body.ok && body.dataTrunc && body.ptrTrunc;
   }
   if (kind === WireKind.List) return listCanonical(m, seg, word, w, target, head, depth);
@@ -356,12 +389,24 @@ function structCanonical(
   read: { at: number },
   ptrHead: { at: number },
   depth: number,
+  viaPointer = false,
 ): { ok: boolean; dataTrunc: boolean; ptrTrunc: boolean } {
-  if (loc !== read.at || !inRange(m, loc) || !inRange(m, loc + dw + pw - (dw + pw > 0 ? 1 : 0))) {
+  const span = dw + pw;
+  const last = loc + span - (span > 0 ? 1 : 0);
+  if (!inRange(m, loc) || (span > 0 && !inRange(m, last))) {
+    throw new CapnpError(
+      "BOUNDS",
+      `expected boundsCheck(segment, ptr, ref->structRef.wordSize()); Message contained out-of-bounds struct pointer. ${CANON_OOB_TAIL}`,
+    );
+  }
+  // List elements are read by `getStructElement`, which charges nothing.
+  if (viaPointer) chargeCanonical(m, span);
+  if (loc !== read.at) {
     return { ok: false, dataTrunc: false, ptrTrunc: false };
   }
   const dataTrunc = dw === 0 || m.readWord(seg, loc + dw - 1) !== 0n;
-  const ptrTrunc = pw === 0 || m.readWord(seg, loc + dw + pw - 1) !== 0n;
+  // `getPointerField().isNull()` follows fars, so a corrupt last pointer throws.
+  const ptrTrunc = pw === 0 || !pointerFieldIsNull(m, seg, loc + dw + pw - 1);
   read.at = loc + dw + pw;
   for (let i = 0; i < pw; i++) {
     if (!pointerCanonical(m, seg, loc + dw + i, ptrHead, depth + 1)) {
@@ -382,15 +427,36 @@ function listCanonical(
 ): boolean {
   const esize = wpListEsize(w);
   if (esize === ElemSize.Composite) {
-    if (target !== head.at || !inRange(m, target)) return false;
+    // readListPointer validates before isCanonical() returns false.
+    const content = wpListCount(w);
+    if (!inRange(m, target) || !inRange(m, target + content)) {
+      throw new CapnpError("BOUNDS", compositeListOutOfBounds());
+    }
+    chargeCanonical(m, content + 1);
     const tag = m.readWord(seg, target);
-    if (wpKind(tag) !== WireKind.Struct) return false;
+    const tagKind = wpKind(tag);
+    if (tagKind !== WireKind.Struct) {
+      throw new CapnpError(
+        "KIND",
+        `expected tag->kind() == WirePointer::STRUCT [${tagKind} == 0]; INLINE_COMPOSITE lists of non-STRUCT type are not supported.`,
+      );
+    }
     const dw = wpStructDwords(tag);
     const pw = wpStructPwords(tag);
     const nelem = wpCompositeElementCount(tag);
     const step = dw + pw;
-    const content = wpListCount(w);
-    if (nelem * step !== content) return false;
+    const actual = nelem * step;
+    if (actual > content) {
+      throw new CapnpError(
+        "BOUNDS",
+        `expected upgradeBound<uint64_t>(size) * wordsPerElement <= wordCount [${actual} <= ${content}]; INLINE_COMPOSITE list's elements overrun its word count.`,
+      );
+    }
+    // Zero-size elements occupy no words, but the reader still charges one
+    // word per element against the traversal limit.
+    if (step === 0) chargeCanonical(m, nelem);
+    if (target !== head.at) return false;
+    if (actual !== content) return false;
     if (step === 0) {
       head.at = target + 1;
       return true;
@@ -414,6 +480,10 @@ function listCanonical(
   }
   if (esize === ElemSize.Pointer) {
     const count = wpListCount(w);
+    if (count > 0 && (!inRange(m, target) || !inRange(m, target + count - 1))) {
+      throw new CapnpError("BOUNDS", listOutOfBounds());
+    }
+    chargeCanonical(m, count);
     if (target !== head.at) return false;
     head.at = target + count;
     for (let i = 0; i < count; i++) {
@@ -423,13 +493,21 @@ function listCanonical(
   }
   const stepBits = listStepBits(esize);
   if (stepBits < 0) return false;
-  if (target !== head.at) return false;
   const count = wpListCount(w);
+  if (stepBits === 0) {
+    // A void list has no body. Charge one word per element, as the reader does.
+    chargeCanonical(m, count);
+    return target === head.at;
+  }
   const bitSize = BigInt(count) * BigInt(stepBits);
   const wholeBytes = Number(bitSize / 8n);
   const leftover = Number(bitSize % 8n);
-  const endWord = head.at + Number((bitSize + 63n) / 64n);
-  if (endWord > m.segWords(seg)) return false;
+  const endWord = target + Number((bitSize + 63n) / 64n);
+  if ((count > 0 && !inRange(m, target)) || endWord > m.segWords(seg)) {
+    throw new CapnpError("BOUNDS", listOutOfBounds());
+  }
+  chargeCanonical(m, endWord - target);
+  if (target !== head.at) return false;
   const data = m.segs[seg]!.data;
   let byte = head.at * WORD_BYTES + wholeBytes;
   if (leftover > 0) {

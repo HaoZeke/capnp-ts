@@ -9,6 +9,7 @@ import {
   ElemSize,
   MAX_SEGMENTS,
   Message,
+  MessageBuilder,
   PtrKind,
   frameSegments,
   serializeToFlat,
@@ -263,7 +264,18 @@ describe("capability pointer reserved bits", () => {
     } catch (e) {
       expect(e).toBeInstanceOf(CapnpError);
       expect((e as CapnpError).code).toBe("KIND");
+      expect((e as CapnpError).message).toBe("Unknown pointer type.");
     }
+  });
+
+  test("a null struct pointer reads schema defaults", () => {
+    const b = new MessageBuilder();
+    b.initRoot(0, 1);
+    const inner = Message.fromFlat(b.toFlat()).root().getP(0);
+    expect(inner.kind).toBe(PtrKind.Null);
+    expect(inner.getText(0, "inner-default")).toBe("inner-default");
+    expect(inner.getU32(0, 7)).toBe(7);
+    expect(inner.getP(1).kind).toBe(PtrKind.Null);
   });
 
   test("well-formed cap pointer resolves", () => {

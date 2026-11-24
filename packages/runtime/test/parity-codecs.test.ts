@@ -16,6 +16,8 @@ import {
   SchemaLoader,
   TextCodec,
   canonicalize,
+  canonicalizeFlat,
+  decodeJson,
   decodeText,
   isCanonical,
   pack,
@@ -78,10 +80,15 @@ describe("stream framing against capnp 1.4.0", () => {
       return out;
     };
     expect(Message.fromFlat(one(511)).segmentCount).toBe(511);
-    expect(() => Message.fromFlat(one(512))).toThrow(/too many segments/);
+    expect(Message.fromFlat(one(512)).segmentCount).toBe(512);
+    expect(Message.fromFlat(one(513)).segmentCount).toBe(513);
+    expect(() => unpack(pack(one(512)))).toThrow(/too many segments/);
+    expect(() => unpack(pack(one(513)))).toThrow(/\[512 < 511\]/);
+    expect(() => unpack(pack(one(600)))).toThrow(/too many segments/);
+    expect(() => canonicalizeFlat(one(513))).not.toThrow();
   });
 
-  test("W-03 stream framing checks total words against the traversal limit", () => {
+  test("W-03 a flat read accepts a message past the traversal limit", () => {
     const body = new Uint8Array(20 * 8);
     storeU64(body, 0, wpMakeStruct(0, 1, 0));
     let table = 8;
@@ -89,7 +96,7 @@ describe("stream framing against capnp 1.4.0", () => {
     storeU32(flat, 0, 0);
     storeU32(flat, 4, 20);
     flat.set(body, table);
-    expect(() => Message.fromFlat(flat, { traversalWords: 4 })).toThrow(/too large/);
+    expect(Message.fromFlat(flat, { traversalWords: 4 }).segmentCount).toBe(1);
     expect(Message.fromFlat(flat, { traversalWords: 20 }).segmentCount).toBe(1);
   });
 });
@@ -230,6 +237,63 @@ describe("canonical form against capnp 1.4.0", () => {
     expect(isCanonical(Message.fromSegments([words(wpMakeStruct(-1, 0, 0))]))).toBe(true);
   });
 
+  test("isCanonical charges the root, structs, and list bodies", () => {
+    const at = (w: bigint[], lim: number) => () =>
+      isCanonical(Message.fromSegments([words(...w)], { traversalWords: lim }));
+    const st = [wpMakeStruct(0, 9, 0), ...new Array<bigint>(8).fill(0n), 1n];
+    expect(at(st, 10)()).toBe(true);
+    expect(at(st, 9)).toThrow(/traversal limit/);
+    const pl = [
+      wpMakeStruct(0, 0, 1),
+      wpMakeList(0, ElemSize.Pointer, 3),
+      wpMakeStruct(2, 1, 0),
+      wpMakeStruct(2, 1, 0),
+      wpMakeStruct(2, 1, 0),
+      1n,
+      2n,
+      3n,
+    ];
+    expect(at(pl, 8)()).toBe(true);
+    expect(at(pl, 7)).toThrow(/traversal limit/);
+    const il = [wpMakeStruct(0, 0, 1), wpMakeList(0, ElemSize.FourBytes, 6), 1n, 2n, 3n];
+    expect(at(il, 5)()).toBe(true);
+    expect(at(il, 4)).toThrow(/traversal limit/);
+    const cl = [
+      wpMakeStruct(0, 0, 1),
+      wpMakeList(0, ElemSize.Composite, 2),
+      wpMakeStruct(2, 1, 0),
+      1n,
+      2n,
+    ];
+    expect(at(cl, 5)()).toBe(true);
+    expect(at(cl, 4)).toThrow(/traversal limit/);
+  });
+
+  test("isCanonical charges zero-size composite elements before layout checks", () => {
+    const at = (w: bigint[], lim?: number) => () =>
+      isCanonical(Message.fromSegments([words(...w)], lim ? { traversalWords: lim } : {}));
+    const moved = [
+      wpMakeStruct(0, 0, 1),
+      wpMakeList(1, ElemSize.Composite, 0),
+      0n,
+      wpMakeStruct(10_000_000, 0, 0),
+    ];
+    expect(at(moved)).toThrow(/traversal limit/);
+    const padded = [wpMakeStruct(0, 0, 1), wpMakeList(0, ElemSize.Composite, 1), wpMakeStruct(3, 0, 0), 0n];
+    expect(at(padded, 7)()).toBe(false);
+    expect(at(padded, 6)).toThrow(/traversal limit/);
+  });
+
+  test("a list root is not a struct to canonicalize", () => {
+    const list = words(wpMakeList(0, ElemSize.Byte, 2), 0x6162n);
+    expect(() => canonicalize(Message.fromSegments([list]))).toThrow(/pointerwas expected/);
+  });
+
+  test("an amplified void list hits the traversal limit", () => {
+    const amp = words(wpMakeStruct(0, 0, 1), wpMakeList(0, ElemSize.Void, 10_000_000));
+    expect(() => isCanonical(Message.fromSegments([amp]))).toThrow(/traversal limit/);
+  });
+
   test("C-03 a null root canonicalizes to the empty-struct pointer", () => {
     const out = canonicalize(Message.fromSegments([words(0n)]));
     expect(out).toEqual(words(wpMakeStruct(-1, 0, 0)));
@@ -252,7 +316,7 @@ describe("canonical form with empty trailing segments", () => {
     ]);
     expect(isCanonical(valid)).toBe(true);
     const bad = Message.fromSegments([
-      words(wpMakeList(0, ElemSize.Composite, 1), wpMakeStruct(3, 0, 0)),
+      words(wpMakeList(0, ElemSize.Composite, 1), wpMakeStruct(3, 0, 0), 0n),
     ]);
     expect(isCanonical(bad)).toBe(false);
     // In-bounds: list claims 1 content word, tag has 0-word elements, next field uses word 4.
@@ -340,6 +404,25 @@ describe("text format against capnp 1.4.0", () => {
     expect(() => readText("(raw = 0x'dead')")).toThrow(/Parse error/);
     expect(readText("(title = `hello\n)").get("title").asText()).toBe("hello\n");
   });
+
+  test("T-06 integer literals wrap modulo 2^64 before the range check", () => {
+    expect(readText("(u64 = 18446744073709551616)").get("u64").asUInt64()).toBe(0n);
+    expect(readText("(i64 = 99999999999999999999999)").get("i64").asInt64()).toBe(200376420520689663n);
+    expect(readText("(i64 = -18446744073709551617)").get("i64").asInt64()).toBe(-1n);
+    expect(readText("(u64 = 0x10000000000000000)").get("u64").asUInt64()).toBe(0n);
+    expect(readText("(u64 = 02000000000000000000000)").get("u64").asUInt64()).toBe(0n);
+    expect(readText("(u32 = 18446744073709551617)").get("u32").asUInt32()).toBe(1);
+    expect(readText("(f64 = 18446744073709551616)").get("f64").asFloat64()).toBe(0);
+    expect(() => readText("(u8 = 18446744073709551872)")).toThrow(CapnpError);
+    expect(() => readText("(i64 = 9223372036854775808)")).toThrow(CapnpError);
+    expect(() => readText("(i8 = -18446744073709551488)")).toThrow(/too big to be negative/);
+  });
+
+  test("T-07 a negated integer zero is a positive float zero", () => {
+    expect(Object.is(readText("(f64 = -0)").get("f64").asFloat64(), 0)).toBe(true);
+    expect(Object.is(readText("(f32 = -0x0)").get("f32").asFloat32(), 0)).toBe(true);
+    expect(Object.is(readText("(f64 = -0.0)").get("f64").asFloat64(), -0)).toBe(true);
+  });
 });
 
 describe("json codec against capnp 1.4.0", () => {
@@ -387,6 +470,70 @@ describe("json codec against capnp 1.4.0", () => {
     codec.handleByAnnotation(custom);
     expect(codec.decode('{"prio":70000}', custom).get("prio").asEnum().getRaw()).toBe(4464);
     expect(codec.decode('{"prio":1.5}', custom).get("prio").asEnum().getRaw()).toBe(1);
+  });
+
+  test("J-07 float strings follow strtod", () => {
+    const codec = new JsonCodec();
+    const f64 = (s: string) =>
+      codec.decode(`{"f64":${JSON.stringify(s)}}`, sink).get("f64").asFloat64();
+    expect(f64(" 12")).toBe(12);
+    expect(f64("\t\n\v\f\r-3")).toBe(-3);
+    expect(f64("0x10")).toBe(16);
+    expect(f64("0X1P3")).toBe(8);
+    expect(f64("-0x1.8p-1")).toBe(-0.75);
+    expect(f64("0x.8")).toBe(0.5);
+    expect(f64("0x1p-1074")).toBe(5e-324);
+    expect(f64("0x1p-1075")).toBe(0);
+    expect(f64("0x3p-1076")).toBe(5e-324);
+    expect(f64("0x1.fffffffffffff8p1023")).toBe(Infinity);
+    expect(f64("Inf")).toBe(Infinity);
+    expect(f64("-INFINITY")).toBe(-Infinity);
+    expect(f64("nan()")).toBeNaN();
+    const f32 = codec.decode('{"f32":"0x1.0000018p0"}', sink).get("f32").asFloat32();
+    expect(f32).toBe(Math.fround(1 + 2 ** -23));
+    for (const bad of ["0x", "0x1p", "12 ", "infin", "nan(-)", " ", "1e"]) {
+      expect(() => f64(bad)).toThrow(CapnpError);
+    }
+  });
+
+  test("hex float exponents are scaled before range checks", () => {
+    const codec = new JsonCodec();
+    const f64 = (s: string) =>
+      codec.decode(`{"f64":${JSON.stringify(s)}}`, sink).get("f64").asFloat64();
+    const zeros = "0".repeat(260000);
+    expect(f64(`0x0.${zeros}1p1040004`)).toBe(1);
+    expect(f64(`0x1${zeros}p-1040000`)).toBe(1);
+    expect(f64(`0x0.${zeros}1p1038930`)).toBe(5e-324);
+    expect(f64("0x1p-99999999999999999999")).toBe(0);
+    expect(f64("0x1p99999999999999999999")).toBe(Infinity);
+  });
+
+  test("NaN float strings keep the sign and payload glibc strtod gives", () => {
+    const f64 = sink.getFieldByName("f64").offset * 8;
+    const f32 = sink.getFieldByName("f32").offset * 4;
+    const root = (json: string) => Message.fromFlat(decodeJson(json, sink).copyFlat()).root();
+    // KitchenSink defaults: f64 = -2.25, f32 = 1.5.
+    const bits64 = (s: string) => root(`{"f64":${JSON.stringify(s)}}`).getU64(f64, 0xc002000000000000n);
+    const bits32 = (s: string) => root(`{"f32":${JSON.stringify(s)}}`).getU32(f32, 0x3fc00000);
+    expect(bits64("nan")).toBe(0x7ff8000000000000n);
+    expect(bits64("-nan")).toBe(0xfff8000000000000n);
+    expect(bits64("nan(123)")).toBe(0x7ff800000000007bn);
+    expect(bits64(" -nan(0x7b)")).toBe(0xfff800000000007bn);
+    expect(bits64("nan(0173)")).toBe(0x7ff800000000007bn);
+    expect(bits64("nan(99999999999999999999)")).toBe(0x7fffffffffffffffn);
+    expect(bits64("nan(12abc)")).toBe(0x7ff8000000000000n);
+    expect(bits32("-nan")).toBe(0xffc00000);
+    expect(bits32("nan(0x7fffffffffffff)")).toBe(0x7fffffff);
+    expect(bits32("nan(123)")).toBe(0x7fc00000);
+  });
+
+  test("a non-number in a Data array decodes as a zero byte", () => {
+    const codec = new JsonCodec();
+    const raw = (json: string) => codec.decode(`{"raw":${json}}`, sink).get("raw").asData();
+    expect(raw('["x"]')).toEqual(new Uint8Array([0]));
+    expect(raw("[null,{}]")).toEqual(new Uint8Array([0, 0]));
+    expect(raw('[1,"x",2,[3],{"a":4},true,255]')).toEqual(new Uint8Array([1, 0, 2, 0, 0, 0, 255]));
+    for (const bad of ["[1.5]", "[256]", "[-1]"]) expect(() => raw(bad)).toThrow(CapnpError);
   });
 });
 
@@ -455,11 +602,19 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 
 describe("packed round trips against capnp 1.4.0", () => {
   test("unpack returns raw word buffers that pack produced", () => {
-    const zeros = new Uint8Array(48);
-    expect(unpack(pack(zeros))).toEqual(zeros);
     const dense = new Uint8Array(40).fill(7);
     expect(unpack(pack(dense))).toEqual(dense);
-    expect(unpack(new Uint8Array([0x00, 0x05]))).toEqual(zeros);
+    // Segment 0 has no words, so this is a raw buffer. The message-reader
+    // error stays on frames whose first segment has a word.
+    expect(unpack(new Uint8Array([0x00, 0x05]))).toEqual(new Uint8Array(48));
+    expect(unpack(new Uint8Array([0x00, 0x84]))).toEqual(new Uint8Array(1064));
+    expect(unpack(pack(new Uint8Array(48)))).toEqual(new Uint8Array(48));
+    // Segment 0 is empty and a later segment has a word. The framed read
+    // hits a segment boundary; the raw words are still the result.
+    const later = unpack(new Uint8Array([0x01, 0x01, 0x01, 0x01, 0x00, 0x05]));
+    expect(later.length).toBe(64);
+    expect(later[0]).toBe(1);
+    expect(later[8]).toBe(1);
   });
 
   test("concatenated frames pack and unpack piece by piece", () => {
@@ -476,5 +631,71 @@ describe("packed round trips against capnp 1.4.0", () => {
     expect(unpack(trailing)).toEqual(concat(a, new Uint8Array(48)));
     const straddle = concat(new Uint8Array([0x11, 0x03, 0x01, 0x00, 0x02]), pack(a));
     expect(() => unpack(straddle)).toThrow(/segment boundary/);
+  });
+});
+
+describe("composite list bounds against capnp 1.4.0", () => {
+  test("an out of bounds composite list names the tag word", () => {
+    const msg = Message.fromSegments([
+      words(wpMakeStruct(0, 0, 1), wpMakeList(0, ElemSize.Composite, 4)),
+    ]);
+    expect(() => msg.root().getP(0)).toThrow(
+      "boundsCheck(segment, ptr, wordCount + POINTER_SIZE_IN_WORDS)",
+    );
+  });
+});
+
+describe("reader sentences against capnp 1.4.0", () => {
+  test("non-NUL text uses the raw code unit on both sides", () => {
+    const msg = Message.fromSegments([
+      words(wpMakeStruct(0, 0, 1), wpMakeList(0, ElemSize.Byte, 1), 0x41n),
+    ]);
+    let message = "";
+    try {
+      msg.root().getText(0);
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e);
+    }
+    expect(message).toContain(`[A == ${String.fromCharCode(0)}]`);
+
+    const control = Message.fromSegments([
+      words(wpMakeStruct(0, 0, 1), wpMakeList(0, ElemSize.Byte, 1), 0x01n),
+    ]);
+    try {
+      control.root().getText(0);
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e);
+    }
+    expect(message).toContain(`[${String.fromCharCode(1)} == ${String.fromCharCode(0)}]`);
+  });
+
+  test("a double-far landing on a far pointer is Unexpected FAR pointer", () => {
+    const flat = new Uint8Array([
+      0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01,
+      0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00,
+    ]);
+    const root = Message.fromFlat(flat).root();
+    expect(() => root.getP(0, "copy")).toThrow("Unexpected FAR pointer.");
+  });
+});
+
+describe("isCanonical throws where capnp 1.4.0 throws", () => {
+  function raw(hex: string): Message {
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    return Message.fromSegments([{ data: bytes, words: bytes.length / 8 }]);
+  }
+
+  test("composite overrun, non-struct tag, and pointer-list OOB throw", () => {
+    expect(() =>
+      isCanonical(raw("0000000000000100010000000f00000028000000010000000000000000000000")),
+    ).toThrow(/elements overrun its word count/);
+    expect(() =>
+      isCanonical(raw("0000000000000100010000000f000000010000000a0000000000000000000000")),
+    ).toThrow(/lists of non-STRUCT type are not supported/);
+    expect(() => isCanonical(raw("0000000000000100010000002e0000000000000000000000"))).toThrow(
+      /boundsCheck\(segment, ptr, wordCount\)/,
+    );
   });
 });

@@ -11,6 +11,7 @@ import {
   Message as CapnpMessage,
   MessageBuilder,
   Ptr,
+  PtrKind,
   type StructBuilder,
 } from "../../runtime/src/index.ts";
 
@@ -126,7 +127,10 @@ function readReturn(t: Transport): { answerId: number; value: number } {
   const ret = Message_getReturn(root);
   return {
     answerId: Return_getAnswerId(ret),
-    value: Payload_getContent(Return_getResults(ret)).getU32(0),
+    value: (() => {
+      const content = Payload_getContent(Return_getResults(ret));
+      return content.kind === PtrKind.Struct ? content.getU32(0) : 0;
+    })(),
   };
 }
 
@@ -191,7 +195,7 @@ describe("promise pipelining", () => {
 });
 
 describe("disembargo", () => {
-  test("senderLoopback aimed at a local object is a protocol error, not an echo", () => {
+  test("senderLoopback aimed at a local object is a protocol error, not an echo", async () => {
     const pair = new MemoryTransportPair();
     const vat = new RpcConnection(pair.b, new CountingServer());
     sendBootstrap(pair.a, 1);
@@ -210,6 +214,9 @@ describe("disembargo", () => {
     dis.setU32(0, 12345);
     pair.a.send(b.toFlat());
     vat.pump();
+    // capnp-C++ checks only after the work already queued has run.
+    expect(pair.a.receive()).toBeNull();
+    await new Promise((r) => setImmediate(r));
 
     // Export 0 is a local object, so it cannot be a promise that resolved
     // back to the sender. The spec makes that an abort.
@@ -217,7 +224,10 @@ describe("disembargo", () => {
     expect(frame).not.toBeNull();
     const reply = CapnpMessage.fromFlat(frame!).root();
     expect(Message_which(reply)).toBe(Message.abort);
-    expect(vat.disconnected).toBeDefined();
+    expect(vat.disconnected?.message).toBe(
+      "expected target->getBrand() == this [0 == 1]; " +
+        "'Disembargo' of type 'senderLoopback' sent to an object that does not point back to the sender.",
+    );
   });
 
   test("receiverLoopback for an unknown embargo id aborts rather than echoing", () => {

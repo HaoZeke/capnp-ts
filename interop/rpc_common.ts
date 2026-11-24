@@ -15,8 +15,10 @@ import {
   servePersistent,
   StreamTransport,
 } from "../packages/rpc/src/index.ts";
+import { newNullCap } from "../packages/rpc/src/capability.ts";
 import {
   COUNTER_INTERFACE_ID,
+  Counter_methods,
   Echo_methods,
   ECHO_INTERFACE_ID,
   Sink_methods,
@@ -26,6 +28,7 @@ import {
 
 export {
   COUNTER_INTERFACE_ID,
+  Counter_methods,
   Echo_methods,
   ECHO_INTERFACE_ID,
   Sink_methods,
@@ -33,24 +36,49 @@ export {
   KEEP_INTERFACE_ID,
 };
 
-export function attach(sock: Socket, bootstrap?: RpcServer | Client): RpcConnection {
+export function attach(
+  sock: Socket,
+  bootstrap?: RpcServer | Client,
+  options?: ConstructorParameters<typeof RpcConnection>[3],
+): RpcConnection {
   const transport = new StreamTransport((bytes) => {
     if (!sock.destroyed) sock.write(bytes);
   });
-  const conn = new RpcConnection(transport, bootstrap);
+  const conn = new RpcConnection(transport, bootstrap, undefined, options);
   const drain = (): void => {
-    try {
-      conn.pump();
-    } catch (e) {
-      conn.abort(new RpcError(e instanceof Error ? e.message : String(e)));
-      sock.destroy();
-    }
+    const step = (): void => {
+      let ran = false;
+      try {
+        ran = conn.pumpOnce();
+      } catch (e) {
+        conn.abort(new RpcError(e instanceof Error ? e.message : String(e)));
+        sock.destroy();
+        return;
+      }
+      if (conn.disconnected !== undefined) {
+        sock.end();
+        return;
+      }
+      if (ran && transport.pending > 0) queueMicrotask(step);
+    };
+    step();
   };
   sock.on("data", (chunk: Buffer) => {
-    transport.feed(new Uint8Array(chunk));
+    try {
+      transport.feed(new Uint8Array(chunk));
+    } catch (e) {
+      conn.abort(new RpcError(e instanceof Error ? e.message : String(e)));
+    }
     drain();
   });
-  const gone = (): void => conn.disconnect(new RpcError("connection closed", "disconnected"));
+  // An abort can also come from a promise callback, outside drain().
+  const watch = setInterval(() => {
+    if (conn.disconnected !== undefined) sock.end();
+  }, 20);
+  const gone = (): void => {
+    clearInterval(watch);
+    conn.disconnect(new RpcError("connection closed", "disconnected"));
+  };
   sock.on("close", gone);
   sock.on("error", gone);
   return conn;
@@ -60,7 +88,16 @@ export class CounterImpl implements RpcServer {
   static released = 0;
   seen: number[] = [];
   constructor(private readonly onCall?: (n: number) => void) {}
-  dispatch(_i: bigint, _m: number, params: Ptr, results: StructBuilder): void {
+  dispatch(interfaceId: bigint, methodId: number, params: Ptr, results: StructBuilder): void {
+    if (interfaceId !== COUNTER_INTERFACE_ID) {
+      throw new RpcError(
+        `Requested interface not implemented.; actualInterfaceName = interop.capnp:Counter; requestedTypeId = ${interfaceId}`,
+        "unimplemented",
+      );
+    }
+    if (methodId !== Counter_methods.inc.ordinal) {
+      throw new RpcError("Method not implemented.", "unimplemented");
+    }
     const n = params.getU32(0);
     this.seen.push(n);
     this.onCall?.(n);
@@ -105,8 +142,6 @@ export function keepServer(): RpcServer {
   });
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 /** The Echo interface of schema/interop.capnp. */
 export class EchoImpl implements RpcServer {
   cancelled = 0;
@@ -114,7 +149,8 @@ export class EchoImpl implements RpcServer {
   private gates: Array<() => void> = [];
   private fulfillCounter: ((c: Client) => void) | undefined;
   private fulfillHeld: ((c: Client) => void) | undefined;
-  private held: Client | undefined;
+  // As the C++ Echo's `Counter::Client held = nullptr`.
+  private held = new Client(newNullCap());
 
   constructor(private readonly onDie: () => void = () => {}) {}
 
@@ -129,17 +165,22 @@ export class EchoImpl implements RpcServer {
     results: StructBuilder,
     ctx: CallContext,
   ): void | Promise<void> {
-    if (interfaceId !== ECHO_INTERFACE_ID) throw new RpcError("wrong interface", "unimplemented");
+    if (interfaceId !== ECHO_INTERFACE_ID) {
+      throw new RpcError(
+        `Requested interface not implemented.; actualInterfaceName = interop.capnp:Echo; requestedTypeId = ${interfaceId}`,
+        "unimplemented",
+      );
+    }
     const m = Echo_methods;
     switch (methodId) {
       case m.ping.ordinal:
         results.setU32(0, params.getU32(0) + 1);
         return;
       case m.makeCounter.ordinal:
-        // Answered late, so a pipelined call arrives while this is pending.
-        return sleep(20).then(() => {
-          ctx.setResultCap(ctx.initResults(0, 1), 0, Client.local(new CounterImpl()).hook);
-        });
+        // Ready immediately, as the C++ peer's `kj::READY_NOW`. A pipelined
+        // call in the same burst is therefore post-return.
+        ctx.setResultCap(ctx.initResults(0, 1), 0, Client.local(new CounterImpl()).hook);
+        return;
       case m.makePromise.ordinal: {
         const promise = Client.fromPromise(
           new Promise<Client>((resolve) => (this.fulfillCounter = resolve)),
@@ -192,13 +233,15 @@ export class EchoImpl implements RpcServer {
           newBrokenCap(new RpcError("broken on purpose")),
         );
         return;
-      case m.hold.ordinal:
-        this.held?.release();
-        this.held = new Client(ctx.getCap(params.getP(0)));
+      case m.hold.ordinal: {
+        const cap = new Client(ctx.getCap(params.getP(0)));
+        this.held.release();
+        this.held = cap;
         return;
+      }
       case m.callHeld.ordinal: {
         const n = params.getU32(0);
-        return ctx.tailCall(this.held!, COUNTER_INTERFACE_ID, 0, (p) => p.setU32(0, n), 1, 0);
+        return ctx.tailCall(this.held, COUNTER_INTERFACE_ID, 0, (p) => p.setU32(0, n), 1, 0);
       }
       case m.promiseOfHeld.ordinal: {
         const promise = Client.fromPromise(
@@ -208,7 +251,7 @@ export class EchoImpl implements RpcServer {
         return;
       }
       case m.resolveHeld.ordinal:
-        this.fulfillHeld?.(this.held!.dup());
+        this.fulfillHeld?.(this.held.dup());
         this.fulfillHeld = undefined;
         return;
       case m.openSink.ordinal:
@@ -225,7 +268,10 @@ export class EchoImpl implements RpcServer {
         setImmediate(this.onDie);
         return;
       default:
-        throw new RpcError(`Echo: no method ${methodId}`, "unimplemented");
+        throw new RpcError(
+          `Method not implemented.; interfaceName = interop.capnp:Echo; typeId = ${ECHO_INTERFACE_ID}; methodId = ${methodId}`,
+          "unimplemented",
+        );
     }
   }
 }

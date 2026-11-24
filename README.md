@@ -253,10 +253,14 @@ const unpacked = unpack(packed); // same bytes as framed input
 const canonical = canonicalizeFlat(bytes); // single-segment preorder form
 ```
 
-`pack()` encodes the buffer it is given, so `unpack(pack(x))` is the same
-bytes as `x`. Pass `{ compactFramed: true }` to compact a stream-framed
-message into one segment first, which is what `capnp convert binary:packed`
-does. That option changes the unpacked bytes of a multi-segment frame.
+`pack()` encodes the buffer it is given. `unpack(pack(x))` is the same
+bytes as `x`. An all-zero buffer is a raw word buffer: segment 0 has no
+words, so the packed-frame error does not apply. That error stays when a
+frame's first segment has a word and a packed zero run runs past the end
+of the frame. A packed message with a partial trailing tag yields the first
+message. Pass `{ compactFramed: true }` to compact a stream-framed message
+into one segment first, which is what `capnp convert binary:packed` does.
+That option changes the unpacked bytes of a multi-segment frame.
 
 Dynamic reflection, text format, JSON codec, and `capnp-ts` CLI:
 

@@ -14,12 +14,14 @@
  * calls `release()`; keeping one longer takes `addRef()`.
  */
 import {
+  type BuilderPointer,
   Message as CapnpMessage,
   MessageBuilder,
+  nonStructPointerMessage,
   Orphan,
   Ptr,
   PtrKind,
-  type StructBuilder,
+  StructBuilder,
 } from "@haozeke/capnp";
 
 export type ExceptionType = "failed" | "overloaded" | "disconnected" | "unimplemented";
@@ -29,15 +31,33 @@ export class RpcError extends Error {
   constructor(
     message: string,
     readonly type: ExceptionType = "failed",
+    /** `Exception.trace` from the peer, as capnp-C++ `setRemoteTrace` keeps it. */
+    readonly remoteTrace?: string,
+    /** Wire `Exception.type` when the peer sent a value outside the four names. */
+    readonly wireType?: number,
   ) {
     super(message);
     this.name = "RpcError";
   }
 }
 
+const EXCEPTION_TYPE_NAMES: ReadonlySet<string> = new Set([
+  "failed",
+  "overloaded",
+  "disconnected",
+  "unimplemented",
+]);
+
 export function toRpcError(e: unknown): RpcError {
   if (e instanceof RpcError) return e;
-  return new RpcError(e instanceof Error ? e.message : String(e));
+  if (e instanceof Error) {
+    const named = (e as { type?: unknown }).type;
+    if (typeof named === "string" && EXCEPTION_TYPE_NAMES.has(named)) {
+      return new RpcError(e.message, named as ExceptionType);
+    }
+    return new RpcError(e.message);
+  }
+  return new RpcError(String(e));
 }
 
 /**
@@ -89,45 +109,99 @@ export class Settle<T> {
   }
 }
 
+let nullContent: Ptr | undefined;
+
+/** What a null content reads as: a struct whose every field is its default. */
+function defaultContent(): Ptr {
+  if (nullContent === undefined) {
+    const b = new MessageBuilder();
+    b.initRoot(0, 0);
+    nullContent = CapnpMessage.fromFlat(b.toFlat()).root();
+  }
+  return nullContent;
+}
+
+/** A real null pointer, for a pipeline that starts on null content. */
+function rawNullPointer(): Ptr {
+  const b = new MessageBuilder();
+  b.initRoot(0, 1);
+  return CapnpMessage.fromFlat(b.toFlat()).root().getP(0);
+}
+
 /**
  * The content of a message together with the capabilities its pointers
  * name. A capability pointer holds an index; the hook it stands for is
  * `caps[index]`.
  */
 export class Payload {
-  constructor(
-    readonly content: Ptr,
-    readonly caps: ClientHook[] = [],
-  ) {}
+  /** A null content reads as a struct of defaults, as capnp-C++ getters read one. */
+  readonly content: Ptr;
 
-  /** The hook a capability pointer inside this payload names. */
+  constructor(
+    content: Ptr,
+    readonly caps: ClientHook[] = [],
+  ) {
+    this.content = content.kind === PtrKind.Null ? defaultContent() : content;
+  }
+
+  /** The content was a null pointer, and is sent on as one. */
+  get contentIsNull(): boolean {
+    return this.content === nullContent;
+  }
+
+  /**
+   * The hook a capability pointer inside this payload names. As
+   * capnp-C++ `readCapabilityPointer`, a pointer that is not a capability,
+   * or that names a missing or `none` cap table entry, throws.
+   */
   getCap(ptr: Ptr): ClientHook {
-    if (ptr.kind !== PtrKind.Cap) return newNullCap();
+    if (ptr.kind === PtrKind.Null) return newNullCap();
+    if (ptr.kind !== PtrKind.Cap) {
+      throw new RpcError(
+        "Schema mismatch: Message contains non-capability pointer where capability pointer was expected.",
+      );
+    }
     const hook = this.caps[ptr.count];
-    if (hook === undefined) {
-      return new BrokenClient(new RpcError("capability index is outside the cap table"));
+    if (hook === undefined || hook instanceof NoneEntry) {
+      throw new RpcError("Message contains invalid capability pointer.");
     }
     return hook.addRef();
   }
 
   /**
    * The capability at the end of a chain of pointer fields, as an owned
-   * reference. This is what a pipelined call addresses.
+   * reference. A null step is an empty struct, a non-struct throws, and
+   * the final capability read throws on a bad cap.
    */
   getPipelinedCap(ops: readonly number[]): ClientHook {
-    let cursor = this.content;
+    // capnp-C++ `AnyPointer::getCapability` on a null pointer is `newNullCap()`.
+    // The stored content of a null payload is an empty struct, so the walk
+    // has to start from the raw null or the first step is a schema mismatch.
+    let at = this.contentIsNull ? rawNullPointer() : this.content;
     for (const field of ops) {
-      if (cursor.kind !== PtrKind.Struct) {
-        return new BrokenClient(new RpcError("pipeline path walks into a non-struct"));
+      if (at.kind === PtrKind.Null) continue;
+      if (at.kind !== PtrKind.Struct) {
+        const wire = at.kind === PtrKind.List ? 1 : at.kind === PtrKind.Cap ? 3 : 0;
+        throw new RpcError(nonStructPointerMessage(wire));
       }
-      cursor = cursor.getP(field);
+      at = at.getP(field);
     }
-    return this.getCap(cursor);
+    return this.getCap(at);
   }
 
   release(): void {
     for (const h of this.caps) h.release();
     this.caps.length = 0;
+  }
+
+  /**
+   * The capability a pipelined call along `ops` reaches, as an owned
+   * reference. As capnp-C++ `AnyPointer::Reader::getPipelinedCap`, a null
+   * step reads as an empty struct, and a capability that cannot be read
+   * is a broken one.
+   */
+  pipelinedCapAt(ops: readonly number[]): ClientHook {
+    return this.getPipelinedCap(ops);
   }
 }
 
@@ -137,12 +211,22 @@ export class CallBuilder {
   readonly root: StructBuilder;
   readonly caps: ClientHook[] = [];
 
-  constructor(dwords = 1, pwords = 1) {
-    this.root = this.message.initRoot(dwords, pwords);
+  /** With `results`, a root nobody writes to becomes a null content. */
+  constructor(dwords = 1, pwords = 1, results = false) {
+    const root = this.message.initRoot(dwords, pwords);
+    this.root = results ? new ResultsStruct(root) : root;
   }
 
-  /** Put `hook` in the cap table, taking over the caller's reference. */
+  /**
+   * Put `hook` in the cap table, taking over the caller's reference. A
+   * null capability is a null pointer and takes no table entry, as in
+   * capnp-C++'s `setCapabilityPointer`.
+   */
   addCap(hook: ClientHook): Orphan {
+    if (isNullCap(hook)) {
+      hook.release();
+      return Orphan.null();
+    }
     this.caps.push(hook);
     return Orphan.cap(this.message, this.caps.length - 1);
   }
@@ -154,8 +238,72 @@ export class CallBuilder {
 
   /** The readable view; the builder gives up its capabilities to it. */
   toPayload(): Payload {
-    const root = CapnpMessage.fromFlat(this.message.toFlat()).root();
+    if (this.root instanceof ResultsStruct && !this.root.written) {
+      return new Payload(defaultContent(), this.caps.splice(0));
+    }
+    const root = CapnpMessage.fromFlat(this.message.toFlat(), {
+      maxSegments: Number.MAX_SAFE_INTEGER,
+    }).root();
     return new Payload(root, this.caps.splice(0));
+  }
+}
+
+/**
+ * The results struct a method is handed. capnp-C++ leaves a Return's
+ * content null until the method calls `getResults()`; writing to this
+ * struct is that call here.
+ */
+class ResultsStruct extends StructBuilder {
+  written = false;
+
+  constructor(root: StructBuilder) {
+    super(root.builder, root.seg, root.word, root.dwords, root.pwords);
+  }
+
+  override setU8(...a: Parameters<StructBuilder["setU8"]>): void {
+    this.written = true;
+    super.setU8(...a);
+  }
+
+  override setU16(...a: Parameters<StructBuilder["setU16"]>): void {
+    this.written = true;
+    super.setU16(...a);
+  }
+
+  override setU32(...a: Parameters<StructBuilder["setU32"]>): void {
+    this.written = true;
+    super.setU32(...a);
+  }
+
+  override setU64(...a: Parameters<StructBuilder["setU64"]>): void {
+    this.written = true;
+    super.setU64(...a);
+  }
+
+  override setF32(...a: Parameters<StructBuilder["setF32"]>): void {
+    this.written = true;
+    super.setF32(...a);
+  }
+
+  override setF64(...a: Parameters<StructBuilder["setF64"]>): void {
+    this.written = true;
+    super.setF64(...a);
+  }
+
+  override setBool(...a: Parameters<StructBuilder["setBool"]>): void {
+    this.written = true;
+    super.setBool(...a);
+  }
+
+  /** Every pointer write goes through a slot. */
+  override slot(ptrIndex: number): BuilderPointer {
+    this.written = true;
+    return super.slot(ptrIndex);
+  }
+
+  override asPointer(): BuilderPointer {
+    this.written = true;
+    return super.asPointer();
   }
 }
 
@@ -182,7 +330,24 @@ export interface CallOptions {
   tailHandler?: TailHandler;
   /** Internal: mark an outgoing `Call` with `sendResultsTo.yourself`. */
   sendResultsToYourself?: boolean;
+  /** Server-side failure handler propagated across queued and membrane wrappers. */
+  onError?: (error: unknown) => void;
+  /** `Call.noPromisePipelining`: the caller will not pipeline, so the pipeline is disabled. */
+  noPromisePipelining?: boolean;
+  /**
+   * `Call.onlyPromisePipeline`, as capnp-C++ `sendForPipeline()` sends: the
+   * caller only pipelines, and a remote call's results never arrive.
+   */
+  onlyPromisePipeline?: boolean;
 }
+
+/** What capnp-C++ `getDisabledPipeline()` returns. */
+export const disabledPipeline: PipelineHook = {
+  getPipelinedCap: () =>
+    new BrokenClient(
+      new RpcError("caller specified noPromisePipelining hint, but then tried to pipeline"),
+    ),
+};
 
 /**
  * One call in flight. `result` settles with the results; `pipeline`
@@ -195,6 +360,11 @@ export class CallState {
   pipeline!: PipelineHook;
   released = false;
   onRelease: (() => void) | undefined;
+  /**
+   * A server-side failure that escaped the call, such as `dispose` throwing
+   * while a result capability is dropped. The connection aborts.
+   */
+  onError: ((error: unknown) => void) | undefined;
   /** Bytes the call occupied on the wire, for flow control; zero when it never was sent. */
   wireSize = 0;
 
@@ -229,6 +399,11 @@ export interface ClientHook {
   readonly brand: unknown;
   /** The error a broken capability fails with. */
   readonly brokenError: RpcError | undefined;
+  /**
+   * File descriptor attached to this capability, as `ClientHook::getFd`.
+   * Absent when the capability has none.
+   */
+  getFd?(): number | undefined;
 }
 
 /** A stream promise that can be canceled, dropping the underlying call. */
@@ -312,8 +487,16 @@ export class BrokenClient extends RefHook implements ClientHook {
     return undefined;
   }
 
-  whenMoreResolved(): undefined {
-    return undefined;
+  /**
+   * A null capability is resolved. Any other broken capability is a
+   * promise that has already failed, as in capnp-C++, so waiting on it
+   * rejects and exporting it sends `Resolve.exception`.
+   */
+  whenMoreResolved(): Promise<ClientHook> | undefined {
+    if (this.isNull) return undefined;
+    const failed = Promise.reject(this.error);
+    failed.catch(() => {});
+    return failed;
   }
 
   protected dispose(): void {}
@@ -325,7 +508,14 @@ export function newBrokenCap(error: unknown): ClientHook {
 
 /** The capability a null pointer stands for: every call fails. */
 export function newNullCap(): ClientHook {
-  return new BrokenClient(new RpcError("called null capability"), true);
+  return new BrokenClient(new RpcError("Called null capability."), true);
+}
+
+/** A received `CapDescriptor.none`: capnp-C++ leaves its cap table slot empty. */
+export class NoneEntry extends BrokenClient {
+  constructor() {
+    super(new RpcError("Calling invalid capability pointer."));
+  }
 }
 
 export function isNullCap(hook: ClientHook): boolean {
@@ -384,14 +574,18 @@ export interface RpcServer {
   isStreaming?(interfaceId: bigint, methodId: number): boolean;
   /** Called when the last reference to this capability is dropped. */
   dispose?(): void;
+  /** `Capability::Server::getFd`. The connection sends this with the descriptor. */
+  getFd?(): number | undefined;
 }
 
 class LocalCallContext implements CallContext {
-  results = new CallBuilder();
+  results = new CallBuilder(1, 1, true);
   readonly controller = new AbortController();
   cancelRequested = false;
   cancellable = false;
   tailCalled = false;
+  /** `initResults()` or `setResultCap()` ran, so the results are this call's own. */
+  resultsInitialized = false;
   tailState: CallState | undefined;
   /** Abort a cancel that arrived before `allowCancellation()`. */
   applyPendingCancel: (() => void) | undefined;
@@ -422,11 +616,13 @@ class LocalCallContext implements CallContext {
   }
 
   initResults(dwords: number, pwords: number): StructBuilder {
+    this.resultsInitialized = true;
     this.results = new CallBuilder(dwords, pwords);
     return this.results.root;
   }
 
   setResultCap(struct: StructBuilder, ptrIndex: number, hook: ClientHook): void {
+    this.resultsInitialized = true;
     this.results.setCap(struct, ptrIndex, hook);
   }
 
@@ -440,6 +636,12 @@ class LocalCallContext implements CallContext {
   ): Promise<void> {
     if (this.tailCalled) {
       return Promise.reject(new RpcError("tailCall() may only be called once per call"));
+    }
+    if (this.resultsInitialized) {
+      throw new RpcError(
+        "expected response == nullptr [(can't stringify) == nullptr]; " +
+          "Can't call tailCall() after initializing the results struct.",
+      );
     }
     this.tailCalled = true;
     const params = new CallBuilder(paramsDwords, paramsPwords);
@@ -468,15 +670,15 @@ class LocalPipeline implements PipelineHook {
     if (this.delegate !== undefined) return;
     this.delegate = pipeline;
     for (const p of this.pending.splice(0)) {
-      p.eventual.resolve(pipeline.getPipelinedCap(p.ops));
+      p.eventual.resolve(capAt(pipeline, p.ops));
       p.drop();
     }
   }
 
   getPipelinedCap(ops: readonly number[]): ClientHook {
-    if (this.delegate !== undefined) return this.delegate.getPipelinedCap(ops);
+    if (this.delegate !== undefined) return capAt(this.delegate, ops);
     const r = this.result;
-    if (r.state === "ok") return r.value.getPipelinedCap(ops);
+    if (r.state === "ok") return capAtPayload(r.value, ops);
     if (r.state === "err") return new BrokenClient(r.error);
     this.retain();
     let held = true;
@@ -492,7 +694,7 @@ class LocalPipeline implements PipelineHook {
       const idx = this.pending.indexOf(entry);
       if (idx !== -1) this.pending.splice(idx, 1);
       if (eventual.state === "pending") {
-        eventual.resolve(s.state === "ok" ? s.value.getPipelinedCap(ops) : new BrokenClient(s.error));
+        eventual.resolve(s.state === "ok" ? capAtPayload(s.value, ops) : new BrokenClient(s.error));
       }
       drop();
     });
@@ -522,21 +724,32 @@ export class LocalClient extends RefHook implements ClientHook {
     return undefined;
   }
 
+  /** `Capability::Server::getFd`, when the server implements it. */
+  getFd(): number | undefined {
+    return this.server.getFd?.();
+  }
+
   call(interfaceId: bigint, methodId: number, params: Payload, opts?: CallOptions): CallState {
     if (this.broken !== undefined) {
       params.release();
       return failedCall(this.broken);
     }
     const state = new CallState();
+    state.onError = opts?.onError;
     let liveRefs = 1;
     let pipeline!: LocalPipeline;
     const ctx = new LocalCallContext(params, (target, iface, method, tailParams) => {
-      const tail = target.call(
-        iface,
-        method,
-        tailParams,
-        opts?.tailHandler !== undefined ? { tailHandler: opts.tailHandler } : undefined,
-      );
+      // As capnp-C++ `directTailCall`, a call that only pipelines tails
+      // with `sendForPipeline()`.
+      const tailOpts =
+        opts?.tailHandler !== undefined || opts?.onError !== undefined || opts?.onlyPromisePipeline
+          ? {
+              tailHandler: opts.tailHandler,
+              onError: opts.onError,
+              ...(opts.onlyPromisePipeline ? { onlyPromisePipeline: true } : {}),
+            }
+          : undefined;
+      const tail = target.call(iface, method, tailParams, tailOpts);
       pipeline.setDelegate(tail.pipeline);
       tail.result.onSettled((s) => {
         if (state.result.state !== "pending") return;
@@ -568,7 +781,15 @@ export class LocalClient extends RefHook implements ClientHook {
     const dropInterest = (): void => {
       if (--liveRefs > 0) return;
       ctx.cancelRequested = true;
-      if (ctx.tailState !== undefined) ctx.tailState.release();
+      if (ctx.tailState !== undefined) {
+        const tail = ctx.tailState;
+        tail.release();
+        // A pipeline-only forward never gets a Return. Rejecting it runs
+        // the same settled-result cleanup a Finish uses on the far side.
+        if (opts?.onlyPromisePipeline === true && tail.result.state === "pending") {
+          tail.result.reject(new RpcError("canceled"));
+        }
+      }
       if (!ctx.cancellable) return;
       applyPendingCancel();
     };
@@ -598,12 +819,28 @@ export class LocalClient extends RefHook implements ClientHook {
       return;
     }
     const streaming = this.server.isStreaming?.(interfaceId, methodId) ?? false;
+    const releaseResultCaps = (): void => {
+      const caps = ctx.results.caps.splice(0);
+      let first: unknown;
+      let failed = false;
+      for (const c of caps) {
+        try {
+          c.release();
+        } catch (e) {
+          if (!failed) {
+            failed = true;
+            first = e;
+          }
+        }
+      }
+      if (failed) throw first;
+    };
     const finish = (error?: unknown): void => {
       const params = ctx.params;
       params.release();
       if (ctx.tailCalled) {
         // Results (and any error) are already wired from `ctx.tailState`.
-        ctx.results.caps.forEach((c) => c.release());
+        releaseResultCaps();
         if (error !== undefined) {
           if (streaming) this.broken = toRpcError(error);
           if (state.result.state === "pending") state.result.reject(error);
@@ -613,12 +850,24 @@ export class LocalClient extends RefHook implements ClientHook {
       if (error !== undefined) {
         if (streaming) this.broken = toRpcError(error);
         state.result.reject(error);
-        ctx.results.caps.forEach((c) => c.release());
+        releaseResultCaps();
       } else if (state.result.state === "pending" && !ctx.cancelRequested) {
         state.result.resolve(ctx.results.toPayload());
       } else {
-        ctx.results.caps.forEach((c) => c.release());
+        releaseResultCaps();
         state.result.reject(new RpcError("canceled"));
+      }
+    };
+    const guard = (body: () => void): void => {
+      try {
+        body();
+      } catch (e) {
+        if (state.onError === undefined) throw e;
+        try {
+          state.onError(e);
+        } catch {
+          // Aborting the connection can itself drop capabilities.
+        }
       }
     };
 
@@ -627,12 +876,12 @@ export class LocalClient extends RefHook implements ClientHook {
       ret = this.server.dispatch(
         interfaceId,
         methodId,
-        ctx.params.content,
+        unreadParams(ctx.params),
         ctx.results.root,
         ctx,
       );
     } catch (e) {
-      finish(e);
+      guard(() => finish(e));
       return;
     }
 
@@ -647,14 +896,16 @@ export class LocalClient extends RefHook implements ClientHook {
       if (r.allowCancellation) ctx.allowCancellation();
     }
     if (promise === undefined) {
-      finish();
+      guard(finish);
       return;
     }
     const done = promise.then(
-      () => finish(),
+      () => guard(finish),
       (e) => {
-        if (isStreaming) this.broken = toRpcError(e);
-        finish(e);
+        guard(() => {
+          if (isStreaming) this.broken = toRpcError(e);
+          finish(e);
+        });
       },
     );
     if (isStreaming) {
@@ -864,7 +1115,9 @@ export class Client {
   ): RpcPromise {
     const params = new CallBuilder(paramsDwords, paramsPwords);
     fill?.(params.root, params);
-    return new RpcPromise(this.hook.call(interfaceId, methodId, params.toPayload(), opts));
+    const state = this.hook.call(interfaceId, methodId, params.toPayload(), opts);
+    if (opts?.noPromisePipelining) state.pipeline = disabledPipeline;
+    return new RpcPromise(state);
   }
 
   /**
@@ -902,6 +1155,11 @@ export class Client {
 
   [Symbol.dispose](): void {
     this.release();
+  }
+
+  /** `ClientHook::getFd` of the resolved capability. */
+  getFd(): number | undefined {
+    return this.resolved().getFd?.();
   }
 
   /** The hook with every resolved promise looked through. */
@@ -971,4 +1229,48 @@ export class RpcPromise implements PromiseLike<Payload> {
   [Symbol.dispose](): void {
     this.release();
   }
+}
+
+/**
+ * A queued pipeline call resolves to a broken capability when the path
+ * cannot be read. A call that arrives after the Return lets the same
+ * failure leave the connection.
+ */
+function capAt(pipeline: PipelineHook, ops: readonly number[]): ClientHook {
+  try {
+    return pipeline.getPipelinedCap(ops);
+  } catch (e) {
+    return new BrokenClient(toRpcError(e));
+  }
+}
+
+function capAtPayload(payload: Payload, ops: readonly number[]): ClientHook {
+  try {
+    return payload.pipelinedCapAt(ops);
+  } catch (e) {
+    return new BrokenClient(toRpcError(e));
+  }
+}
+
+/**
+ * Params are read when a method touches them. A method that ignores its
+ * parameters never resolves the content pointer. The object is a real
+ * `Ptr`, so `instanceof Ptr` is true.
+ */
+function unreadParams(payload: Payload): Ptr {
+  const shell = Object.create(Ptr.prototype) as Ptr;
+  return new Proxy(shell, {
+    get(_target, prop, _receiver) {
+      if (prop === "constructor") return Ptr;
+      const real = payload.content;
+      const value = Reflect.get(real, prop, real) as unknown;
+      if (typeof value === "function") {
+        return (value as (...args: unknown[]) => unknown).bind(real);
+      }
+      return value;
+    },
+    getPrototypeOf() {
+      return Ptr.prototype;
+    },
+  });
 }

@@ -39,7 +39,7 @@ import {
   Return_getResults,
 } from "../src/rpc.capnp.ts";
 import { MemoryTransportPair, type Transport } from "../src/transport.ts";
-import { RpcConnection, type RpcServer } from "../src/vat.ts";
+import { RpcConnection, type RpcServer, Vat } from "../src/vat.ts";
 
 class CountingServer implements RpcServer {
   calls = 0;
@@ -115,7 +115,7 @@ describe("RPC level 4: Join", () => {
   test("two parts naming one capability join, and one result carries the cap", () => {
     const pair = new MemoryTransportPair();
     const server = new CountingServer();
-    const vat = new RpcConnection(pair.b, server);
+    const vat = new RpcConnection(pair.b, server, new Vat());
     bootstrapExport(pair.a, vat, 1);
 
     const [only] = vat.liveExports();
@@ -143,7 +143,7 @@ describe("RPC level 4: Join", () => {
 
   test("a part naming nothing we host fails the whole set", () => {
     const pair = new MemoryTransportPair();
-    const vat = new RpcConnection(pair.b, new CountingServer());
+    const vat = new RpcConnection(pair.b, new CountingServer(), new Vat());
     bootstrapExport(pair.a, vat, 1);
     const [live] = vat.liveExports();
     const dead = live! + 999;
@@ -166,7 +166,7 @@ describe("RPC level 4: Join", () => {
     // The parts agree, but they agree on naming nothing: equality has to
     // be proven against a capability we host, not against absence.
     const pair = new MemoryTransportPair();
-    const vat = new RpcConnection(pair.b, new CountingServer());
+    const vat = new RpcConnection(pair.b, new CountingServer(), new Vat());
     bootstrapExport(pair.a, vat, 1);
     const [live] = vat.liveExports();
     const dead = live! + 999;
@@ -186,7 +186,7 @@ describe("RPC level 4: Join", () => {
 
   test("an incomplete set is never answered", () => {
     const pair = new MemoryTransportPair();
-    const vat = new RpcConnection(pair.b, new CountingServer());
+    const vat = new RpcConnection(pair.b, new CountingServer(), new Vat());
     bootstrapExport(pair.a, vat, 1);
     const [live] = vat.liveExports();
 
@@ -200,7 +200,7 @@ describe("RPC level 4: Join", () => {
 
   test("a partNum outside the set is rejected on its own", () => {
     const pair = new MemoryTransportPair();
-    const vat = new RpcConnection(pair.b, new CountingServer());
+    const vat = new RpcConnection(pair.b, new CountingServer(), new Vat());
     bootstrapExport(pair.a, vat, 1);
     const [live] = vat.liveExports();
 
@@ -215,7 +215,7 @@ describe("RPC level 4: Join", () => {
 describe("malformed messages are answered, not thrown out of", () => {
   test("a Provide with no body does not disturb the vat", () => {
     const pair = new MemoryTransportPair();
-    const vat = new RpcConnection(pair.b, new CountingServer());
+    const vat = new RpcConnection(pair.b, new CountingServer(), new Vat());
     const b = new MessageBuilder();
     const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
     root.setU16(0, Message.provide);

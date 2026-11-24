@@ -33,6 +33,8 @@
  *
  * RequestedFile: 1 data word (id u64), 2+ pointers
  *   ptr0 filename : Text
+ *   ptr1 imports : List(Import)
+ * Import: 1 data word (id u64), ptr0 name : Text
  */
 
 import {
@@ -240,6 +242,12 @@ export type ValueAst =
       pointerBytes?: number[];
     };
 
+/** One applied annotation, id plus the decoded value. */
+export type AppliedAnnotation = {
+  id: bigint;
+  value: ValueAst;
+};
+
 /** One struct field (slot or group). */
 export type FieldAst = {
   name: string;
@@ -260,12 +268,15 @@ export type FieldAst = {
   group?: {
     typeId: bigint;
   };
+  /** Annotations applied to this field. */
+  appliedAnnotations?: AppliedAnnotation[];
 };
 
 /** One enum member. */
 export type EnumerantAst = {
   name: string;
   codeOrder: number;
+  appliedAnnotations?: AppliedAnnotation[];
 };
 
 /** NestedNode entry (name + id). */
@@ -302,6 +313,10 @@ export type NodeAst = {
   enumerants?: EnumerantAst[];
   /** Set when which === "interface". */
   methods?: MethodAst[];
+  /** Interface superclasses, in declaration order. */
+  superclasses?: SuperclassAst[];
+  /** Annotations applied to this node. */
+  appliedAnnotations?: AppliedAnnotation[];
   /** Set when which === "const". */
   const?: {
     type: TypeAst;
@@ -327,11 +342,29 @@ export type MethodAst = {
   resultBrand?: BrandAst;
   /** Method.implicitParameters names, in declaration order. */
   implicitParameters?: string[];
+  /** True when the result type is `stream.capnp:StreamResult`. */
+  streaming?: boolean;
+  /** Annotations applied to this method. */
+  appliedAnnotations?: AppliedAnnotation[];
+};
+
+/** One interface superclass. */
+export type SuperclassAst = {
+  id: bigint;
+  brand?: BrandAst;
+};
+
+/** One `RequestedFile.imports` entry: the file id and the name this file used. */
+export type RequestedFileImportAst = {
+  id: bigint;
+  name: string;
 };
 
 export type RequestedFileAst = {
   id: bigint;
   filename: string;
+  /** Imports named by this requested file. Absent on hand-built graphs. */
+  imports?: RequestedFileImportAst[];
 };
 
 /** Full decoded CodeGeneratorRequest graph (nodes + requested files). */
@@ -409,12 +442,22 @@ export async function walkCgr(bytes: Uint8Array): Promise<CgrAst> {
     for (let i = 0; i < reqFiles.listLen(); i++) {
       const rf = reqFiles.listGetp(i);
       if (rf.kind !== PtrKind.Struct) {
-        requestedFiles.push({ id: 0n, filename: "" });
+        requestedFiles.push({ id: 0n, filename: "", imports: [] });
         continue;
+      }
+      const imports: RequestedFileImportAst[] = [];
+      const impList = rf.getp(1);
+      if (impList.kind === PtrKind.List) {
+        for (let j = 0; j < impList.listLen(); j++) {
+          const imp = impList.listGetp(j);
+          if (imp.kind !== PtrKind.Struct) continue;
+          imports.push({ id: imp.getU64(0), name: imp.getText(0) });
+        }
       }
       requestedFiles.push({
         id: rf.getU64(0),
         filename: rf.getText(0),
+        imports,
       });
     }
   }
@@ -624,6 +667,7 @@ function decodeField(f: Ptr): FieldAst {
       codeOrder,
       discriminant,
       group: { typeId: f.getU64(16) },
+      appliedAnnotations: decodeAnnotations(f.getp(1)),
     };
   }
   // slot (default). type = ptr2, defaultValue = ptr3; hadExplicitDefault @ bit 128.
@@ -637,6 +681,7 @@ function decodeField(f: Ptr): FieldAst {
       defaultValue: decodeValue(f.getp(3)),
       hadExplicitDefault: f.getBool(128),
     },
+    appliedAnnotations: decodeAnnotations(f.getp(1)),
   };
 }
 
@@ -682,7 +727,35 @@ function decodeMethods(list: Ptr): MethodAst[] {
       paramBrand: decodeBrand(m.getp(2)),
       resultBrand: decodeBrand(m.getp(3)),
       implicitParameters: decodeParameters(m.getp(4)),
+      streaming: m.getU64(16) === 0x995f9a3377c0b16en,
+      appliedAnnotations: decodeAnnotations(m.getp(1)),
     });
+  }
+  return out;
+}
+
+function decodeAnnotations(list: Ptr): AppliedAnnotation[] {
+  if (list.kind !== PtrKind.List) return [];
+  const out: AppliedAnnotation[] = [];
+  for (let i = 0; i < list.listLen(); i++) {
+    const a = list.listGetP(i);
+    if (a.kind !== PtrKind.Struct) continue;
+    const valuePtr = a.getP(0);
+    out.push({
+      id: a.getU64(0),
+      value: valuePtr.kind === PtrKind.Null ? { which: "void" } : decodeValue(valuePtr),
+    });
+  }
+  return out;
+}
+
+function decodeSuperclasses(list: Ptr): SuperclassAst[] {
+  if (list.kind !== PtrKind.List) return [];
+  const out: SuperclassAst[] = [];
+  for (let i = 0; i < list.listLen(); i++) {
+    const s = list.listGetP(i);
+    if (s.kind !== PtrKind.Struct) continue;
+    out.push({ id: s.getU64(0), brand: decodeBrand(s.getP(0)) });
   }
   return out;
 }
@@ -695,6 +768,7 @@ function decodeEnumerants(list: Ptr): EnumerantAst[] {
     out.push({
       name: e.kind === PtrKind.Struct ? e.getText(0) : "",
       codeOrder: e.kind === PtrKind.Struct ? e.getU16(0) : 0,
+      appliedAnnotations: e.kind === PtrKind.Struct ? decodeAnnotations(e.getp(1)) : [],
     });
   }
   return out;
@@ -742,6 +816,7 @@ function decodeNode(n: Ptr): NodeAst {
     whichTag,
     nestedNodes: decodeNestedNodes(n.getp(1)),
     parameters: decodeParameters(n.getp(5)),
+    appliedAnnotations: decodeAnnotations(n.getp(2)),
   };
 
   if (which === "struct") {
@@ -757,6 +832,7 @@ function decodeNode(n: Ptr): NodeAst {
     base.enumerants = decodeEnumerants(n.getp(3));
   } else if (which === "interface") {
     base.methods = decodeMethods(n.getp(3));
+    base.superclasses = decodeSuperclasses(n.getp(4));
   } else if (which === "const") {
     base.const = {
       type: decodeType(n.getp(3)),

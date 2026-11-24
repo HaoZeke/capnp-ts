@@ -160,7 +160,8 @@ export function Call_getMethodId(ptr: Ptr, dflt = 0): number {
 }
 
 export function Call_getParams(ptr: Ptr): Ptr {
-  return ptr.getP(1);
+  // capnp-C++ `call.getParams()` is a struct read. A list aborts the connection.
+  return ptr.getP(1, "struct");
 }
 
 /** Group field `sendResultsTo` — same wire Ptr as parent; see group node helpers. */

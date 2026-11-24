@@ -16,6 +16,7 @@ import {
   WindowFlowController,
 } from "../src/index.ts";
 import { ImportClient } from "../src/remote.ts";
+import { frameLength } from "../src/socket.ts";
 import { IFACE, link } from "./support.ts";
 
 const WRITE = 0;
@@ -230,6 +231,22 @@ describe("flow controller", () => {
   });
 });
 
+describe("stream framing", () => {
+  // capnp-C++ reads RPC frames with FlatArrayMessageReader, which has no
+  // segment cap; only InputStreamMessageReader stops at 511.
+  test("accepts 511, 512 and 1000 segments", () => {
+    for (const [n, bytes] of [
+      [511, 2048],
+      [512, 2056],
+      [1000, 4008],
+    ] as const) {
+      const frame = new Uint8Array(bytes);
+      new DataView(frame.buffer).setUint32(0, n - 1, true);
+      expect(frameLength(frame)).toBe(frame.length);
+    }
+  });
+});
+
 describe("streaming over a connection", () => {
   test("a sender that awaits each call stays inside the window", async () => {
     const sink = new Sink(0);
@@ -289,7 +306,7 @@ describe("streaming over a connection", () => {
     expect(results[results.length - 2]!.status).toBe("fulfilled");
     expect(results[results.length - 1]!.status).toBe("rejected");
     const failures = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
-    for (const f of failures) expect(f.reason).toMatchObject({ message: "disk full" });
+    for (const f of failures) expect(f.reason).toMatchObject({ message: "remote exception: disk full" });
     // After the failure the server did no more writes.
     expect(sink.writes).toEqual([0, 1, 2, 3]);
   });

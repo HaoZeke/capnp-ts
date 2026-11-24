@@ -140,7 +140,7 @@ describe("a level 3 handoff between three vats", () => {
     // Alice <-> Carol, and Carol <-> Bob, each their own connection.
     const ac = new MemoryTransportPair();
     const aliceToCarol = new RpcConnection(ac.a);
-    const carolToAlice = new RpcConnection(ac.b, new Marked(1));
+    const carolToAlice = new RpcConnection(ac.b, new Marked(1), new Vat());
     // Bob answers Carol's connection with a different object, so the two
     // connections do not agree on export ids by accident: the capability
     // Alice hands over must arrive under an id of Carol's connection,
@@ -159,6 +159,9 @@ describe("a level 3 handoff between three vats", () => {
     // 2. Alice tells Carol where to go. Carol records the introduction
     //    rather than dialling: reaching Bob is the network's job, and
     //    here the connection already exists.
+    aliceToCarol.sendBootstrap();
+    carolToAlice.pump();
+    aliceToCarol.pump();
     tellCarolWhereToGo(aliceToCarol, ac.a, 90, BOB, NONCE);
     carolToAlice.pump();
     ac.a.receive();

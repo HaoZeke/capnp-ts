@@ -32,6 +32,7 @@ import {
   RefHook,
   RpcError,
   Settle,
+  type TailHandler,
   toRpcError,
 } from "./capability.ts";
 
@@ -66,7 +67,7 @@ export abstract class MembranePolicy {
       this.revocationWatched = true;
       p.then(
         () => {
-          this.fireRevocation(new RpcError("onRevoked() resolved; it should only reject"));
+          this.fireRevocation(new RpcError("onRevoked() promise resolved; it should only reject"));
         },
         (e) => {
           this.fireRevocation(toRpcError(e));
@@ -114,6 +115,14 @@ export abstract class MembranePolicy {
    */
   onRevoked(): Promise<unknown> | undefined {
     return undefined;
+  }
+
+  /**
+   * When true, `getFd` returns the descriptor of the capability inside.
+   * The default refuses, as capnp-C++ `MembranePolicy::allowFdPassthrough`.
+   */
+  allowFdPassthrough(): boolean {
+    return false;
   }
 
   /**
@@ -317,6 +326,11 @@ class MembraneHook extends RefHook implements ClientHook {
     return this.resolvedWrap;
   }
 
+  getFd(): number | undefined {
+    if (!this.policy.allowFdPassthrough()) return undefined;
+    return this.inner.getFd?.();
+  }
+
   whenMoreResolved(): Promise<ClientHook> | undefined {
     if (this.resolvedWrap !== undefined) return Promise.resolve(this.resolvedWrap);
     const more = this.inner.whenMoreResolved();
@@ -431,10 +445,8 @@ class MembraneHook extends RefHook implements ClientHook {
       return call;
     }
 
-    // Crossing a membrane must wrap any returned capabilities and honor
-    // revocation, so do not bypass the membrane with an outer tailHandler.
-    const innerOpts =
-      opts?.tailHandler !== undefined ? { ...opts, tailHandler: undefined } : opts;
+    const tail = opts?.tailHandler;
+    const innerOpts = tail === undefined ? opts : { ...opts, tailHandler: this.innerTail(tail) };
     const inner = routed.target.call(interfaceId, methodId, routed.params, innerOpts);
     routed.target.release();
     const outer = new CallState();
@@ -460,6 +472,19 @@ class MembraneHook extends RefHook implements ClientHook {
       inner.release();
     };
     return outer;
+  }
+
+  /**
+   * The tail handler for a call crossing this membrane. A tail call made
+   * inside reaches the outer handler only if it crosses back out the way
+   * the call came in, as capnp-C++ `MembraneRequestHook::wrap` unwraps a
+   * request. Any other tail call stays a plain call.
+   */
+  private innerTail(tail: TailHandler): TailHandler {
+    if (tail instanceof MembraneTailHandler && tail.policy === this.policy && tail.reverse === !this.reverse) {
+      return tail.outer;
+    }
+    return new MembraneTailHandler(tail, this.policy, this.reverse);
   }
 
   callStreaming(interfaceId: bigint, methodId: number, params: Payload): Promise<void> {
@@ -488,7 +513,26 @@ class MembraneHook extends RefHook implements ClientHook {
     const resolved = this.getResolved();
     if (resolved !== undefined) return resolved.flush?.() ?? Promise.resolve();
     if (this.revoked !== undefined) return Promise.reject(this.revoked);
-    return this.inner.flush?.() ?? Promise.resolve();
+    const done = this.inner.flush?.() ?? Promise.resolve();
+    // Stream calls across a membrane end with its revocation, and so does
+    // waiting for them.
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let unwatch: (() => void) | undefined;
+      const finish = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        unwatch?.();
+        fn();
+      };
+      const revoked = this.policy.watchRevocation((err) => finish(() => reject(err)));
+      if (settled) revoked();
+      else unwatch = revoked;
+      done.then(
+        () => finish(resolve),
+        (e) => finish(() => reject(e)),
+      );
+    });
   }
 
   protected dispose(): void {
@@ -503,6 +547,19 @@ class MembraneHook extends RefHook implements ClientHook {
     }
     this.inner.release();
     this.resolvedWrap?.release();
+  }
+}
+
+/** The outer tail handler of a call that crossed a membrane, held for a tail call crossing back. */
+class MembraneTailHandler implements TailHandler {
+  constructor(
+    readonly outer: TailHandler,
+    readonly policy: MembranePolicy,
+    readonly reverse: boolean,
+  ) {}
+
+  tryTailCall(): undefined {
+    return undefined;
   }
 }
 

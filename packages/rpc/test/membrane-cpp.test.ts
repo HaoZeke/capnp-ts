@@ -540,21 +540,21 @@ describe("capnp-C++ membrane-test.c++ (RPC)", () => {
     await pump();
 
     await expect(Promise.resolve(waiting)).rejects.toMatchObject({
-      message: "foobar",
+      message: "remote exception: foobar",
       type: "disconnected",
     });
 
     const after1 = membraned.call(MEMBRANE_IFACE, M_MAKE_THING, undefined, 0, 0);
     await pump();
     await expect(Promise.resolve(after1)).rejects.toMatchObject({
-      message: "foobar",
+      message: "remote exception: foobar",
       type: "disconnected",
     });
 
     const after2 = thing.call(THING_IFACE, THING_PASS_THROUGH, undefined, 0, 0);
     await pump();
     await expect(Promise.resolve(after2)).rejects.toMatchObject({
-      message: "foobar",
+      message: "remote exception: foobar",
       type: "disconnected",
     });
     thing.release();

@@ -8,20 +8,36 @@
  */
 import type { Transport } from "./transport.ts";
 
-const MAX_SEGMENTS = 64;
+/** capnp-C++ `ReaderOptions::traversalLimitInWords` by default. */
+const TRAVERSAL_LIMIT_WORDS = 8 * 1024 * 1024;
 
-/** Bytes the frame starting at `buf[0]` occupies, or 0 if incomplete. */
-export function frameLength(buf: Uint8Array): number {
-  if (buf.length < 4) return 0;
+/**
+ * Bytes the frame starting at `buf[0]` occupies, or 0 if incomplete.
+ *
+ * As capnp-C++ `BufferedMessageStream` reads RPC frames: any segment
+ * count is accepted, and a frame whose segment table so far promises more
+ * words than the traversal limit is refused before its body arrives.
+ */
+export function frameLength(buf: Uint8Array, traversalLimitWords = TRAVERSAL_LIMIT_WORDS): number {
+  if (buf.length < 8) return 0;
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  const nsegs = view.getUint32(0, true) + 1;
-  if (nsegs > MAX_SEGMENTS) throw new Error(`bad segment count ${nsegs}`);
-  let table = 4 + nsegs * 4;
-  if (table % 8 !== 0) table += 4;
-  if (buf.length < table) return 0;
-  let words = 0;
-  for (let i = 0; i < nsegs; i++) words += view.getUint32(4 + i * 4, true);
-  const total = table + words * 8;
+  const first = view.getUint32(0, true);
+  if (first === 0xffffffff) {
+    throw new Error("expected segmentCount != 0 [0 != 0]; Message segment count too large, caused overflow.");
+  }
+  const nsegs = first + 1;
+  const tableWords = Math.floor(nsegs / 2) + 1;
+  const known = Math.min(nsegs, Math.floor(buf.length / 8) * 2 - 1);
+  let words = tableWords;
+  for (let i = 0; i < known; i++) words += view.getUint32(4 + i * 4, true);
+  if (words > traversalLimitWords) {
+    throw new Error(
+      `expected expectedSizeInWords <= options.traversalLimitInWords [${words} <= ${traversalLimitWords}]; ` +
+        "incoming RPC message exceeds size limit",
+    );
+  }
+  if (known < nsegs) return 0;
+  const total = words * 8;
   return buf.length < total ? 0 : total;
 }
 
@@ -33,7 +49,10 @@ export function frameLength(buf: Uint8Array): number {
 export class StreamTransport implements Transport {
   private buffer = new Uint8Array(0);
   private readonly inbox: Uint8Array[] = [];
+  private readonly held: Uint8Array[] = [];
   private shut = false;
+  /** Set while the vat is over its flow limit and must not read. */
+  protected paused = false;
 
   constructor(
     private readonly write: (bytes: Uint8Array) => void,
@@ -44,8 +63,45 @@ export class StreamTransport implements Transport {
     return this.sendBufferSize?.();
   }
 
+  /** Bytes of a frame `feed` has not finished yet. */
+  protected incompleteBytes(): number {
+    return this.buffer.length;
+  }
+
+  /**
+   * Bytes still required to finish the buffered frame.
+   * `0` means the buffer is empty or the bytes already form a whole frame.
+   */
+  protected bytesToFinishFrame(): number {
+    const buf = this.buffer;
+    if (buf.length === 0) return 0;
+    if (buf.length < 8) return 8 - buf.length;
+    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const first = view.getUint32(0, true);
+    if (first === 0xffffffff) return 0;
+    const nsegs = first + 1;
+    const tableBytes = (Math.floor(nsegs / 2) + 1) * 8;
+    if (buf.length < tableBytes) return tableBytes - buf.length;
+    let words = tableBytes / 8;
+    for (let i = 0; i < nsegs; i++) words += view.getUint32(4 + i * 4, true);
+    const total = words * 8;
+    return buf.length >= total ? 0 : total - buf.length;
+  }
+
+  /** Keep frames while the vat is over its flow limit, then pass them on. */
+  setPaused(paused: boolean): void {
+    this.paused = paused;
+    if (paused) return;
+    const chunks = this.held.splice(0);
+    for (const chunk of chunks) this.feed(chunk);
+  }
+
   /** Take bytes off the stream; complete frames become receivable. */
   feed(chunk: Uint8Array): void {
+    if (this.paused) {
+      this.held.push(chunk.slice());
+      return;
+    }
     const merged = new Uint8Array(this.buffer.length + chunk.length);
     merged.set(this.buffer);
     merged.set(chunk, this.buffer.length);

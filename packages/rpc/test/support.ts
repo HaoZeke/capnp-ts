@@ -2,7 +2,7 @@ import { Message as CapnpMessage } from "@haozeke/capnp";
 
 import { Message, Message_which } from "../src/rpc.capnp.ts";
 import { MemoryTransportPair, type Transport } from "../src/transport.ts";
-import { RpcConnection } from "../src/vat.ts";
+import { RpcConnection, type Vat } from "../src/vat.ts";
 import type { Client, RpcServer } from "../src/index.ts";
 
 export const IFACE = 0x1234n;
@@ -23,12 +23,15 @@ export function tap(inner: Transport): Tapped {
   return {
     sent,
     frames,
-    send(frame) {
+    send(frame, fds) {
       frames.push(frame.slice());
       sent.push(NAMES[Message_which(CapnpMessage.fromFlat(frame).root())] ?? "?");
-      inner.send(frame);
+      inner.send(frame, fds);
     },
     receive: () => inner.receive(),
+    receivedFds: inner.receivedFds ? () => inner.receivedFds!() : undefined,
+    ownsReceivedFds: inner.ownsReceivedFds ? () => inner.ownsReceivedFds!() : undefined,
+    closeFd: inner.closeFd ? (fd: number) => inner.closeFd!(fd) : undefined,
     get pending() {
       return inner.pending;
     },
@@ -52,13 +55,14 @@ export interface Link {
 export function link(
   serverA?: RpcServer | Client,
   serverB?: RpcServer | Client,
-  options?: { streamWindow?: number },
+  options?: { streamWindow?: number; vat?: Vat },
 ): Link {
   const pair = new MemoryTransportPair();
   const ta = tap(pair.a);
   const tb = tap(pair.b);
-  const a = new RpcConnection(ta, serverA, undefined, options);
-  const b = new RpcConnection(tb, serverB);
+  const a = new RpcConnection(ta, serverA, undefined, { streamWindow: options?.streamWindow });
+  // Level 3 and 4 need a vat; without one, B is two-party.
+  const b = new RpcConnection(tb, serverB, options?.vat);
   const settle = async (): Promise<void> => {
     for (let quiet = 0; quiet < 3; ) {
       const moved = a.pump() + b.pump();

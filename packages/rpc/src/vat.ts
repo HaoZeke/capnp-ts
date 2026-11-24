@@ -14,8 +14,10 @@
  * `Vat`.
  */
 import {
+  ElemSize,
   Message as CapnpMessage,
   MessageBuilder,
+  nonStructPointerMessage,
   Ptr,
   PtrKind,
   type StructBuilder,
@@ -26,6 +28,7 @@ import {
   CallBuilder,
   callStreaming,
   CallState,
+  disabledPipeline,
   Client,
   type CallOptions,
   type ClientHook,
@@ -33,7 +36,9 @@ import {
   isNullCap,
   LocalClient,
   newNullCap,
+  NoneEntry,
   Payload,
+  QueuedClient,
   RefHook,
   RpcError,
   type RpcServer,
@@ -51,20 +56,22 @@ import {
   type RpcClientHook,
   type TargetWriter,
 } from "./remote.ts";
+import type { Restorer } from "./restorer.ts";
 import {
   CALL_DWORDS,
   CALL_PWORDS,
   Call_getInterfaceId,
   Call_getMethodId,
+  Call_getNoPromisePipelining,
   Call_getOnlyPromisePipeline,
   Call_getParams,
   Call_getQuestionId,
-  Call_getTarget,
   Call_sendResultsTo,
   Call_sendResultsTo_which,
   CAP_DESCRIPTOR_DWORDS,
   CAP_DESCRIPTOR_PWORDS,
   CapDescriptor,
+  CapDescriptor_getAttachedFd,
   CapDescriptor_getReceiverAnswer,
   CapDescriptor_getReceiverHosted,
   CapDescriptor_getSenderHosted,
@@ -102,6 +109,7 @@ import {
   EXCEPTION_PWORDS,
   Exception_Type,
   Exception_getReason,
+  Exception_getTrace,
   Exception_getType,
   Disembargo_context,
   Disembargo_context_getProvide,
@@ -109,9 +117,9 @@ import {
   Disembargo_context_getReceiverLoopback,
   Disembargo_context_which,
   Disembargo_getContext,
-  Disembargo_getTarget,
   Finish_getQuestionId,
   Finish_getReleaseResultCaps,
+  Finish_getRequireEarlyCancellationWorkaround,
   Join_getKeyPart,
   Join_getQuestionId,
   Join_getTarget,
@@ -120,18 +128,10 @@ import {
   MESSAGE_TARGET_DWORDS,
   MESSAGE_TARGET_PWORDS,
   Message,
-  Message_getAbort,
-  Message_getBootstrap,
-  Message_getCall,
   Message_getAccept,
-  Message_getDisembargo,
   Message_getProvide,
-  Message_getFinish,
   Message_getResolve,
-  Message_getReturn,
   Message_getJoin,
-  Message_getRelease,
-  Message_getUnimplemented,
   Message_which,
   MessageTarget,
   MessageTarget_getImportedCap,
@@ -144,7 +144,6 @@ import {
   PromisedAnswer_getTransform,
   PAYLOAD_DWORDS,
   PAYLOAD_PWORDS,
-  Payload_getCapTable,
   Payload_getContent,
   RETURN_DWORDS,
   RETURN_PWORDS,
@@ -201,10 +200,13 @@ const OFF = {
   callInterfaceId: 8,
   callMethodId: 4,
   callSendResultsTo: 6,
+  callNoPromisePipelining: 129,
+  callOnlyPromisePipeline: 130,
   returnAnswerId: 0,
   returnUnion: 6,
   returnTakeFromOtherQuestion: 8,
   returnReleaseParamCaps: 32, // bit offset, default true
+  returnNoFinishNeeded: 33, // bit offset
   finishReleaseResultCaps: 32, // bit offset, default true
   finishRequireEarly: 33, // bit offset, default true
   bootstrapQuestionId: 0,
@@ -240,15 +242,156 @@ function exceptionTypeFromWire(n: number): ExceptionType {
   }
 }
 
+/** A frame's size as capnp-C++ `MessageReader::sizeInWords()` counts it: segments only. */
+function segmentWords(frame: Uint8Array): number {
+  const segments = new DataView(frame.buffer, frame.byteOffset, 4).getUint32(0, true) + 1;
+  return frame.length / 8 - (Math.floor(segments / 2) + 1);
+}
+
+const REMOTE_PREFIX = "remote exception: ";
+
+/**
+ * Write an exception string. Bytes above 127 and interior NULs stay raw,
+ * matching the `char` values kj puts in the description.
+ */
+function writeWireText(struct: StructBuilder, index: number, text: string): void {
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 0 || c > 127) {
+      const bytes = new Uint8Array(text.length);
+      for (let j = 0; j < text.length; j++) bytes[j] = text.charCodeAt(j) & 0xff;
+      struct.setTextBytes(index, bytes);
+      return;
+    }
+  }
+  struct.setText(index, text);
+}
+
+/** A received exception, as capnp-C++ `toException()` reads one for every message kind. */
 function readException(exc: Ptr): RpcError {
-  if (exc.kind !== PtrKind.Struct) return new RpcError("peer sent an empty exception");
-  return new RpcError(Exception_getReason(exc), exceptionTypeFromWire(Exception_getType(exc)));
+  const e = structOrDefault(exc);
+  // Reason is read before the trace, so a bad reason wins over a bad trace.
+  // The trace is text: kind is checked before the struct body bounds.
+  const reason = Exception_getReason(e);
+  const tracePtr = e.getP(1, "text");
+  const trace = tracePtr.kind === PtrKind.Null ? undefined : Exception_getTrace(e);
+  const message = reason.startsWith(REMOTE_PREFIX) ? reason : REMOTE_PREFIX + reason;
+  const wireType = Exception_getType(e);
+  return new RpcError(message, exceptionTypeFromWire(wireType), trace, wireType);
+}
+
+/**
+ * A `Disembargo` in capnp-C++'s text format, as its errors print one:
+ * every scalar, non-null pointers, and the active union member.
+ */
+function disembargoText(d: Ptr): string {
+  const context = ["senderLoopback", "receiverLoopback", "accept", "provide"];
+  const which = d.getU16(OFF.disembargoContextUnion);
+  const name = context[which];
+  let ctx = "";
+  if (name === "accept") ctx = "accept = void";
+  else if (name !== undefined) ctx = `${name} = ${d.getU32(OFF.disembargoContextValue)}`;
+  const target = d.getP(0);
+  const fields = target.kind === PtrKind.Null ? [] : [`target = ${messageTargetText(target)}`];
+  fields.push(`context = (${ctx})`);
+  return `(${fields.join(", ")})`;
+}
+
+function messageTargetText(t: Ptr): string {
+  switch (t.getU16(4)) {
+    case 0:
+      return `(importedCap = ${t.getU32(0)})`;
+    case 1: {
+      const pa = structOrDefault(t.getP(0));
+      const fields = [`questionId = ${pa.getU32(0)}`];
+      const ops = pa.getP(0);
+      if (ops.kind === PtrKind.List) {
+        const parts: string[] = [];
+        for (let i = 0; i < ops.listLen(); i++) {
+          const op = ops.listGetP(i);
+          const w = op.getU16(0);
+          parts.push(w === 0 ? "(noop = void)" : w === 1 ? `(getPointerField = ${op.getU16(2)})` : "()");
+        }
+        fields.push(`transform = [${parts.join(", ")}]`);
+      }
+      return `(promisedAnswer = (${fields.join(", ")}))`;
+    }
+    default:
+      return "()";
+  }
+}
+
+/** RPC frames are read as capnp-C++ `FlatArrayMessageReader` reads them, with no segment cap. */
+const RPC_FRAME = { maxSegments: Number.MAX_SAFE_INTEGER };
+
+let emptyStruct: Ptr | undefined;
+
+/**
+ * True when `p` or a pointer it reaches is a capability.
+ * The walk matches `WireHelpers::totalSize`: a capability is only counted,
+ * and a later structural error still throws. `setUnimplemented` calls
+ * `totalSize` before the copy, so that error is the one the peer reports.
+ */
+function messageHasCapability(p: Ptr): boolean {
+  if (p.kind === PtrKind.Cap) return true;
+  if (p.kind === PtrKind.Null) return false;
+  if (p.kind === PtrKind.Struct) {
+    let found = false;
+    for (let i = 0; i < p.pwords; i++) {
+      if (messageHasCapability(p.getP(i, "copy"))) found = true;
+    }
+    return found;
+  }
+  if (p.kind === PtrKind.List) {
+    let found = false;
+    if (p.esize === ElemSize.Pointer) {
+      for (let i = 0; i < p.listLen(); i++) {
+        if (messageHasCapability(p.listGetP(i, "copy"))) found = true;
+      }
+    } else if (p.esize === ElemSize.Composite && p.pwords > 0) {
+      for (let i = 0; i < p.listLen(); i++) {
+        const el = p.listGetStruct(i);
+        for (let j = 0; j < el.pwords; j++) {
+          if (messageHasCapability(el.getP(j, "copy"))) found = true;
+        }
+      }
+    }
+    return found;
+  }
+  return false;
+}
+
+/** Wire kind of a pointer that has already been followed, for a `KJ_REQUIRE` value. */
+function wireKindOf(p: Ptr): number {
+  if (p.kind === PtrKind.List) return 1;
+  if (p.kind === PtrKind.Cap) return 3;
+  return 0;
+}
+
+/** `p`, or a struct with no fields when `p` is null: every field reads as its default. */
+function structOrDefault(p: Ptr): Ptr {
+  if (p.kind !== PtrKind.Null && p.kind !== PtrKind.Struct) {
+    throw new RpcError(nonStructPointerMessage(wireKindOf(p)));
+  }
+  if (p.kind !== PtrKind.Null) return p;
+  if (emptyStruct === undefined) {
+    const b = new MessageBuilder();
+    b.initRoot(0, 0);
+    emptyStruct = CapnpMessage.fromFlat(b.toFlat()).root();
+  }
+  return emptyStruct;
 }
 
 /** A capability held for a third vat, and the Provide that arranged it. */
 interface Provision {
   hook: ClientHook;
   questionId: number;
+  /** The connection the `Provide` came in on; the arrangement ends with it. */
+  owner: RpcConnection;
+  /** `Disembargo.provide` came before the embargoed Accept it lifts. */
+  disembargoed: boolean;
+  /** The embargoed Accept's answer, settled when the embargo lifts. */
+  accept?: CallState;
 }
 
 /**
@@ -260,18 +403,12 @@ interface Provision {
  * the arrangement holds is the capability itself, and the claiming
  * connection exports it under an id of its own.
  *
- * Connections given no vat get one to themselves, which is what a
- * two-party deployment wants.
+ * Connections given no vat are two-party, as capnp-C++ 1.4 always is:
+ * they echo `Provide`, `Accept` and `Join` back as unimplemented.
  */
 export class Vat {
   /** Capabilities held for a third vat, by the nonce that claims them. */
   readonly provisions = new Map<bigint, Provision>();
-}
-
-/** An embargoed Accept: claimed, answer withheld until the disembargo. */
-interface HeldAccept {
-  hook: ClientHook;
-  answerId: number;
 }
 
 export interface Introduction {
@@ -318,6 +455,10 @@ interface QuestionState {
   skipFinish: boolean;
   /** True when the Call used `sendResultsTo.yourself`; expects `resultsSentElsewhere`. */
   isTailCall: boolean;
+  /** `onlyPromisePipeline`: no Return is coming, so Finish rejects the result. */
+  pipelineOnly: boolean;
+  /** Redirected answer claimed by `Return.takeFromOtherQuestion`, canceled if `q` finishes. */
+  redirectedCall?: CallState;
 }
 
 /** A question the peer asked, from its Call until its Finish. */
@@ -327,20 +468,23 @@ interface AnswerState {
   resultExports: number[];
   /** The call said `sendResultsTo.yourself`: the results stay here for the caller to claim. */
   resultsElsewhere: boolean;
-  /**
-   * A `Return.takeFromOtherQuestion` already claimed these results. Kept
-   * apart from `resultsElsewhere`, which still decides how the answer's own
-   * Return is written, as capnp-C++ keeps `redirectResults` and the claim
-   * separate.
-   */
-  resultsClaimed: boolean;
+  /** True once `Return.takeFromOtherQuestion` claimed a redirected answer. */
+  redirectClaimed: boolean;
   /**
    * `Call.onlyPromisePipeline`: keep the answer so the peer can pipeline,
    * but do not send `Return` or export the result capabilities.
    */
   onlyPromisePipeline: boolean;
+  /** `Call.noPromisePipelining`: the caller will not pipeline on this answer. */
+  noPromisePipelining: boolean;
   /** True once this answer was answered via `Return.takeFromOtherQuestion`. */
   tailSent: boolean;
+  /** Param capabilities, kept until `Finish` the way `RpcCallContext` keeps them. */
+  paramCaps?: ClientHook[];
+  /** A Call's answer: its pipeline is frozen when the Return carries capabilities. */
+  isCall: boolean;
+  /** A Bootstrap's answer, a capnp-C++ `SingleCapPipeline`: any transform at all is invalid. */
+  singleCap: boolean;
   returned: boolean;
   finished: boolean;
 }
@@ -384,6 +528,9 @@ class TribbleRaceBlocker extends RefHook implements ClientHook {
   whenMoreResolved(): undefined {
     return undefined;
   }
+  getFd(): number | undefined {
+    return this.inner.getFd?.();
+  }
   call(interfaceId: bigint, methodId: number, params: Payload, opts?: CallOptions): CallState {
     return this.inner.call(interfaceId, methodId, params, opts);
   }
@@ -396,6 +543,16 @@ class TribbleRaceBlocker extends RefHook implements ClientHook {
   protected dispose(): void {
     this.inner.release();
   }
+}
+
+/**
+ * Run `fn` once the work already queued has run, as `kj::evalLast` does.
+ * The package avoids runtime-specific globals, and `setImmediate` is
+ * missing from browsers and workers.
+ */
+function afterQueuedWork(fn: () => void): void {
+  if (typeof setImmediate === "function") setImmediate(fn);
+  else setTimeout(fn, 0);
 }
 
 /** A single capability as a payload whose content is the capability. */
@@ -412,13 +569,102 @@ function emptyPayload(): Payload {
   return new Payload(b.toPayload().content.getP(0));
 }
 
+/**
+ * The call's content pointer is resolved the first time something reads it.
+ * `Payload_getContent` follows the pointer, so doing it here would abort a
+ * call whose method never looks at its parameters.
+ */
+function lazyCallPayload(params: Ptr, caps: ClientHook[]): Payload {
+  const payload = emptyPayload();
+  payload.caps.push(...caps);
+  let resolved: Ptr | undefined;
+  Object.defineProperty(payload, "content", {
+    configurable: true,
+    enumerable: true,
+    get(): Ptr {
+      if (resolved === undefined) {
+        resolved = new Payload(Payload_getContent(params)).content;
+      }
+      return resolved;
+    },
+  });
+  return payload;
+}
+
 function settledCall(payload: Payload): CallState {
   const call = new CallState();
   call.result.resolve(payload);
   call.pipeline = {
-    getPipelinedCap: (ops) => payload.getPipelinedCap(ops),
+    getPipelinedCap: (ops) => payload.pipelinedCapAt(ops),
   };
   return call;
+}
+
+/** An answer whose results come later; pipelined calls queue until then. */
+function embargoedCall(): CallState {
+  const call = new CallState();
+  const capAt = (payload: Payload, ops: readonly number[]): ClientHook => {
+    try {
+      return payload.pipelinedCapAt(ops);
+    } catch (e) {
+      return new BrokenClient(toRpcError(e));
+    }
+  };
+  call.pipeline = {
+    getPipelinedCap: (ops) => {
+      const r = call.result;
+      if (r.state === "ok") return r.value.pipelinedCapAt(ops);
+      if (r.state === "err") return new BrokenClient(r.error);
+      const eventual = new Settle<ClientHook>();
+      r.onSettled((s) => {
+        eventual.resolve(s.state === "ok" ? capAt(s.value, ops) : new BrokenClient(s.error));
+      });
+      return new QueuedClient(eventual);
+    },
+  };
+  return call;
+}
+
+/** Locally chosen ids, as capnp-C++ `ExportTable`: the lowest freed id goes first. */
+class IdAllocator {
+  private next = 0;
+  /** Min-heap of freed ids. */
+  private readonly free: number[] = [];
+
+  take(): number {
+    const free = this.free;
+    if (free.length === 0) return this.next++;
+    const top = free[0]!;
+    const last = free.pop()!;
+    if (free.length > 0) {
+      let i = 0;
+      for (;;) {
+        const l = 2 * i + 1;
+        const r = l + 1;
+        let m = i;
+        if (l < free.length && free[l]! < (m === i ? last : free[m]!)) m = l;
+        if (r < free.length && free[r]! < (m === i ? last : free[m]!)) m = r;
+        if (m === i) break;
+        free[i] = free[m]!;
+        i = m;
+      }
+      free[i] = last;
+    }
+    return top;
+  }
+
+  release(id: number): void {
+    const free = this.free;
+    let i = free.length;
+    free.push(id);
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (free[p]! <= id) break;
+      free[i] = free[p]!;
+      i = p;
+    }
+    free[i] = id;
+  }
 }
 
 export class RpcConnection implements RemoteHost {
@@ -439,25 +685,61 @@ export class RpcConnection implements RemoteHost {
   private readonly questions = new Map<number, QuestionState>();
   private readonly embargoes = new Map<number, Settle<void>>();
   private readonly vat: Vat;
-  /** Embargoed Accepts, keyed by the introducer's Provide question. */
-  private readonly heldAccepts = new Map<number, HeldAccept>();
+  /** No vat was given, so level 3 and 4 messages are refused. */
+  private readonly twoParty: boolean;
+  /**
+   * Provisions arranged by this connection's Provides that a
+   * `Disembargo.provide` may still name, oldest first. A Provide question
+   * id can be reused once finished, so a Disembargo lifts the oldest
+   * arrangement with that id that it has not lifted yet.
+   */
+  private readonly arranged: Provision[] = [];
   private readonly introductions = new Map<bigint, Introduction>();
   private readonly introductionHooks = new Map<bigint, ClientHook>();
   private readonly bootstrapHook: ClientHook | undefined;
-  private nextExportId = 0;
-  private nextQuestionId = 0;
-  private nextEmbargoId = 0;
+  private readonly exportIds = new IdAllocator();
+  private readonly questionIds = new IdAllocator();
+  private nextHighQuestionId = 0;
+  /** The peer answered a pipeline-only question, so it ignores the hint. */
+  private gotReturnForHighQuestionId = false;
+  private readonly embargoIds = new IdAllocator();
   private gone: RpcError | undefined;
+  /** FDs to send with the message currently being built. */
+  private outFds: number[] = [];
+  /** FDs that arrived with the frame `pumpOnce` is handling. */
+  private messageFds: Array<number | undefined> = [];
+  /** True when `messageFds` are OS descriptors the import must close. */
+  private ownsMessageFds = false;
 
   private readonly windowGetter: WindowGetter;
+  private flowLimit: number;
+  private traceEncoder: ((error: RpcError) => string) | undefined;
+  private readonly restorer: Restorer | undefined;
+  /** Words of incoming calls not yet complete, as capnp-C++ `callWordsInFlight`. */
+  private callWordsInFlight = 0;
+  private flowBlocked = false;
+  /** Returns waiting for queued work, oldest first. */
+  private readonly waitingReturns: Array<() => void> = [];
 
   constructor(
     private readonly transport: Transport,
     bootstrap?: RpcServer | Client,
     vat?: Vat,
-    options: { streamWindow?: number | (() => number) | WindowGetter } = {},
+    options: {
+      streamWindow?: number | (() => number) | WindowGetter;
+      /** Words of incoming calls in flight past which no more messages are read. Unlimited by default. */
+      flowLimit?: number;
+      /** Fills `Exception.trace` in what this side sends, as capnp-C++ `setTraceEncoder`. */
+      traceEncoder?: (error: RpcError) => string;
+      /** Answers named Bootstraps, and plain ones when no bootstrap is given. */
+      restorer?: Restorer;
+    } = {},
   ) {
+    this.flowLimit = options.flowLimit ?? Infinity;
+    this.traceEncoder = options.traceEncoder;
+    this.restorer = options.restorer;
     this.vat = vat ?? new Vat();
+    this.twoParty = vat === undefined;
     const w = options.streamWindow;
     if (typeof w === "number") {
       this.windowGetter = { getWindow: () => w };
@@ -505,65 +787,93 @@ export class RpcConnection implements RemoteHost {
 
   /** Handle one pending message. Returns false when none was waiting. */
   pumpOnce(): boolean {
-    const frame = this.transport.receive();
-    if (frame === null) {
-      if (this.transport.closed) this.disconnect(new RpcError("transport closed", "disconnected"));
+    // As capnp-C++ `messageLoop`: past the flow limit, wait for calls to
+    // complete before reading more.
+    if (this.callWordsInFlight > this.flowLimit && this.gone === undefined) {
+      this.flowBlocked = true;
+      this.transport.setPaused?.(true);
       return false;
     }
-    if (this.gone !== undefined) return true;
-
-    // The peer chooses what a frame contains, so one that cannot be read
-    // or makes a handler throw is a protocol error: abort, rather than
-    // let it escape the message loop and leave the tables half-updated.
+    const frame = this.transport.receive();
+    const messageFds = [...(this.transport.receivedFds?.() ?? [])];
+    const ownsMessageFds = this.transport.ownsReceivedFds?.() ?? false;
+    this.messageFds = messageFds;
+    this.ownsMessageFds = ownsMessageFds;
     try {
-      this.dispatchFrame(frame);
-    } catch (e) {
-      this.abort(new RpcError(`protocol error: ${e instanceof Error ? e.message : String(e)}`));
+      if (frame === null) {
+        if (this.transport.closed) this.disconnect(new RpcError("transport closed", "disconnected"));
+        return false;
+      }
+      if (this.gone !== undefined) return true;
+
+      // The peer chooses what a frame contains, so one that cannot be read
+      // or makes a handler throw is a protocol error: abort, rather than
+      // let it escape the message loop and leave the tables half-updated.
+      try {
+        this.dispatchFrame(frame);
+      } catch (e) {
+        this.abort(new RpcError(e instanceof Error ? e.message : String(e)));
+      }
+      return true;
+    } finally {
+      // Descriptors claim an index by clearing it. Anything still set was
+      // never adopted, so the transport closes it when this side owns it.
+      if (ownsMessageFds) {
+        for (const fd of messageFds) {
+          if (fd !== undefined) this.transport.closeFd?.(fd);
+        }
+      }
+      this.messageFds = [];
     }
-    return true;
   }
 
   private dispatchFrame(frame: Uint8Array): void {
-    const msg = CapnpMessage.fromFlat(frame);
-    const root = msg.root();
+    const msg = CapnpMessage.fromFlat(frame, RPC_FRAME);
+    const root = structOrDefault(msg.root("struct"));
     const which = Message_which(root);
+    // Every body is the union's one pointer. A null one reads as the
+    // default struct, as capnp-C++'s generated getters return.
+    const body = (): Ptr => structOrDefault(root.getP(0, "struct"));
 
     switch (which) {
       case Message.bootstrap:
-        this.handleBootstrap(Message_getBootstrap(root));
+        this.handleBootstrap(body());
         break;
       case Message.call:
-        this.handleCall(Message_getCall(root));
+        this.handleCall(body(), segmentWords(frame));
         break;
       case Message.finish:
-        this.handleFinish(Message_getFinish(root));
+        this.handleFinish(body());
         break;
       case Message.release:
-        this.handleRelease(Message_getRelease(root));
+        this.handleRelease(body());
         break;
       case Message.resolve:
-        this.handleResolve(Message_getResolve(root));
+        this.handleResolve(body());
         break;
       case Message.join:
-        this.handleJoin(Message_getJoin(root));
+        if (this.twoParty) this.sendUnimplemented(frame);
+        else this.handleJoin(body());
         break;
       case Message.disembargo:
-        this.handleDisembargo(Message_getDisembargo(root));
+        this.handleDisembargo(body());
         break;
       case Message.return:
-        this.handleReturn(Message_getReturn(root), frame);
+        this.handleReturn(body(), frame);
         break;
       case Message.provide:
-        this.handleProvide(Message_getProvide(root));
+        if (this.twoParty) this.sendUnimplemented(frame);
+        else this.handleProvide(body());
         break;
       case Message.accept:
-        this.handleAccept(Message_getAccept(root));
+        if (this.twoParty) this.sendUnimplemented(frame);
+        else this.handleAccept(body());
         break;
       case Message.abort:
-        this.disconnect(readException(Message_getAbort(root)));
+        this.abort(readException(body()));
         break;
       case Message.unimplemented:
-        this.handleUnimplemented(Message_getUnimplemented(root));
+        this.handleUnimplemented(body());
         break;
       default:
         // The obsolete save/delete messages.
@@ -577,6 +887,27 @@ export class RpcConnection implements RemoteHost {
     let n = 0;
     while (this.pumpOnce()) n++;
     return n;
+  }
+
+  /** Send `frame`, attaching any FDs `writeDescriptor` collected for it. */
+  private sendFlat(frame: Uint8Array): void {
+    const fds = this.outFds;
+    this.outFds = [];
+    if (fds.length > 0) this.transport.send(frame, fds);
+    else this.transport.send(frame);
+  }
+
+  /**
+   * Handle pending messages one at a time, with a microtask between them.
+   * capnp-C++ `messageLoop` uses `kj::evalLater` so a ready promise's
+   * continuation runs before the next frame in the same read.
+   */
+  pumpTurns(): void {
+    const step = (): void => {
+      if (!this.pumpOnce()) return;
+      if (this.gone === undefined && this.transport.pending > 0) queueMicrotask(step);
+    };
+    step();
   }
 
   // --- exports --------------------------------------------------------
@@ -622,7 +953,7 @@ export class RpcConnection implements RemoteHost {
       describe(existing, slot.pendingResolve);
       return existing;
     }
-    const id = this.nextExportId++;
+    const id = this.exportIds.take();
     const eventual = inner.whenMoreResolved();
     this.exports.set(id, {
       hook: inner.addRef(),
@@ -641,6 +972,20 @@ export class RpcConnection implements RemoteHost {
    */
   private writeDescriptor(hook: ClientHook, desc: StructBuilder): number | undefined {
     const inner = innermost(hook);
+    const fd = inner.getFd?.();
+    if (fd !== undefined) {
+      // rpc.capnp: attachedFd is a UInt8 whose default 0xff is never a
+      // real index. Linux accepts at most 253 descriptors in one send.
+      // Refuse before writing the index. A later truncate would leave an
+      // index that points past the list that was actually sent.
+      if (this.outFds.length >= 253) {
+        this.outFds = [];
+        throw new RpcError("expected nfds <= 253; too many attached file descriptors");
+      }
+      // Schema default is 0xff, so the wire byte is the index XOR 255.
+      desc.setU8(2, this.outFds.length, 255);
+      this.outFds.push(fd);
+    }
     if (isNullCap(inner)) {
       desc.setU16(OFF.capDescriptorUnion, CapDescriptor.none);
       return undefined;
@@ -687,37 +1032,51 @@ export class RpcConnection implements RemoteHost {
       const resolve = root.initStruct(0, RESOLVE_DWORDS, RESOLVE_PWORDS);
       resolve.setU32(0, exportId);
       fill(resolve);
-      this.transport.send(b.toFlat());
+      this.sendFlat(b.toFlat());
     };
+    // A released id can be reused by a new export; only the slot this
+    // promise was exported in may send its Resolve.
+    const owner = this.exports.get(exportId);
     eventual.then(
       (resolution) => {
         const slot = this.exports.get(exportId);
-        if (slot === undefined || slot.hook !== promiseHook) return;
+        if (slot === undefined || slot !== owner || slot.hook !== promiseHook) return;
         const target = this.innermostForExport(resolution);
         if (this.exportIdByHook.get(slot.hook) === exportId) this.exportIdByHook.delete(slot.hook);
         const old = slot.hook;
         slot.hook = target.addRef();
-        slot.pendingResolve = false;
         old.release();
-        if (isNullCap(target)) {
-          send((resolve) => {
-            resolve.setU16(OFF.resolveUnion, Resolve.exception);
-            this.writeException(
-              resolve.initStruct(0, EXCEPTION_DWORDS, EXCEPTION_PWORDS),
-              target.brokenError,
-            );
-          });
-          return;
+        if (target.brand !== this) {
+          // A local promise not yet exported takes over this entry, and
+          // no Resolve goes out until it settles. A broken capability is
+          // such a promise, already rejected.
+          if (!this.exportIdByHook.has(target)) {
+            const more = target.whenMoreResolved();
+            if (more !== undefined) {
+              this.exportIdByHook.set(target, exportId);
+              this.resolveExportedPromise(exportId, target, more);
+              return;
+            }
+          }
         }
+        slot.pendingResolve = false;
         send((resolve) => {
           resolve.setU16(OFF.resolveUnion, Resolve.cap);
           const desc = resolve.initStruct(0, CAP_DESCRIPTOR_DWORDS, CAP_DESCRIPTOR_PWORDS);
-          this.writeDescriptor(target, desc);
+          // capnp-C++ exports a null capability here like any other.
+          if (!isNullCap(target)) {
+            this.writeDescriptor(target, desc);
+            return;
+          }
+          this.exportInner(target, (id) => {
+            desc.setU16(OFF.capDescriptorUnion, CapDescriptor.senderHosted);
+            desc.setU32(OFF.capDescriptorId, id);
+          });
         });
       },
       (error) => {
         const slot = this.exports.get(exportId);
-        if (slot === undefined || slot.hook !== promiseHook) return;
+        if (slot === undefined || slot !== owner || slot.hook !== promiseHook) return;
         slot.pendingResolve = false;
         send((resolve) => {
           resolve.setU16(OFF.resolveUnion, Resolve.exception);
@@ -731,16 +1090,21 @@ export class RpcConnection implements RemoteHost {
     if (this.gone !== undefined) return;
     const slot = this.exports.get(id);
     if (slot === undefined) {
-      this.abort(new RpcError(`Tried to release invalid export ID ${id}`));
+      this.abort(new RpcError("Tried to release invalid export ID."));
       return;
     }
     if (count < 0 || count > slot.refcount) {
-      this.abort(new RpcError(`Tried to drop export ${id} refcount below zero`));
+      this.abort(
+        new RpcError(
+          `expected refcount <= exp->refcount [${count} <= ${slot.refcount}]; Tried to drop export's refcount below zero.`,
+        ),
+      );
       return;
     }
     slot.refcount -= count;
     if (slot.refcount > 0) return;
     this.exports.delete(id);
+    this.exportIds.release(id);
     if (this.exportIdByHook.get(slot.hook) === id) this.exportIdByHook.delete(slot.hook);
     slot.hook.release();
   }
@@ -761,7 +1125,7 @@ export class RpcConnection implements RemoteHost {
    * connection exports it under. Returns the ids exported.
    */
   private writePayload(payload: StructBuilder, p: Payload, releaseCaps: boolean): number[] {
-    payload.setP(0, p.content);
+    if (!p.contentIsNull) payload.setP(0, p.content);
     const exported: number[] = [];
     if (p.caps.length > 0) {
       let desc = payload.initCompositeList(
@@ -782,17 +1146,22 @@ export class RpcConnection implements RemoteHost {
 
   // --- imports --------------------------------------------------------
 
-  private importCap(importId: number, isPromise: boolean): ClientHook {
+  private importCap(importId: number, isPromise: boolean, fd?: number): ClientHook {
     let imp = this.imports.get(importId);
     if (imp === undefined) {
       imp = { remoteRefs: 0 };
       this.imports.set(importId, imp);
     }
     imp.remoteRefs++;
+    const existing = imp.importClient;
     const importClient =
-      imp.importClient === undefined
-        ? (imp.importClient = new ImportClient(this, importId))
-        : imp.importClient.addRef();
+      existing === undefined
+        ? (imp.importClient = new ImportClient(this, importId, fd, this.ownsMessageFds))
+        : existing.addRef();
+    const fresh = existing === undefined;
+    // The constructor already owns a first fd. A later one is adopted,
+    // which keeps it when none is stored and closes it when one is.
+    if (!fresh && fd !== undefined) importClient.adoptFd(fd);
 
     if (!isPromise) {
       imp.appClient ??= importClient;
@@ -822,36 +1191,65 @@ export class RpcConnection implements RemoteHost {
     if (imp !== undefined && imp.appClient === client) imp.appClient = undefined;
   }
 
+  private dropFd(fd: number | undefined): void {
+    if (fd === undefined || !this.ownsMessageFds) return;
+    this.transport.closeFd?.(fd);
+  }
+
+  /** Close an OS descriptor the transport handed this connection. */
+  closeFd(fd: number): void {
+    this.transport.closeFd?.(fd);
+  }
+
+  /** FD named by this descriptor, taken so a second use sees none. */
+  private takeAttachedFd(desc: Ptr): number | undefined {
+    const index = CapDescriptor_getAttachedFd(desc);
+    if (index >= this.messageFds.length) return undefined;
+    const fd = this.messageFds[index];
+    this.messageFds[index] = undefined;
+    return fd;
+  }
+
   /** Make a hook from one entry of a received cap table. */
   private receiveCap(desc: Ptr): ClientHook {
     if (desc.kind !== PtrKind.Struct) {
-      return newNullCap();
+      return new NoneEntry();
     }
+    const fd = this.takeAttachedFd(desc);
     switch (CapDescriptor_which(desc)) {
       case CapDescriptor.none:
-        return newNullCap();
+        this.dropFd(fd);
+        return new NoneEntry();
       case CapDescriptor.senderHosted:
-        return this.importCap(CapDescriptor_getSenderHosted(desc), false);
+        return this.importCap(CapDescriptor_getSenderHosted(desc), false, fd);
       case CapDescriptor.senderPromise:
-        return this.importCap(CapDescriptor_getSenderPromise(desc), true);
+        return this.importCap(CapDescriptor_getSenderPromise(desc), true, fd);
       case CapDescriptor.receiverHosted: {
+        this.dropFd(fd);
         const slot = this.exports.get(CapDescriptor_getReceiverHosted(desc));
         if (slot === undefined) {
-          return new BrokenClient(new RpcError("descriptor names an export that does not exist"));
+          return new BrokenClient(new RpcError("invalid 'receiverHosted' export ID"));
         }
         const hook = slot.hook.addRef();
         return hook.brand === this ? new TribbleRaceBlocker(hook) : hook;
       }
       case CapDescriptor.receiverAnswer: {
-        const hook = this.pipelinedCap(CapDescriptor_getReceiverAnswer(desc));
-        return hook ?? new BrokenClient(new RpcError("descriptor names an unknown answer"));
+        this.dropFd(fd);
+        const hook = this.pipelinedCap(CapDescriptor_getReceiverAnswer(desc), "descriptor");
+        if (hook === undefined) {
+          return new BrokenClient(new RpcError("invalid 'receiverAnswer'"));
+        }
+        return hook.brand === this ? new TribbleRaceBlocker(hook) : hook;
       }
       case CapDescriptor.thirdPartyHosted: {
         const tp = CapDescriptor_getThirdPartyHosted(desc);
         // The vine is an ordinary import through the introducer, which is
         // the fallback the spec gives a receiver that cannot reach the
-        // third party; the introduction is recorded for whoever can.
-        const vine = this.importCap(ThirdPartyCapDescriptor_getVineId(tp), false);
+        // third party. A host that is not text is a two-party id: keep
+        // the vine and skip the introduction record.
+        const vine = this.importCap(ThirdPartyCapDescriptor_getVineId(tp), false, fd);
+        // capnp-C++ imports the vine and does not read `id` on two-party.
+        if (this.twoParty) return vine;
         const nonce = this.noteIntroduction(tp);
         if (nonce !== undefined) {
           this.introductionHooks.get(nonce)?.release();
@@ -860,6 +1258,7 @@ export class RpcConnection implements RemoteHost {
         return vine;
       }
       default:
+        this.dropFd(fd);
         this.abort(new RpcError("unknown CapDescriptor type"));
         return new BrokenClient(new RpcError("unknown CapDescriptor type"));
     }
@@ -867,8 +1266,8 @@ export class RpcConnection implements RemoteHost {
 
   private receiveCaps(payload: Ptr): ClientHook[] {
     if (payload.kind !== PtrKind.Struct) return [];
-    const table = Payload_getCapTable(payload);
-    if (table.kind !== PtrKind.List) return [];
+    const table = payload.getP(1, "list");
+    if (table.kind === PtrKind.Null) return [];
     const hooks: ClientHook[] = [];
     for (let i = 0; i < table.listLen(); i++) hooks.push(this.receiveCap(table.listGetP(i)));
     return hooks;
@@ -880,18 +1279,18 @@ export class RpcConnection implements RemoteHost {
   // outstanding from the moment it is sent until its Return arrives, so
   // the caller can pipeline against it in the meantime.
 
-  private newQuestion(): { id: number; q: QuestionState } {
-    const id = this.nextQuestionId++;
+  private newQuestion(id = this.questionIds.take()): { id: number; q: QuestionState } {
     const call = new CallState();
     const q: QuestionState = {
       call,
-      ref: new QuestionRef(() => this.finishQuestion(id)),
+      ref: new QuestionRef(() => this.finishQuestion(id, q)),
       paramExports: [],
       failed: false,
       returned: false,
       finished: false,
       skipFinish: false,
       isTailCall: false,
+      pipelineOnly: false,
     };
     call.pipeline = {
       getPipelinedCap: (ops) => this.pipelineOf(id, q, ops),
@@ -903,11 +1302,13 @@ export class RpcConnection implements RemoteHost {
 
   private pipelineOf(id: number, q: QuestionState, ops: readonly number[]): ClientHook {
     const r = q.call.result;
-    if (r.state === "ok") return r.value.getPipelinedCap(ops);
+    if (r.state === "ok") return this.pipelineCapOrBroken(r.value, ops);
     if (r.state === "err") return new BrokenClient(r.error);
     const eventual = new Settle<ClientHook>();
     r.onSettled((s) => {
-      eventual.resolve(s.state === "ok" ? s.value.getPipelinedCap(ops) : new BrokenClient(s.error));
+      eventual.resolve(
+        s.state === "ok" ? this.pipelineCapOrBroken(s.value, ops) : new BrokenClient(s.error),
+      );
     });
     return new PromiseClient(
       this,
@@ -917,12 +1318,26 @@ export class RpcConnection implements RemoteHost {
     );
   }
 
+  /** A client's own pipeline. A bad path is a broken capability, not an abort. */
+  private pipelineCapOrBroken(payload: Payload, ops: readonly number[]): ClientHook {
+    try {
+      return payload.pipelinedCapAt(ops);
+    } catch (e) {
+      return new BrokenClient(toRpcError(e));
+    }
+  }
+
   /** The last interest in a question is gone: tell the peer. */
-  private finishQuestion(id: number): void {
-    const q = this.questions.get(id);
-    if (q === undefined) return;
+  private finishQuestion(id: number, q: QuestionState): void {
+    // A reused id may name a newer question by now.
+    if (this.questions.get(id) !== q) return;
     q.finished = true;
-    if (q.returned) this.questions.delete(id);
+    q.redirectedCall?.release();
+    q.redirectedCall = undefined;
+    if (q.pipelineOnly && q.call.result.state === "pending") {
+      q.call.result.reject(new RpcError("canceled"));
+    }
+    if (q.returned) this.dropQuestion(id, q);
     if (this.gone !== undefined || q.skipFinish) return;
     const { b, root } = newMessage(Message.finish);
     const finish = root.initStruct(0, FINISH_DWORDS, FINISH_PWORDS);
@@ -931,7 +1346,14 @@ export class RpcConnection implements RemoteHost {
     // send their own Release. Results never received are abandoned here.
     finish.setBool(OFF.finishReleaseResultCaps, !q.returned, true);
     finish.setBool(OFF.finishRequireEarly, false, true);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
+  }
+
+  /** Frees the id once, however many paths reach the end of `q`. */
+  private dropQuestion(id: number, q: QuestionState): void {
+    if (this.questions.get(id) !== q) return;
+    this.questions.delete(id);
+    if (id < 0x80000000) this.questionIds.release(id);
   }
 
   /** Ask for the peer's bootstrap capability. Returns the questionId. */
@@ -941,23 +1363,28 @@ export class RpcConnection implements RemoteHost {
 
   /** The peer's bootstrap capability, usable before the answer arrives. */
   bootstrap(): Client {
-    const { q } = this.startBootstrap();
+    return this.restore();
+  }
+
+  /** A named export of the peer, as capnp-C++ `EzRpcClient::importCap`. */
+  restore(name?: string): Client {
+    const { q } = this.startBootstrap(name);
     const cap = q.call.pipeline.getPipelinedCap([]);
     q.call.release();
     return new Client(cap);
   }
 
-  private startBootstrap(): { id: number; q: QuestionState } {
+  private startBootstrap(name?: string): { id: number; q: QuestionState } {
     const question = this.newQuestion();
     if (this.gone !== undefined) {
       this.failQuestion(question.q, this.gone);
       return question;
     }
     const { b, root } = newMessage(Message.bootstrap);
-    root
-      .initStruct(0, BOOTSTRAP_DWORDS, BOOTSTRAP_PWORDS)
-      .setU32(OFF.bootstrapQuestionId, question.id);
-    this.transport.send(b.toFlat());
+    const bs = root.initStruct(0, BOOTSTRAP_DWORDS, BOOTSTRAP_PWORDS);
+    bs.setU32(OFF.bootstrapQuestionId, question.id);
+    if (name !== undefined) bs.setText(0, name);
+    this.sendFlat(b.toFlat());
     return question;
   }
 
@@ -967,6 +1394,14 @@ export class RpcConnection implements RemoteHost {
     q.call.result.reject(error);
   }
 
+  /** A question id with the top bit set, as capnp-C++ `ExportTable::nextHigh` picks one. */
+  private highQuestionId(): number {
+    for (;;) {
+      const id = (0x80000000 | (this.nextHighQuestionId++ & 0x7fffffff)) >>> 0;
+      if (!this.questions.has(id)) return id;
+    }
+  }
+
   sendCallTo(
     write: TargetWriter,
     interfaceId: bigint,
@@ -974,7 +1409,13 @@ export class RpcConnection implements RemoteHost {
     params: Payload,
     opts?: CallOptions,
   ): CallState {
-    const { id, q } = this.newQuestion();
+    // A peer that answered one pipeline-only call gets plain calls after.
+    const pipelineOnly =
+      opts?.onlyPromisePipeline === true &&
+      !opts.sendResultsToYourself &&
+      !this.gotReturnForHighQuestionId;
+    const { id, q } = pipelineOnly ? this.newQuestion(this.highQuestionId()) : this.newQuestion();
+    if (opts?.noPromisePipelining) q.call.pipeline = disabledPipeline;
     if (this.gone !== undefined) {
       params.release();
       this.failQuestion(q, this.gone);
@@ -989,6 +1430,13 @@ export class RpcConnection implements RemoteHost {
       call.setU16(OFF.callSendResultsTo, Call_sendResultsTo.yourself);
       q.isTailCall = true;
     }
+    if (opts?.noPromisePipelining) call.setBool(OFF.callNoPromisePipelining, true);
+    if (pipelineOnly) {
+      call.setBool(OFF.callOnlyPromisePipeline, true);
+      // No Return is coming, so the Finish need not wait for one.
+      q.returned = true;
+      q.pipelineOnly = true;
+    }
     write(call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS));
     q.paramExports = this.writePayload(
       call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS),
@@ -997,7 +1445,7 @@ export class RpcConnection implements RemoteHost {
     );
     const frame = b.toFlat();
     q.call.wireSize = frame.length;
-    this.transport.send(frame);
+    this.sendFlat(frame);
     return q.call;
   }
 
@@ -1110,7 +1558,7 @@ export class RpcConnection implements RemoteHost {
     const vat = rid.initStruct(0, VAT_ID_DWORDS, VAT_ID_PWORDS);
     vat.setText(0, recipient.host);
     vat.setU16(0, recipient.port);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
     return id;
   }
 
@@ -1129,7 +1577,7 @@ export class RpcConnection implements RemoteHost {
     accept.setU32(0, id);
     if (embargo) accept.setBool(32, true);
     accept.initStruct(0, PROVISION_ID_DWORDS, PROVISION_ID_PWORDS).setU64(0, nonce);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
     return id;
   }
 
@@ -1155,7 +1603,7 @@ export class RpcConnection implements RemoteHost {
     key.setU32(0, joinId);
     key.setU16(4, partCount);
     key.setU16(6, partNum);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
     return id;
   }
 
@@ -1168,7 +1616,7 @@ export class RpcConnection implements RemoteHost {
     const dis = root.initStruct(0, DISEMBARGO_DWORDS, DISEMBARGO_PWORDS);
     dis.setU16(OFF.disembargoContextUnion, Disembargo_context.provide);
     dis.setU32(0, provideQuestionId);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
   }
 
   /** Stop caring about a question: its answer is dropped, a pending call canceled. */
@@ -1182,21 +1630,24 @@ export class RpcConnection implements RemoteHost {
     const rel = root.initStruct(0, RELEASE_DWORDS, RELEASE_PWORDS);
     rel.setU32(0, importId);
     rel.setU32(4, count);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
   }
 
   private handleReturn(ret: Ptr, frame: Uint8Array): void {
     const answerId = Return_getAnswerId(ret);
     // A pipeline-only question id has the high bit set. C++ ignores a
     // Return for those, because the id may already have been reused.
-    if (answerId >= 0x80000000) return;
+    if (answerId >= 0x80000000) {
+      this.gotReturnForHighQuestionId = true;
+      return;
+    }
     const q = this.questions.get(answerId);
     if (q === undefined) {
       this.abort(new RpcError("Invalid question ID in Return message."));
       return;
     }
     if (q.returned) {
-      this.abort(new RpcError("Duplicate Return."));
+      this.abort(new RpcError("expected question->isAwaitingReturn; Duplicate Return."));
       return;
     }
     q.returned = true;
@@ -1204,54 +1655,77 @@ export class RpcConnection implements RemoteHost {
     const which = Return_which(ret);
     q.failed = which !== Return.results;
 
-    if (Return_getReleaseParamCaps(ret)) {
-      for (const id of q.paramExports) this.releaseExport(id, 1);
-    }
+    // Released last, as the C++ `KJ_DEFER`, so a result can still name a
+    // param cap as `receiverHosted`.
+    const releaseIds = Return_getReleaseParamCaps(ret) ? q.paramExports : [];
     q.paramExports = [];
     if (Return_getNoFinishNeeded(ret)) q.skipFinish = true;
+    try {
+      this.settleReturn(answerId, q, ret, which);
+    } finally {
+      for (const id of releaseIds) this.releaseExport(id, 1);
+    }
+  }
+
+  private settleReturn(answerId: number, q: QuestionState, ret: Ptr, which: number): void {
+    // A Return for a question we already finished is not checked. Only a
+    // redirect back to us still needs cancelling.
+    if (q.finished) {
+      if (which === Return.resultsSentElsewhere) q.failed = false;
+      if (which === Return.takeFromOtherQuestion) {
+        this.takeResults(q, Return_getTakeFromOtherQuestion(ret));
+      }
+      // The Return is still the acknowledgement a streaming flow controller
+      // waits on, so a pending result settles here.
+      if (q.call.result.state === "pending") q.call.result.resolve(emptyPayload());
+      this.dropQuestion(answerId, q);
+      return;
+    }
 
     switch (which) {
       case Return.results: {
         if (q.isTailCall) {
           this.abort(
-            new RpcError("Tail call `Return` must set `resultsSentElsewhere`, not `results`."),
+            new RpcError(
+              "expected !question->isTailCall; Tail call `Return` must set `resultsSentElsewhere`, not `results`.",
+            ),
           );
           return;
         }
         const payload = Return_getResults(ret);
-        // Our Finish already said to drop the results, so nothing is
-        // imported for a question that was abandoned.
-        if (q.finished) break;
-        q.call.result.resolve(new Payload(Payload_getContent(payload), this.receiveCaps(payload)));
+        // The content pointer stays unread until something touches the results.
+        q.call.result.resolve(
+          payload.kind === PtrKind.Null
+            ? emptyPayload()
+            : lazyCallPayload(payload, this.receiveCaps(payload)),
+        );
         break;
       }
       case Return.exception:
         if (q.isTailCall) {
           this.abort(
-            new RpcError("Tail call `Return` must set `resultsSentElsewhere`, not `exception`."),
+            new RpcError(
+              "expected !question->isTailCall; Tail call `Return` must set `resultsSentElsewhere`, not `exception`.",
+            ),
           );
           return;
         }
-        if (!q.finished) q.call.result.reject(readException(Return_getException(ret)));
+        q.call.result.reject(readException(Return_getException(ret)));
         break;
       case Return.canceled:
-        // Legal only as the reply to a Finish we already sent. C++ treats
-        // Return.canceled for a question the caller still holds as a
-        // protocol error and disconnects.
-        if (!q.finished) {
-          this.abort(new RpcError("Return message falsely claims call was canceled."));
-          return;
-        }
-        break;
+        this.abort(new RpcError("Return message falsely claims call was canceled."));
+        return;
       case Return.resultsSentElsewhere:
         if (!q.isTailCall) {
           this.abort(
-            new RpcError("`Return` had `resultsSentElsewhere` but this was not a tail call."),
+            new RpcError(
+              "expected question->isTailCall; `Return` had `resultsSentElsewhere` but this was not a tail call.",
+            ),
           );
           return;
         }
         q.failed = false;
-        if (!q.finished) q.call.result.resolve(emptyPayload());
+        q.call.result.resolve(emptyPayload());
         break;
       case Return.takeFromOtherQuestion:
         this.takeResults(q, Return_getTakeFromOtherQuestion(ret));
@@ -1260,14 +1734,6 @@ export class RpcConnection implements RemoteHost {
         this.abort(new RpcError("Unknown 'Return' type."));
         return;
     }
-    // Finish already told the peer this question is done. The Return is
-    // still the acknowledgement a streaming flow controller waits on;
-    // leaving the result pending keeps those bytes in the window and
-    // flush() never resolves.
-    if (q.finished && q.call.result.state === "pending") {
-      q.call.result.resolve(emptyPayload());
-    }
-    if (q.finished) this.questions.delete(answerId);
   }
 
   /**
@@ -1277,12 +1743,35 @@ export class RpcConnection implements RemoteHost {
    * they never crossed the wire twice.
    */
   private takeResults(q: QuestionState, otherAnswerId: number): void {
+    if (q.finished) {
+      const other = this.answers.get(otherAnswerId);
+      if (
+        other !== undefined &&
+        other.isCall &&
+        !other.returned &&
+        !other.resultsElsewhere &&
+        !other.redirectClaimed
+      ) {
+        this.abort(
+          new RpcError(
+            "`Return.takeFromOtherQuestion` referenced a call that did not use `sendResultsTo.yourself`.",
+          ),
+        );
+        return;
+      }
+      if (other !== undefined && other.resultsElsewhere && !other.redirectClaimed) {
+        other.redirectClaimed = true;
+        other.call.release();
+        this.sendRedirectReturn(otherAnswerId, other);
+      }
+      return;
+    }
     const other = this.answers.get(otherAnswerId);
     if (other === undefined) {
       this.abort(new RpcError("`Return.takeFromOtherQuestion` had invalid answer ID."));
       return;
     }
-    if (!other.resultsElsewhere) {
+    if (!other.resultsElsewhere || other.redirectClaimed || other.finished) {
       this.abort(
         new RpcError(
           "`Return.takeFromOtherQuestion` referenced a call that did not use `sendResultsTo.yourself`.",
@@ -1292,31 +1781,42 @@ export class RpcConnection implements RemoteHost {
     }
     // The first claim consumes the redirected answer. A second claim of the
     // same answer is a protocol error, as in capnp-C++.
-    if (other.resultsClaimed) {
-      this.abort(
-        new RpcError(
-          "`Return.takeFromOtherQuestion` referenced a call that did not use `sendResultsTo.yourself`.",
-        ),
-      );
-      return;
-    }
-    other.resultsClaimed = true;
-    if (q.finished) {
-      other.call.release();
-      this.sendRedirectReturn(otherAnswerId, other);
-      return;
-    }
+    other.redirectClaimed = true;
+    this.sendRedirectReturn(otherAnswerId, other);
+    q.redirectedCall = other.call;
     other.call.result.onSettled((s) => {
-      if (q.finished) {
-        if (q.call.result.state === "pending") q.call.result.resolve(emptyPayload());
-        return;
+      q.redirectedCall = undefined;
+      if (!q.finished) {
+        if (s.state !== "ok") q.call.result.reject(s.error);
+        else {
+          q.failed = false;
+          q.call.result.resolve(
+            new Payload(
+              s.value.content,
+              s.value.caps.map((c) => c.addRef()),
+            ),
+          );
+        }
+      } else if (q.call.result.state === "pending") {
+        q.call.result.resolve(emptyPayload());
       }
-      if (s.state !== "ok") q.call.result.reject(s.error);
-      else {
-        q.failed = false;
-        q.call.result.resolve(new Payload(s.value.content, s.value.caps.map((c) => c.addRef())));
-      }
+      if (other.finished) other.call.release();
     });
+  }
+
+  private sendRedirectReturn(questionId: number, answer: AnswerState): void {
+    if (answer.returned) return;
+    answer.returned = true;
+    if (answer.finished && this.answers.get(questionId) === answer) {
+      this.answers.delete(questionId);
+    }
+    if (this.gone !== undefined) return;
+    const { b, root } = newMessage(Message.return);
+    const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+    ret.setU32(OFF.returnAnswerId, questionId);
+    ret.setU16(OFF.returnUnion, Return.resultsSentElsewhere);
+    ret.setBool(OFF.returnReleaseParamCaps, false, true);
+    this.sendFlat(b.toFlat());
   }
 
   // --- level 3: introductions handed to us --------------------------
@@ -1335,6 +1835,10 @@ export class RpcConnection implements RemoteHost {
     if (id.kind !== PtrKind.Struct) return undefined;
     const vat = ThirdPartyCapId_getVat(id);
     if (vat.kind !== PtrKind.Struct) return undefined;
+    // Level 3 stores the host as text. A two-party id puts something else
+    // there, and reading that as text aborts the connection.
+    const host = vat.getP(0);
+    if (host.kind !== PtrKind.List || host.esize !== ElemSize.Byte) return undefined;
     const nonce = ThirdPartyCapId_getNonce(id);
     this.introductions.set(nonce, {
       vineId: ThirdPartyCapDescriptor_getVineId(tp),
@@ -1377,10 +1881,6 @@ export class RpcConnection implements RemoteHost {
    * it sends `Finish` once the recipient has been told where to go.
    */
   private handleProvide(provide: Ptr): void {
-    // The peer chooses the message shape, so a truncated one is a
-    // protocol error to answer rather than a reason to throw out of the
-    // message loop.
-    if (provide.kind !== PtrKind.Struct) return;
     const questionId = Provide_getQuestionId(provide);
     if (this.answers.has(questionId)) {
       this.abort(new RpcError(`provide reuses question id ${questionId} still in use`));
@@ -1395,8 +1895,20 @@ export class RpcConnection implements RemoteHost {
     // The arrangement holds the capability, not this connection's id for
     // it: the recipient may well arrive on another connection. The
     // question id is how a later Disembargo names this arrangement.
-    this.vat.provisions.set(nonce, { hook, questionId });
+    const replaced = this.vat.provisions.get(nonce);
+    if (replaced !== undefined) {
+      replaced.owner.unarrange(replaced);
+      replaced.hook.release();
+    }
+    const provision: Provision = { hook, questionId, owner: this, disembargoed: false };
+    this.vat.provisions.set(nonce, provision);
+    this.arranged.push(provision);
     this.answerNow(questionId, emptyPayload());
+  }
+
+  private unarrange(provision: Provision): void {
+    const at = this.arranged.indexOf(provision);
+    if (at !== -1) this.arranged.splice(at, 1);
   }
 
   /**
@@ -1406,7 +1918,6 @@ export class RpcConnection implements RemoteHost {
    * learns it take the capability again later.
    */
   private handleAccept(accept: Ptr): void {
-    if (accept.kind !== PtrKind.Struct) return;
     const questionId = Accept_getQuestionId(accept);
     if (this.answers.has(questionId)) {
       this.abort(new RpcError(`accept reuses question id ${questionId} still in use`));
@@ -1420,20 +1931,32 @@ export class RpcConnection implements RemoteHost {
     }
     this.vat.provisions.delete(nonce);
 
-    if (Accept_getEmbargo(accept)) {
-      // Claimed, but the Return waits: the recipient has calls in flight
-      // through the introducer, and answering now would let one sent
-      // straight to us overtake them. The introducer lifts it with
-      // Disembargo.provide.
-      this.heldAccepts.set(held.questionId, { hook: held.hook, answerId: questionId });
+    if (Accept_getEmbargo(accept) && !held.disembargoed) {
+      // Claimed, but the Return and pipelined calls wait: the recipient
+      // has calls in flight through the introducer, and answering now
+      // would let one sent straight to us overtake them. The introducer
+      // lifts it with Disembargo.provide on its own connection.
+      const answer = this.newAnswer(questionId);
+      const call = embargoedCall();
+      answer.call = call;
+      held.accept = call;
+      call.onRelease = () => {
+        // Finish, or this connection ending, gives up the claim.
+        held.owner.unarrange(held);
+        if (call.result.state !== "pending") return;
+        held.hook.release();
+        call.result.reject(new RpcError("canceled"));
+      };
+      call.result.onSettled((s) => this.completeAnswer(questionId, answer, s));
       return;
     }
+    held.owner.unarrange(held);
     this.answerNow(questionId, capPayload(held.hook));
   }
 
-  /** Accepts claimed but still embargoed, awaiting Disembargo.provide. */
+  /** Provide question ids whose Accept is claimed but still embargoed. */
   embargoedAccepts(): number[] {
-    return [...this.heldAccepts.keys()];
+    return this.arranged.filter((p) => p.accept !== undefined).map((p) => p.questionId);
   }
 
   /** Pending handoffs, for tests and for shutdown accounting. */
@@ -1443,64 +1966,223 @@ export class RpcConnection implements RemoteHost {
 
   // --- answering ------------------------------------------------------
 
+  /**
+   * `Bootstrap`, as capnp-C++ `handleBootstrap` answers it. The Return
+   * leaves `releaseParamCaps` at its default: there were no params.
+   * Pipelined calls reach the capability the Return named, and only with
+   * an empty transform.
+   */
   private handleBootstrap(bootstrap: Ptr): void {
-    if (bootstrap.kind !== PtrKind.Struct) return;
     const questionId = Bootstrap_getQuestionId(bootstrap);
     if (this.answers.has(questionId)) {
-      this.abort(new RpcError(`bootstrap reuses question id ${questionId} still in use`));
-      return;
-    }
-    if (this.bootstrapHook === undefined) {
-      this.answerWithError(questionId, new RpcError("no bootstrap capability"));
-      return;
-    }
-    this.answerNow(questionId, capPayload(this.bootstrapHook.addRef()));
-  }
-
-  private handleCall(call: Ptr): void {
-    if (call.kind !== PtrKind.Struct) return;
-    const questionId = Call_getQuestionId(call);
-    if (this.answers.has(questionId)) {
-      this.abort(new RpcError(`call reuses question id ${questionId} still in use`));
-      return;
-    }
-    const sendTo = Call_sendResultsTo_which(call);
-    if (sendTo !== Call_sendResultsTo.caller && sendTo !== Call_sendResultsTo.yourself) {
-      this.abort(new RpcError("unsupported Call.sendResultsTo"));
-      return;
-    }
-    // The cap table describes the message, not the dispatch: a call this
-    // vat cannot route still told us where a third party's capability
-    // lives.
-    const params = Call_getParams(call);
-    const caps = this.receiveCaps(params);
-    const target = this.targetHook(Call_getTarget(call));
-    if (target === undefined) {
-      caps.forEach((c) => c.release());
-      this.answerWithError(questionId, new RpcError("no such export"));
+      this.abort(
+        new RpcError(`expected !answer.active; questionId is already in use; answerId = ${questionId}`),
+      );
       return;
     }
     const answer = this.newAnswer(questionId);
+    answer.returned = true;
+    answer.singleCap = true;
+    const { b, root } = newMessage(Message.return);
+    const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+    ret.setU32(OFF.returnAnswerId, questionId);
+    let pipelineCap: ClientHook;
+    let cap: ClientHook | RpcError;
+    try {
+      cap = this.bootstrapCap(bootstrap.getP(0, "text"));
+    } catch (e) {
+      cap = toRpcError(e);
+    }
+    if (cap instanceof RpcError) {
+      const error = cap;
+      ret.setU16(OFF.returnUnion, Return.exception);
+      this.writeException(ret.initStruct(0, EXCEPTION_DWORDS, EXCEPTION_PWORDS), error);
+      answer.call = new CallState();
+      answer.call.result.reject(error);
+      pipelineCap = new BrokenClient(error);
+    } else {
+      pipelineCap = this.innermostForExport(cap).addRef();
+      const payload = capPayload(cap);
+      ret.setU16(OFF.returnUnion, Return.results);
+      answer.resultExports = this.writePayload(
+        ret.initStruct(0, PAYLOAD_DWORDS, PAYLOAD_PWORDS),
+        payload,
+        false,
+      );
+      answer.call = settledCall(payload);
+    }
+    answer.call.pipeline = {
+      getPipelinedCap: (ops) =>
+        ops.length === 0
+          ? pipelineCap.addRef()
+          : new BrokenClient(new RpcError("Invalid pipeline transform.")),
+    };
+    const onRelease = answer.call.onRelease;
+    answer.call.onRelease = () => {
+      onRelease?.();
+      pipelineCap.release();
+    };
+    this.sendFlat(b.toFlat());
+  }
+
+  /** What a Bootstrap names, as capnp-C++ `handleBootstrap` and `baseCreateFor`. */
+  private bootstrapCap(objectId: Ptr): ClientHook {
+    if (objectId.kind !== PtrKind.Null) {
+      if (this.restorer === undefined) {
+        throw new RpcError(
+          "This vat only supports a bootstrap interface, not the old Cap'n-Proto-0.4-style named exports.",
+        );
+      }
+      return this.restorer(objectId).hook.addRef();
+    }
+    if (this.bootstrapHook !== undefined) return this.bootstrapHook.addRef();
+    if (this.restorer !== undefined) return this.restorer(objectId).hook.addRef();
+    return new BrokenClient(new RpcError("This vat does not expose any public/bootstrap interfaces."));
+  }
+
+  /** As capnp-C++ `RpcSystem::setTraceEncoder`. */
+  setTraceEncoder(encode: ((error: RpcError) => string) | undefined): void {
+    this.traceEncoder = encode;
+  }
+
+  /** As capnp-C++ `RpcSystem::setFlowLimit`. */
+  setFlowLimit(words: number): void {
+    this.flowLimit = words;
+    this.maybeUnblockFlow();
+  }
+
+  private maybeUnblockFlow(): void {
+    if (!this.flowBlocked || this.callWordsInFlight >= this.flowLimit) return;
+    this.flowBlocked = false;
+    this.transport.setPaused?.(false);
+    afterQueuedWork(() => {
+      if (this.gone === undefined) this.pump();
+    });
+  }
+
+  /**
+   * The call context is dropped before a Return. `onlyPromisePipeline`
+   * sends nothing. A redirect reports `resultsSentElsewhere`. Anything
+   * else is `canceled`.
+   */
+  private sendCanceledReturn(questionId: number, call?: Ptr): void {
+    const yourself =
+      call !== undefined && Call_sendResultsTo_which(call) === Call_sendResultsTo.yourself;
+    // A redirect still owes `resultsSentElsewhere`. The pipeline-only hint
+    // suppresses the Return only when results stay with the caller.
+    if (call !== undefined && Call_getOnlyPromisePipeline(call) && !yourself) return;
+    const { b, root } = newMessage(Message.return);
+    const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+    ret.setU32(OFF.returnAnswerId, questionId);
+    ret.setU16(OFF.returnUnion, yourself ? Return.resultsSentElsewhere : Return.canceled);
+    ret.setBool(OFF.returnReleaseParamCaps, false, true);
+    this.sendFlat(b.toFlat());
+  }
+
+  private releaseParamCaps(answer: AnswerState): void {
+    const caps = answer.paramCaps;
+    if (caps === undefined) return;
+    answer.paramCaps = undefined;
+    for (const c of caps) c.release();
+  }
+
+  /** A Call, checked in the order of capnp-C++ `handleCall`. */
+  private handleCall(call: Ptr, words: number): void {
+    const questionId = Call_getQuestionId(call);
+    const target = this.targetHook(call.getP(0, "struct"), true);
+    if (target === undefined) return;
+    const sendTo = Call_sendResultsTo_which(call);
+    if (sendTo !== Call_sendResultsTo.caller && sendTo !== Call_sendResultsTo.yourself) {
+      target.release();
+      this.abort(new RpcError("Unsupported `Call.sendResultsTo`."));
+      return;
+    }
+    const params = Call_getParams(call);
+    const caps = this.receiveCaps(params);
+    if (this.answers.has(questionId)) {
+      // capnp-C++ finds the id in use only after it built the call context,
+      // and dropping that context cancels it and releases its params.
+      if (this.gone === undefined) this.sendCanceledReturn(questionId, call);
+      caps.forEach((c) => c.release());
+      target.release();
+      this.abort(new RpcError("expected !answer.active; questionId is already in use"));
+      return;
+    }
+    // Content stays unread until the method touches its parameters. A method
+    // that ignores them still succeeds, and a bad pointer becomes the call's
+    // exception rather than an abort.
+    const callPayload =
+      params.kind === PtrKind.Null ? emptyPayload() : lazyCallPayload(params, caps);
+    const answer = this.newAnswer(questionId);
+    answer.isCall = true;
     answer.resultsElsewhere = sendTo === Call_sendResultsTo.yourself;
     // Redirected results ignore onlyPromisePipeline: the peer is waiting
     // on resultsSentElsewhere, not on a pipeline-only hint.
     answer.onlyPromisePipeline =
       !answer.resultsElsewhere && Call_getOnlyPromisePipeline(call);
+    answer.noPromisePipelining = Call_getNoPromisePipelining(call);
     const tailHandler: TailHandler | undefined = answer.resultsElsewhere
       ? undefined
       : {
           tryTailCall: (cap, iface, method, callParams) =>
             this.trySendTailCall(questionId, answer, cap, iface, method, callParams),
         };
-    const state = target.call(
-      Call_getInterfaceId(call),
-      Call_getMethodId(call),
-      new Payload(Payload_getContent(params), caps),
-      tailHandler !== undefined ? { tailHandler } : undefined,
-    );
+    const onError = (e: unknown): void => {
+      const message = e instanceof Error ? e.message : String(e);
+      this.abort(new RpcError(message));
+    };
+    const opts: CallOptions = { onError };
+    if (tailHandler !== undefined) opts.tailHandler = tailHandler;
+    // As capnp-C++ passes the call's hints to `startCall`: a forwarded or
+    // tail call goes out with `sendForPipeline()`.
+    if (answer.onlyPromisePipeline) opts.onlyPromisePipeline = true;
+    // capnp-C++ keeps the params cap table in the call context until the
+    // context is destroyed, which is `Finish` (or the answer leaving with
+    // `noFinishNeeded`).
+    answer.paramCaps = caps.map((c) => c.addRef());
+    const state = target.call(Call_getInterfaceId(call), Call_getMethodId(call), callPayload, opts);
     target.release();
     answer.call = state;
-    state.result.onSettled((s) => this.completeAnswer(questionId, answer, s));
+    state.onError = onError;
+    this.callWordsInFlight += words;
+    state.result.onSettled((s) => {
+      this.callWordsInFlight -= words;
+      this.returnInOrder(() => {
+        this.completeAnswer(questionId, answer, s);
+      });
+      this.maybeUnblockFlow();
+    });
+  }
+
+  /**
+   * capnp-C++ sends a call's Return as a continuation of the call, so an
+   * exported promise the call resolved reaches the wire first. Here a
+   * Return waits for queued work while any exported promise is unresolved,
+   * and a later Return never overtakes one that waits.
+   */
+  private returnInOrder(send: () => void): void {
+    if (this.waitingReturns.length === 0) {
+      let pending = false;
+      for (const slot of this.exports.values()) if (slot.pendingResolve) pending = true;
+      if (!pending) {
+        send();
+        return;
+      }
+    }
+    this.waitingReturns.push(send);
+    if (this.waitingReturns.length > 1) return;
+    afterQueuedWork(() => {
+      let failed: unknown;
+      while (this.waitingReturns.length > 0) {
+        const next = this.waitingReturns.shift()!;
+        try {
+          next();
+        } catch (e) {
+          if (failed === undefined) failed = e;
+        }
+      }
+      if (failed !== undefined) this.abort(toRpcError(failed));
+    });
   }
 
   /**
@@ -1517,6 +2199,8 @@ export class RpcConnection implements RemoteHost {
     params: Payload,
   ): CallState | undefined {
     if (this.gone !== undefined || answer.returned || answer.finished) return undefined;
+    // The caller ignores this Return, so skipping the round trip gains nothing.
+    if (answer.noPromisePipelining) return undefined;
     const inner = innermost(target);
     if (inner.brand !== this) return undefined;
     const tail = this.sendCallTo(
@@ -1535,7 +2219,7 @@ export class RpcConnection implements RemoteHost {
     ret.setU16(OFF.returnUnion, Return.takeFromOtherQuestion);
     ret.setU32(OFF.returnTakeFromOtherQuestion, tailId);
     ret.setBool(OFF.returnReleaseParamCaps, false, true);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
     return tail;
   }
 
@@ -1544,9 +2228,12 @@ export class RpcConnection implements RemoteHost {
       call: undefined as unknown as CallState,
       resultExports: [],
       resultsElsewhere: false,
-      resultsClaimed: false,
+      redirectClaimed: false,
       onlyPromisePipeline: false,
+      noPromisePipelining: false,
       tailSent: false,
+      isCall: false,
+      singleCap: false,
       returned: false,
       finished: false,
     };
@@ -1569,50 +2256,37 @@ export class RpcConnection implements RemoteHost {
     this.completeAnswer(questionId, answer, answer.call.result);
   }
 
-  private sendRedirectReturn(questionId: number, answer: AnswerState): void {
-    if (answer.returned) return;
-    answer.returned = true;
-    if (answer.finished && this.answers.get(questionId) === answer) {
-      this.answers.delete(questionId);
-    }
-    if (this.gone !== undefined) return;
-    const { b, root } = newMessage(Message.return);
-    const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
-    ret.setU32(OFF.returnAnswerId, questionId);
-    ret.setU16(OFF.returnUnion, Return.resultsSentElsewhere);
-    ret.setBool(OFF.returnReleaseParamCaps, false, true);
-    this.transport.send(b.toFlat());
-  }
-
   private completeAnswer(questionId: number, answer: AnswerState, s: Settle<Payload>): void {
     if (answer.tailSent) {
-      if (answer.finished) this.answers.delete(questionId);
+      if (answer.finished && this.answers.get(questionId) === answer) {
+        this.answers.delete(questionId);
+      }
       return;
     }
     if (answer.resultsElsewhere) {
-      this.sendRedirectReturn(questionId, answer);
+      // A Finish that arrived while this call was still open is answered
+      // once the call settles. Until then the peer has not been told that
+      // the redirect is done.
+      if (answer.finished && !answer.returned) this.sendRedirectReturn(questionId, answer);
       return;
     }
     if (answer.onlyPromisePipeline) {
       // The caller will pipeline and then Finish. A Return here would
       // export capabilities the peer never Releases.
       answer.returned = true;
-      if (answer.finished) this.answers.delete(questionId);
+      if (answer.finished && this.answers.get(questionId) === answer) {
+        this.answers.delete(questionId);
+      }
       return;
     }
     answer.returned = true;
     const finished = answer.finished;
-    if (finished) this.answers.delete(questionId);
+    if (finished && this.answers.get(questionId) === answer) this.answers.delete(questionId);
     if (this.gone !== undefined) return;
     if (finished) {
       // The caller sent Finish before we returned; reply Return.canceled so
       // it can release the question table entry without waiting forever.
-      const { b, root } = newMessage(Message.return);
-      const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
-      ret.setU32(OFF.returnAnswerId, questionId);
-      ret.setU16(OFF.returnUnion, Return.canceled);
-      ret.setBool(OFF.returnReleaseParamCaps, false, true);
-      this.transport.send(b.toFlat());
+      this.sendCanceledReturn(questionId);
       return;
     }
     if (s.state === "ok") {
@@ -1627,10 +2301,110 @@ export class RpcConnection implements RemoteHost {
         s.value,
         false,
       );
-      this.transport.send(b.toFlat());
+      if (answer.isCall && s.value.caps.length > 0) this.freezePipeline(answer, s.value);
+      const noCaps = answer.isCall && s.value.caps.length === 0;
+      if (noCaps) {
+        // Nothing to pipeline on and nothing to release: the caller need
+        // not Finish, and the answer goes now.
+        ret.setBool(OFF.returnNoFinishNeeded, true);
+        answer.finished = true;
+        if (this.answers.get(questionId) === answer) this.answers.delete(questionId);
+      }
+      this.sendFlat(b.toFlat());
+      if (noCaps) {
+        // The call context dies with this Return, so the param table goes
+        // after the Return is on the wire.
+        this.releaseParamCaps(answer);
+        answer.call.release();
+      }
     } else {
       this.sendException(questionId, s.error);
+      // An exception Return ends the call context too. Result caps would
+      // have kept it until Finish.
+      this.releaseParamCaps(answer);
     }
+  }
+
+  /**
+   * `PostReturnRpcPipeline`: once the Return has named the result
+   * capabilities, pipelined calls and Disembargos on this answer reach
+   * what the Return described, even if a promise among them later
+   * resolves elsewhere. That is the Tribble 4-way race in rpc.capnp.
+   */
+  private freezePipeline(answer: AnswerState, results: Payload): void {
+    const atReturn = new Map<ClientHook, ClientHook>();
+    for (const cap of results.caps) {
+      if (atReturn.has(cap)) continue;
+      const inner = this.innermostForExport(cap);
+      if (inner !== cap) atReturn.set(cap, inner.addRef());
+    }
+    const live = answer.call.pipeline;
+    answer.call.pipeline = {
+      getPipelinedCap: (ops) => {
+        // Read the returned path first. A non-struct or non-cap throws here,
+        // before the live reference is taken.
+        const returned = results.pipelinedCapAt(ops);
+        return this.resolutionAtReturnTime(live.getPipelinedCap(ops), returned, atReturn);
+      },
+    };
+    const onRelease = answer.call.onRelease;
+    answer.call.onRelease = () => {
+      onRelease?.();
+      for (const h of atReturn.values()) h.release();
+      atReturn.clear();
+    };
+  }
+
+  /** Follow `original` to `returned` and answer what `returned` was at Return time. Takes both references. */
+  private resolutionAtReturnTime(
+    original: ClientHook,
+    returned: ClientHook,
+    atReturn: Map<ClientHook, ClientHook>,
+  ): ClientHook {
+    let ptr = original;
+    for (;;) {
+      if (ptr === returned) {
+        const unwrapped = (atReturn.get(returned) ?? returned).addRef();
+        original.release();
+        returned.release();
+        return unwrapped;
+      }
+      const r = ptr.getResolved();
+      if (r === undefined) break;
+      ptr = r;
+    }
+    const more = ptr.whenMoreResolved();
+    if (more !== undefined) {
+      const eventual = new Settle<ClientHook>();
+      more.then(
+        (next) => {
+          eventual.resolve(this.resolutionAtReturnTime(next.addRef(), returned, atReturn));
+          original.release();
+        },
+        (e) => {
+          eventual.reject(e);
+          original.release();
+          returned.release();
+        },
+      );
+      return new QueuedClient(eventual);
+    }
+    if (ptr.brokenError !== undefined) {
+      const broken = ptr.addRef();
+      original.release();
+      returned.release();
+      return broken;
+    }
+    original.release();
+    returned.release();
+    return new BrokenClient(
+      new RpcError(
+        "An RPC call's capnp::PipelineHook object resolved a pipelined capability to a " +
+          "different final object than what was returned in the actual response. This could " +
+          "be a bug in Cap'n Proto, or could be due to a use of context.setPipeline() that " +
+          "was inconsistent with the later results.",
+      ),
+    );
   }
 
   private handleFinish(finish: Ptr): void {
@@ -1638,13 +2412,57 @@ export class RpcConnection implements RemoteHost {
     const answer = this.answers.get(questionId);
     if (answer === undefined || answer.finished) return;
     answer.finished = true;
+    this.releaseParamCaps(answer);
     if (Finish_getReleaseResultCaps(finish)) {
       for (const id of answer.resultExports) this.releaseExport(id, 1);
       answer.resultExports = [];
     }
-    // Releasing the call is what cancels it, if it is still running.
-    answer.call.release();
-    if (answer.returned) this.answers.delete(questionId);
+    if (answer.redirectClaimed) {
+      if (answer.returned && this.answers.get(questionId) === answer) {
+        this.answers.delete(questionId);
+      }
+      if (answer.call.result.state !== "pending") answer.call.release();
+      return;
+    }
+    if (answer.resultsElsewhere) {
+      // `sendResultsTo.yourself` is a redirected task in C++. Finish drops
+      // it before the next message is read. `requireEarlyCancellationWorkaround`
+      // does not postpone that drop: the flag only covers a still-running
+      // direct call. A call that refuses cancellation keeps running, and
+      // `resultsSentElsewhere` follows when the call settles.
+      answer.call.release();
+      if (!answer.returned && answer.call.result.state !== "pending") {
+        this.sendRedirectReturn(questionId, answer);
+      }
+      return;
+    }
+    const releaseCall = (): void => {
+      // Releasing the call is what cancels it, if it is still running.
+      // A pipeline-only forward never settles on its own: rejecting the
+      // result runs the bookkeeping that a Return would have run.
+      answer.call.release();
+      if (answer.onlyPromisePipeline && answer.call.result.state === "pending") {
+        answer.call.result.reject(new RpcError("canceled"));
+      }
+      if (answer.returned && this.answers.get(questionId) === answer) {
+        this.answers.delete(questionId);
+      }
+    };
+    if (
+      Finish_getRequireEarlyCancellationWorkaround(finish) &&
+      answer.call.result.state === "pending"
+    ) {
+      afterQueuedWork(() => {
+        // Nothing wraps this turn the way `pumpOnce` wraps a message.
+        try {
+          releaseCall();
+        } catch (e) {
+          this.abort(new RpcError(e instanceof Error ? e.message : String(e)));
+        }
+      });
+    } else {
+      releaseCall();
+    }
   }
 
   private handleRelease(release: Ptr): void {
@@ -1659,45 +2477,111 @@ export class RpcConnection implements RemoteHost {
    * capability inside an answer, identified by walking the transform ops
    * into that answer's results.
    */
-  private targetHook(target: Ptr): ClientHook | undefined {
+  private targetHook(target: Ptr, abortOnInvalid = false): ClientHook | undefined {
+    if (target.kind !== PtrKind.Null && target.kind !== PtrKind.Struct) {
+      throw new RpcError(nonStructPointerMessage(wireKindOf(target)));
+    }
     switch (MessageTarget_which(target)) {
       case MessageTarget.importedCap: {
         const slot = this.exports.get(MessageTarget_getImportedCap(target));
-        return slot?.hook.addRef();
+        if (slot !== undefined) return slot.hook.addRef();
+        if (abortOnInvalid) this.abort(new RpcError("Message target is not a current export ID."));
+        return undefined;
       }
-      case MessageTarget.promisedAnswer:
-        return this.pipelinedCap(MessageTarget_getPromisedAnswer(target));
+      case MessageTarget.promisedAnswer: {
+        const hook = this.pipelinedCap(
+          MessageTarget_getPromisedAnswer(target),
+          abortOnInvalid ? "target" : "legacy",
+        );
+        if (hook !== undefined) return hook;
+        if (this.gone !== undefined || !abortOnInvalid) return undefined;
+        return new BrokenClient(
+          new RpcError("Pipeline call on a request that returned no capabilities or was already closed."),
+        );
+      }
       default:
+        // capnp-C++ prints the target, and a union it cannot name prints as `()`.
+        if (abortOnInvalid) this.abort(new RpcError("Unknown message target type.; target = ()"));
         return undefined;
     }
   }
 
-  private pipelinedCap(promised: Ptr): ClientHook | undefined {
-    if (promised.kind !== PtrKind.Struct) return undefined;
-    const answer = this.answers.get(PromisedAnswer_getQuestionId(promised));
-    if (answer === undefined) return undefined;
+  /**
+   * The capability a `PromisedAnswer` names.
+   *
+   * The modes follow capnp-C++ where it has a rule and p33 where the
+   * level 3 extensions share the lookup:
+   * - `target` is `getMessageTarget`: the transform is checked first, and
+   *   an answer that is gone or finished has no pipeline left.
+   * - `descriptor` is `receiveCap` for `receiverAnswer`: the transform is
+   *   only read when the answer still has a pipeline.
+   * - `legacy` serves `Provide` and `Join`, which keep the pre-parity
+   *   behavior.
+   */
+  private pipelinedCap(
+    promised: Ptr,
+    mode: "target" | "descriptor" | "legacy" = "legacy",
+  ): ClientHook | undefined {
+    // capnp-C++ reads a null `PromisedAnswer` as the default one, which
+    // names question 0 with an empty transform.
+    const isDefault = mode !== "legacy" && promised.kind === PtrKind.Null;
+    if (!isDefault && promised.kind !== PtrKind.Struct) {
+      if (mode === "target") throw new RpcError(nonStructPointerMessage(wireKindOf(promised)));
+      return undefined;
+    }
+    const answer = this.answers.get(isDefault ? 0 : PromisedAnswer_getQuestionId(promised));
+    if (mode !== "target" && (answer === undefined || (mode === "descriptor" && answer.finished))) {
+      return undefined;
+    }
     const ops: number[] = [];
-    const transform = PromisedAnswer_getTransform(promised);
-    for (let i = 0; i < transform.listLen(); i++) {
+    const transform = isDefault ? undefined : promised.getP(0, "list");
+    const opCount = transform?.listLen() ?? 0;
+    for (let i = 0; transform !== undefined && i < opCount; i++) {
       const op = transform.listGetP(i);
       const opWhich = PromisedAnswer_Op_which(op);
       // noop is a real op and does not move. Anything else is the
       // unsupported-pipeline-op protocol error, which disconnects.
       if (opWhich === PromisedAnswer_Op.noop) continue;
       if (opWhich !== PromisedAnswer_Op.getPointerField) {
-        this.abort(new RpcError("Unsupported pipeline op."));
+        this.abort(new RpcError(`Unsupported pipeline op.; (uint)opReader.which() = ${opWhich}`));
         return undefined;
       }
       ops.push(PromisedAnswer_Op_getGetPointerField(op));
+    }
+    if (answer === undefined || (mode === "target" && answer.finished)) return undefined;
+    if (answer.singleCap && opCount > 0) {
+      return new BrokenClient(new RpcError("Invalid pipeline transform."));
     }
     return answer.call.pipeline.getPipelinedCap(ops);
   }
 
   // --- resolution and embargo -----------------------------------------
 
+  /**
+   * A Resolve, read as capnp-C++ `handleResolve` does: the replacement
+   * first, so a bad descriptor aborts before the import is looked up and
+   * a replacement nobody can take is released.
+   */
   private handleResolve(resolve: Ptr): void {
-    const id = Resolve_getPromiseId(resolve);
-    const imp = this.imports.get(id);
+    let hook: ClientHook | undefined;
+    let error: RpcError | undefined;
+    if (Resolve_which(resolve) === Resolve.cap) {
+      const desc = resolve.getP(0, "struct");
+      if (desc.kind !== PtrKind.Null && desc.kind !== PtrKind.Struct) {
+        throw new RpcError(nonStructPointerMessage(wireKindOf(desc)));
+      }
+      if (desc.kind !== PtrKind.Struct || CapDescriptor_which(desc) === CapDescriptor.none) {
+        this.abort(new RpcError("'Resolve' contained 'CapDescriptor.none'."));
+        return;
+      }
+      hook = this.receiveCap(desc);
+    } else if (Resolve_which(resolve) === Resolve.exception) {
+      error = readException(Resolve_getException(resolve));
+    } else {
+      this.abort(new RpcError("Unknown 'Resolve' type."));
+      return;
+    }
+    const imp = this.imports.get(Resolve_getPromiseId(resolve));
     // C++ disconnects when Resolve names an import that was never a
     // promise. A second Resolve of a real promise does not: the fulfiller
     // is still in the table and a second fulfill is ignored.
@@ -1707,30 +2591,24 @@ export class RpcConnection implements RemoteHost {
       !imp.wasPromise &&
       imp.importClient !== undefined
     ) {
-      this.abort(new RpcError("Got Resolve for a non-promise import"));
+      hook?.release();
+      this.abort(new RpcError("Got 'Resolve' for a non-promise import."));
       return;
     }
     const resolver = imp?.resolver;
     if (imp !== undefined) imp.resolver = undefined;
-    if (Resolve_which(resolve) === Resolve.cap) {
-      const desc = Resolve_getCap(resolve);
-      if (desc.kind !== PtrKind.Struct || CapDescriptor_which(desc) === CapDescriptor.none) {
-        this.abort(new RpcError("Resolve contained CapDescriptor.none"));
-        return;
-      }
-      const hook = this.receiveCap(desc);
+    if (hook === undefined) {
+      if (error !== undefined) resolver?.reject(error);
+    } else if (resolver === undefined) {
       // A promise nobody holds any more still sent us a reference.
-      if (resolver === undefined) hook.release();
-      else resolver.resolve(hook);
-    } else if (Resolve_which(resolve) === Resolve.exception) {
-      resolver?.reject(readException(Resolve_getException(resolve)));
+      hook.release();
     } else {
-      this.abort(new RpcError("Unknown Resolve type"));
+      resolver.resolve(hook);
     }
   }
 
   startEmbargo(target: RpcClientHook): Settle<void> {
-    const id = this.nextEmbargoId++;
+    const id = this.embargoIds.take();
     const settle = new Settle<void>();
     this.embargoes.set(id, settle);
     const { b, root } = newMessage(Message.disembargo);
@@ -1738,7 +2616,7 @@ export class RpcConnection implements RemoteHost {
     target.writeTarget(dis.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS));
     dis.setU16(OFF.disembargoContextUnion, Disembargo_context.senderLoopback);
     dis.setU32(OFF.disembargoContextValue, id);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
     return settle;
   }
 
@@ -1752,34 +2630,36 @@ export class RpcConnection implements RemoteHost {
     const context = Disembargo_getContext(disembargo);
     switch (Disembargo_context_which(context)) {
       case Disembargo_context.provide: {
+        if (this.twoParty) break;
         // The introducer lifts the embargo on the Accept it arranged,
-        // naming its own Provide question. One naming nothing we hold is
-        // the sender's problem, not a reason to disturb this connection.
+        // naming its own Provide question. It may overtake the Accept, which
+        // then is answered on arrival. One naming nothing we hold is the
+        // sender's problem, not a reason to disturb this connection.
         const provideQuestion = Disembargo_context_getProvide(context);
-        const held = this.heldAccepts.get(provideQuestion);
+        const held = this.arranged.find((p) => p.questionId === provideQuestion && !p.disembargoed);
         if (held === undefined) return;
-        this.heldAccepts.delete(provideQuestion);
-        this.answerNow(held.answerId, capPayload(held.hook));
+        held.disembargoed = true;
+        if (held.accept === undefined) return;
+        this.unarrange(held);
+        held.accept.result.resolve(capPayload(held.hook));
         return;
       }
       case Disembargo_context.receiverLoopback: {
         const id = Disembargo_context_getReceiverLoopback(context);
         const embargo = this.embargoes.get(id);
         if (embargo === undefined) {
-          this.abort(new RpcError("Invalid embargo ID in Disembargo.context.receiverLoopback"));
+          this.abort(new RpcError("Invalid embargo ID in 'Disembargo.context.receiverLoopback'."));
           return;
         }
         this.embargoes.delete(id);
+        this.embargoIds.release(id);
         embargo.resolve();
         return;
       }
       case Disembargo_context.senderLoopback: {
         const id = Disembargo_context_getSenderLoopback(context);
-        const hook = this.targetHook(Disembargo_getTarget(disembargo));
-        if (hook === undefined) {
-          this.abort(new RpcError("Disembargo target does not exist"));
-          return;
-        }
+        const hook = this.targetHook(disembargo.getP(0, "struct"), true);
+        if (hook === undefined) return;
         const finishLoopback = (resolved: ClientHook): void => {
           if (this.gone !== undefined) {
             resolved.release();
@@ -1788,8 +2668,12 @@ export class RpcConnection implements RemoteHost {
           const inner = innermost(resolved);
           if (inner.brand !== this) {
             resolved.release();
+            // capnp-C++ prints the two pointer addresses; 0 and 1 stand in for them.
             this.abort(
-              new RpcError("Disembargo senderLoopback sent to an object that does not point back"),
+              new RpcError(
+                "expected target->getBrand() == this [0 == 1]; " +
+                  "'Disembargo' of type 'senderLoopback' sent to an object that does not point back to the sender.",
+              ),
             );
             return;
           }
@@ -1798,47 +2682,53 @@ export class RpcConnection implements RemoteHost {
           (inner as RpcClientHook).writeTarget(
             out.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS),
           );
-          resolved.release();
           // `context` is a group, so it shares Disembargo's own data section
           // rather than living behind a pointer.
           out.setU16(OFF.disembargoContextUnion, Disembargo_context.receiverLoopback);
           out.setU32(OFF.disembargoContextValue, id);
-          this.transport.send(b.toFlat());
+          this.sendFlat(b.toFlat());
+          resolved.release();
         };
-        const current = innermost(hook);
-        if (current.whenMoreResolved() === undefined) {
-          finishLoopback(hook);
-          return;
-        }
-        // Target is still a pending promise (for example behind an embargo on
-        // a middle hop); wait until it settles before checking and echoing.
+        // As capnp-C++ does: wait for the target to settle (for example
+        // behind an embargo on a middle hop), then let calls already queued
+        // towards it go first, then echo. `finishLoopback` releases on
+        // every path that returns. A throw from `sendFlat` leaves `h`
+        // owned, so the catch releases it once.
         void (async () => {
-          let h = hook;
+          let h: ClientHook | undefined = hook;
           try {
             for (;;) {
-              const cur = innermost(h);
-              const more = cur.whenMoreResolved();
+              const current: ClientHook | undefined = h;
+              if (current === undefined) break;
+              const more: Promise<ClientHook> | undefined = innermost(current).whenMoreResolved();
               if (more === undefined) break;
-              const next = (await more).addRef();
-              h.release();
+              const next: ClientHook = (await more).addRef();
+              current.release();
               h = next;
             }
-            finishLoopback(h);
+            await new Promise<void>((res) => afterQueuedWork(res));
+            if (h !== undefined) {
+              finishLoopback(h);
+              h = undefined;
+            }
           } catch (e) {
-            h.release();
-            this.abort(
-              new RpcError(
-                `Disembargo target failed while resolving: ${e instanceof Error ? e.message : String(e)}`,
-              ),
-            );
+            h?.release();
+            // capnp-C++ fails the connection with the target's own error.
+            this.abort(toRpcError(e));
           }
         })();
         return;
       }
       default:
-        this.abort(new RpcError("Unimplemented Disembargo type."));
-        return;
+        break;
     }
+    const target = disembargo.getP(0, "struct");
+    if (target.kind !== PtrKind.Null && target.kind !== PtrKind.Struct) {
+      throw new RpcError(nonStructPointerMessage(wireKindOf(target)));
+    }
+    this.abort(
+      new RpcError(`Unimplemented Disembargo type.; disembargo = ${disembargoText(disembargo)}`),
+    );
   }
 
   // --- level 4 -----------------------------------------------------
@@ -1851,7 +2741,6 @@ export class RpcConnection implements RemoteHost {
    * this transport does not have.
    */
   private handleJoin(join: Ptr): void {
-    if (join.kind !== PtrKind.Struct) return;
     const questionId = Join_getQuestionId(join);
     if (this.answers.has(questionId)) {
       this.abort(new RpcError(`join reuses question id ${questionId} still in use`));
@@ -1939,8 +2828,9 @@ export class RpcConnection implements RemoteHost {
 
   private writeException(exc: StructBuilder, error: unknown): void {
     const e = toRpcError(error);
-    exc.setU16(OFF.exceptionType, EXCEPTION_TYPES[e.type]);
-    exc.setText(0, e.message);
+    exc.setU16(OFF.exceptionType, e.wireType !== undefined ? e.wireType : EXCEPTION_TYPES[e.type]);
+    writeWireText(exc, 0, e.message);
+    if (this.traceEncoder !== undefined) writeWireText(exc, 1, this.traceEncoder(e));
   }
 
   private sendException(questionId: number, error: RpcError): void {
@@ -1950,15 +2840,21 @@ export class RpcConnection implements RemoteHost {
     ret.setU16(OFF.returnUnion, Return.exception);
     ret.setBool(OFF.returnReleaseParamCaps, false, true);
     this.writeException(ret.initStruct(0, EXCEPTION_DWORDS, EXCEPTION_PWORDS), error);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
   }
 
   /** Echo a message we did not understand, per the spec. */
   private sendUnimplemented(frame: Uint8Array): void {
-    const incoming = CapnpMessage.fromFlat(frame).root();
+    const incoming = CapnpMessage.fromFlat(frame, RPC_FRAME).root();
+    // capnp-C++ `setUnimplemented` copies through an empty cap table, so any
+    // capability pointer aborts with the copy-path sentence.
+    if (messageHasCapability(incoming)) {
+      this.abort(new RpcError("Message contained invalid capability pointer."));
+      return;
+    }
     const { b, root } = newMessage(Message.unimplemented);
     root.setP(0, incoming);
-    this.transport.send(b.toFlat());
+    this.sendFlat(b.toFlat());
   }
 
   /**
@@ -1968,23 +2864,24 @@ export class RpcConnection implements RemoteHost {
    * reference it would have held is released.
    */
   private handleUnimplemented(echoed: Ptr): void {
-    if (echoed.kind !== PtrKind.Struct) return;
-    const unimplemented = new RpcError("peer does not implement this message", "unimplemented");
+    const notImplemented = (): void =>
+      this.abort(
+        new RpcError(
+          `Peer did not implement required RPC message type.; (uint)message.which() = ${
+            echoed.kind === PtrKind.Struct ? Message_which(echoed) : 0
+          }`,
+        ),
+      );
+    if (echoed.kind !== PtrKind.Struct) {
+      notImplemented();
+      return;
+    }
     switch (Message_which(echoed)) {
-      case Message.call:
-        this.failAsked(Call_getQuestionId(Message_getCall(echoed)), unimplemented);
-        return;
-      case Message.bootstrap:
-        this.failAsked(Bootstrap_getQuestionId(Message_getBootstrap(echoed)), unimplemented);
-        return;
       case Message.provide:
-        this.failAsked(Provide_getQuestionId(Message_getProvide(echoed)), unimplemented);
-        return;
       case Message.accept:
-        this.failAsked(Accept_getQuestionId(Message_getAccept(echoed)), unimplemented);
-        return;
       case Message.join:
-        this.failAsked(Join_getQuestionId(Message_getJoin(echoed)), unimplemented);
+        // Two-party has no level-3 or level-4 messages. An echo of one aborts.
+        notImplemented();
         return;
       case Message.resolve: {
         const resolve = Message_getResolve(echoed);
@@ -2009,17 +2906,9 @@ export class RpcConnection implements RemoteHost {
         return;
       }
       default:
+        notImplemented();
         return;
     }
-  }
-
-  private failAsked(questionId: number, error: RpcError): void {
-    const q = this.questions.get(questionId);
-    if (q === undefined || q.returned) return;
-    this.failQuestion(q, error);
-    for (const id of q.paramExports) this.releaseExport(id, 1);
-    q.paramExports = [];
-    if (q.finished) this.questions.delete(questionId);
   }
 
   /**
@@ -2028,10 +2917,11 @@ export class RpcConnection implements RemoteHost {
    */
   abort(error: RpcError): void {
     if (this.gone !== undefined) return;
+    this.outFds = [];
     try {
       const { b, root } = newMessage(Message.abort);
       this.writeException(root.initStruct(0, EXCEPTION_DWORDS, EXCEPTION_PWORDS), error);
-      this.transport.send(b.toFlat());
+      this.sendFlat(b.toFlat());
     } catch {
       // The transport may be what failed; the connection is going either way.
     }
@@ -2046,7 +2936,10 @@ export class RpcConnection implements RemoteHost {
    */
   disconnect(error: RpcError): void {
     if (this.gone !== undefined) return;
-    this.gone = error.type === "disconnected" ? error : new RpcError(error.message, "disconnected");
+    this.gone =
+      error.type === "disconnected"
+        ? error
+        : new RpcError(error.message, "disconnected", error.remoteTrace);
     const reason = this.gone;
 
     // A Return can set `returned` and then abort before the promise is
@@ -2054,6 +2947,8 @@ export class RpcConnection implements RemoteHost {
     // rejects every question that still has a fulfiller, and the protocol
     // says every outstanding question fails on disconnect.
     for (const q of this.questions.values()) {
+      q.redirectedCall?.release();
+      q.redirectedCall = undefined;
       if (q.call.result.state === "pending") this.failQuestion(q, reason);
     }
     for (const embargo of this.embargoes.values()) embargo.reject(reason);
@@ -2066,6 +2961,7 @@ export class RpcConnection implements RemoteHost {
 
     for (const answer of this.answers.values()) {
       answer.finished = true;
+      this.releaseParamCaps(answer);
       answer.call?.release();
     }
     this.answers.clear();
@@ -2077,8 +2973,16 @@ export class RpcConnection implements RemoteHost {
     this.exportIdByHook.clear();
     for (const hook of this.introductionHooks.values()) hook.release();
     this.introductionHooks.clear();
-    for (const held of this.heldAccepts.values()) held.hook.release();
-    this.heldAccepts.clear();
+    for (const held of this.arranged.splice(0)) {
+      if (held.accept === undefined || held.accept.result.state !== "pending") continue;
+      held.hook.release();
+      held.accept.result.reject(reason);
+    }
+    for (const [nonce, provision] of this.vat.provisions) {
+      if (provision.owner !== this) continue;
+      provision.hook.release();
+      this.vat.provisions.delete(nonce);
+    }
     for (const join of this.joins.values()) {
       for (const part of join.parts) part?.hook?.release();
     }

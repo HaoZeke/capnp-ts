@@ -409,13 +409,15 @@ describe("streaming calls on a local server", () => {
 });
 
 describe("payloads", () => {
-  test("a capability pointer outside the cap table is a broken capability", () => {
+  test("a capability pointer outside the cap table is invalid, as capnp-C++ `extractCap`", () => {
     const b = new CallBuilder(0, 1);
     b.root.adopt(0, b.addCap(newBrokenCap(new RpcError("x"))));
     const payload = b.toPayload();
     const ptr = payload.content.getP(0);
     expect(payload.getCap(ptr).brokenError?.message).toBe("x");
     const bare = new Payload(payload.content, []);
-    expect(bare.getCap(ptr).brokenError?.message).toContain("cap table");
+    expect(() => bare.getCap(ptr)).toThrow("Message contains invalid capability pointer.");
+    expect(() => bare.getPipelinedCap([0])).toThrow("Message contains invalid capability pointer.");
+    expect(() => bare.pipelinedCapAt([0])).toThrow("Message contains invalid capability pointer.");
   });
 });

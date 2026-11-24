@@ -27,6 +27,10 @@ import {
   Disembargo_context,
   BOOTSTRAP_DWORDS,
   BOOTSTRAP_PWORDS,
+  CALL_DWORDS,
+  CALL_PWORDS,
+  FINISH_DWORDS,
+  FINISH_PWORDS,
   MESSAGE_DWORDS,
   MESSAGE_PWORDS,
   MESSAGE_TARGET_DWORDS,
@@ -37,6 +41,8 @@ import {
   MessageTarget,
   PAYLOAD_DWORDS,
   PAYLOAD_PWORDS,
+  PROMISED_ANSWER_DWORDS,
+  PROMISED_ANSWER_PWORDS,
   PROVIDE_DWORDS,
   PROVIDE_PWORDS,
   Payload_getContent,
@@ -53,8 +59,9 @@ import {
   VAT_ID_DWORDS,
   VAT_ID_PWORDS,
 } from "../src/rpc-threeparty.capnp.ts";
+import { RpcError } from "../src/capability.ts";
 import { MemoryTransportPair, type Transport } from "../src/transport.ts";
-import { RpcConnection, type RpcServer } from "../src/vat.ts";
+import { RpcConnection, type RpcServer, Vat } from "../src/vat.ts";
 
 class Marked implements RpcServer {
   calls = 0;
@@ -162,7 +169,7 @@ function readReply(t: Transport): Reply {
 /** Bob, with one capability bootstrapped so export 0 is live. */
 function bobWithExport(): { bob: RpcConnection; alice: Transport } {
   const pair = new MemoryTransportPair();
-  const bob = new RpcConnection(pair.b, new Marked(7));
+  const bob = new RpcConnection(pair.b, new Marked(7), new Vat());
   sendBootstrap(pair.a, 1);
   bob.pump();
   pair.a.receive();
@@ -183,7 +190,7 @@ describe("level 3 handoff", () => {
 
     // Carol arrives on her own connection and presents the nonce.
     const carolPair = new MemoryTransportPair();
-    const bobToCarol = new RpcConnection(carolPair.b);
+    const bobToCarol = new RpcConnection(carolPair.b, undefined, new Vat());
     // The arrangement lives on Bob, so it is Bob's own vat that answers;
     // here the same vat serves both, which is what a real Bob does.
     sendAccept(alice, 11, nonce);
@@ -286,5 +293,204 @@ describe("level 3 handoff", () => {
     expect(reply.isException).toBe(false);
     expect(reply.contentKind).toBe(PtrKind.Cap);
     expect(bob.embargoedAccepts()).toEqual([]);
+  });
+
+  test("an embargoed Accept from another connection waits for the provider's disembargo", () => {
+    const vat = new Vat();
+    const alicePair = new MemoryTransportPair();
+    const bobToAlice = new RpcConnection(alicePair.b, new Marked(7), vat);
+    const carolPair = new MemoryTransportPair();
+    const bobToCarol = new RpcConnection(carolPair.b, undefined, vat);
+    const alice = alicePair.a;
+    const carol = carolPair.a;
+    sendBootstrap(alice, 1);
+    bobToAlice.pump();
+    alice.receive();
+    const nonce = 0x7ea5n;
+
+    sendProvide(alice, 70, 0, nonce);
+    bobToAlice.pump();
+    expect(readReply(alice).isException).toBe(false);
+
+    sendAcceptEmbargoed(carol, 5, nonce);
+    bobToCarol.pump();
+    expect(carol.receive()).toBeNull();
+    expect(bobToAlice.embargoedAccepts()).toEqual([70]);
+    expect(bobToCarol.embargoedAccepts()).toEqual([]);
+
+    sendDisembargoProvide(alice, 70);
+    bobToAlice.pump();
+    expect(alice.receive()).toBeNull();
+    const reply = readReply(carol);
+    expect(reply.answerId).toBe(5);
+    expect(reply.isException).toBe(false);
+    expect(reply.contentKind).toBe(PtrKind.Cap);
+    expect(bobToAlice.embargoedAccepts()).toEqual([]);
+  });
+
+  test("an embargoed Accept fails when the provider's connection ends", () => {
+    const vat = new Vat();
+    const alicePair = new MemoryTransportPair();
+    const bobToAlice = new RpcConnection(alicePair.b, new Marked(7), vat);
+    const carolPair = new MemoryTransportPair();
+    const bobToCarol = new RpcConnection(carolPair.b, undefined, vat);
+    sendBootstrap(alicePair.a, 1);
+    bobToAlice.pump();
+    alicePair.a.receive();
+    sendProvide(alicePair.a, 70, 0, 0x7ea6n);
+    bobToAlice.pump();
+    alicePair.a.receive();
+    sendAcceptEmbargoed(carolPair.a, 5, 0x7ea6n);
+    bobToCarol.pump();
+
+    bobToAlice.disconnect(new RpcError("alice went away", "disconnected"));
+    const reply = readReply(carolPair.a);
+    expect(reply.answerId).toBe(5);
+    expect(reply.isException).toBe(true);
+    expect(bobToCarol.disconnected).toBeUndefined();
+  });
+});
+
+class Disposable extends Marked {
+  disposed = 0;
+  dispose(): void {
+    this.disposed++;
+  }
+}
+
+/** Bob serving Alice (the introducer) and Carol (the recipient) from one vat. */
+function bobBetween() {
+  const vat = new Vat();
+  const server = new Disposable(7);
+  const alicePair = new MemoryTransportPair();
+  const bobToAlice = new RpcConnection(alicePair.b, server, vat);
+  const carolPair = new MemoryTransportPair();
+  const bobToCarol = new RpcConnection(carolPair.b, undefined, vat);
+  sendBootstrap(alicePair.a, 1);
+  bobToAlice.pump();
+  alicePair.a.receive();
+  return { server, bobToAlice, bobToCarol, alice: alicePair.a, carol: carolPair.a };
+}
+
+function sendCallOnAnswer(t: Transport, questionId: number, answerId: number): void {
+  const b = new MessageBuilder();
+  const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+  root.setU16(0, Message.call);
+  const call = root.initStruct(0, CALL_DWORDS, CALL_PWORDS);
+  call.setU32(0, questionId);
+  const target = call.initStruct(0, MESSAGE_TARGET_DWORDS, MESSAGE_TARGET_PWORDS);
+  target.setU16(4, MessageTarget.promisedAnswer);
+  target.initStruct(0, PROMISED_ANSWER_DWORDS, PROMISED_ANSWER_PWORDS).setU32(0, answerId);
+  call.initStruct(1, PAYLOAD_DWORDS, PAYLOAD_PWORDS);
+  t.send(b.toFlat());
+}
+
+function sendFinish(t: Transport, questionId: number): void {
+  const b = new MessageBuilder();
+  const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
+  root.setU16(0, Message.finish);
+  root.initStruct(0, FINISH_DWORDS, FINISH_PWORDS).setU32(0, questionId);
+  t.send(b.toFlat());
+}
+
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+describe("embargoed Accept answers (rpc.capnp Accept.embargo)", () => {
+  test("pipelined calls on an embargoed Accept wait for the disembargo", async () => {
+    const { server, bobToAlice, bobToCarol, alice, carol } = bobBetween();
+    sendProvide(alice, 70, 0, 0x51n);
+    bobToAlice.pump();
+    readReply(alice);
+    sendAcceptEmbargoed(carol, 5, 0x51n);
+    sendCallOnAnswer(carol, 6, 5);
+    bobToCarol.pump();
+    await tick();
+    expect(carol.receive()).toBeNull();
+    expect(server.calls).toBe(0);
+
+    sendDisembargoProvide(alice, 70);
+    bobToAlice.pump();
+    await tick();
+    const accepted = readReply(carol);
+    expect(accepted.answerId).toBe(5);
+    expect(accepted.contentKind).toBe(PtrKind.Cap);
+    const called = readReply(carol);
+    expect(called.answerId).toBe(6);
+    expect(called.isException).toBe(false);
+    expect(server.calls).toBe(1);
+    expect(bobToCarol.disconnected).toBeUndefined();
+  });
+
+  test("Finish on an embargoed Accept cancels it and exports nothing", async () => {
+    const { bobToAlice, bobToCarol, alice, carol } = bobBetween();
+    sendProvide(alice, 70, 0, 0x52n);
+    bobToAlice.pump();
+    readReply(alice);
+    sendAcceptEmbargoed(carol, 5, 0x52n);
+    bobToCarol.pump();
+    sendFinish(carol, 5);
+    bobToCarol.pump();
+    await tick();
+    const reply = CapnpMessage.fromFlat(carol.receive()!).root();
+    expect(Return_which(Message_getReturn(reply))).toBe(Return.canceled);
+    expect(bobToAlice.embargoedAccepts()).toEqual([]);
+    sendDisembargoProvide(alice, 70);
+    bobToAlice.pump();
+    expect(carol.receive()).toBeNull();
+    expect(bobToCarol.liveExports()).toEqual([]);
+  });
+
+  test("a Disembargo that overtakes its embargoed Accept still lifts it", () => {
+    const { bobToAlice, bobToCarol, alice, carol } = bobBetween();
+    sendProvide(alice, 70, 0, 0x53n);
+    bobToAlice.pump();
+    readReply(alice);
+    sendDisembargoProvide(alice, 70);
+    bobToAlice.pump();
+    sendAcceptEmbargoed(carol, 5, 0x53n);
+    bobToCarol.pump();
+    const reply = readReply(carol);
+    expect(reply.answerId).toBe(5);
+    expect(reply.contentKind).toBe(PtrKind.Cap);
+  });
+
+  test("a reused Provide question id keeps each embargoed Accept", () => {
+    const { server, bobToAlice, bobToCarol, alice, carol } = bobBetween();
+    sendProvide(alice, 70, 0, 0x54n);
+    bobToAlice.pump();
+    readReply(alice);
+    sendFinish(alice, 70);
+    sendProvide(alice, 70, 0, 0x55n);
+    bobToAlice.pump();
+    readReply(alice);
+    sendAcceptEmbargoed(carol, 5, 0x54n);
+    sendAcceptEmbargoed(carol, 6, 0x55n);
+    bobToCarol.pump();
+    expect(bobToAlice.embargoedAccepts()).toEqual([70, 70]);
+    sendDisembargoProvide(alice, 70);
+    bobToAlice.pump();
+    expect(readReply(carol).answerId).toBe(5);
+    sendDisembargoProvide(alice, 70);
+    bobToAlice.pump();
+    expect(readReply(carol).answerId).toBe(6);
+    bobToCarol.disconnect(new RpcError("carol went away", "disconnected"));
+    bobToAlice.disconnect(new RpcError("alice went away", "disconnected"));
+    expect(server.disposed).toBe(1);
+  });
+
+  test("an embargoed Accept is released when its own connection ends", () => {
+    const { server, bobToAlice, bobToCarol, alice, carol } = bobBetween();
+    sendProvide(alice, 70, 0, 0x56n);
+    bobToAlice.pump();
+    readReply(alice);
+    sendAcceptEmbargoed(carol, 5, 0x56n);
+    bobToCarol.pump();
+    bobToCarol.disconnect(new RpcError("carol went away", "disconnected"));
+    expect(bobToAlice.embargoedAccepts()).toEqual([]);
+    sendDisembargoProvide(alice, 70);
+    bobToAlice.pump();
+    expect(bobToAlice.disconnected).toBeUndefined();
+    bobToAlice.disconnect(new RpcError("alice went away", "disconnected"));
+    expect(server.disposed).toBe(1);
   });
 });

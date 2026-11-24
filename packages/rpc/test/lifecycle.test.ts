@@ -133,7 +133,7 @@ describe("calls over a connection", () => {
     const out = a.bootstrap().call(IFACE, 0);
     await settle();
     await expect(Promise.resolve(out)).rejects.toMatchObject({
-      message: "too busy",
+      message: "remote exception: too busy",
       type: "overloaded",
     });
   });
@@ -373,7 +373,7 @@ describe("promises over a connection", () => {
 
     reject(new RpcError("gave up", "overloaded"));
     await settle();
-    await expect(Promise.resolve(pending)).rejects.toMatchObject({ message: "gave up" });
+    await expect(Promise.resolve(pending)).rejects.toMatchObject({ message: "remote exception: gave up" });
     await promise.whenResolved().catch(() => {});
     expect(promise.isBroken).toBe(true);
   });
@@ -798,10 +798,7 @@ describe("results sent elsewhere", () => {
     peer.receive(); // our bootstrap question
     a.pump();
 
-    const held = CapnpMessage.fromFlat(peer.receive()!).root();
-    const ret = Message_getReturn(held);
-    expect(Return_getAnswerId(ret)).toBe(2);
-    expect(Return_which(ret)).toBe(Return.resultsSentElsewhere);
+    expect(peer.receive()).toBeNull();
     expect(server.seen).toEqual([20]);
 
     peer.send(
@@ -814,6 +811,10 @@ describe("results sent elsewhere", () => {
       }),
     );
     a.pump();
+    const held = CapnpMessage.fromFlat(peer.receive()!).root();
+    const ret = Message_getReturn(held);
+    expect(Return_getAnswerId(ret)).toBe(2);
+    expect(Return_which(ret)).toBe(Return.resultsSentElsewhere);
     expect(a.isAnswered(mine)).toBe(true);
     expect(a.isFailed(mine)).toBe(false);
     expect(a.answerContent(mine)?.getU32(0)).toBe(21);
@@ -859,10 +860,7 @@ describe("results sent elsewhere", () => {
     peer.receive();
     a.pump();
 
-    const held = CapnpMessage.fromFlat(peer.receive()!).root();
-    const ret = Message_getReturn(held);
-    expect(Return_getAnswerId(ret)).toBe(2);
-    expect(Return_which(ret)).toBe(Return.resultsSentElsewhere);
+    expect(peer.receive()).toBeNull();
 
     peer.send(
       frame((root) => {
@@ -874,6 +872,10 @@ describe("results sent elsewhere", () => {
       }),
     );
     a.pump();
+    const held = CapnpMessage.fromFlat(peer.receive()!).root();
+    const ret = Message_getReturn(held);
+    expect(Return_getAnswerId(ret)).toBe(2);
+    expect(Return_which(ret)).toBe(Return.resultsSentElsewhere);
     expect(a.isFailed(mine)).toBe(true);
     expect(a.answerError(mine)?.type).toBe("overloaded");
     expect(a.answerError(mine)?.message).toBe("tail failed");
@@ -1011,7 +1013,7 @@ describe("Return flags and disconnect cleanup", () => {
     );
     await settle();
     await expect(Promise.resolve(out)).rejects.toMatchObject({
-      message: "reject with cap",
+      message: "remote exception: reject with cap",
       type: "overloaded",
     });
     const excReturn = tb.frames
@@ -1067,7 +1069,9 @@ describe("malformed input", () => {
     const vat = new RpcConnection(pair.b, new Counter());
     pair.a.send(new Uint8Array([1, 2, 3]));
     expect(() => vat.pump()).not.toThrow();
-    expect(vat.disconnected?.message).toContain("protocol error");
+    expect(vat.disconnected?.message).toBe(
+      "expected segment != nullptr && segment->checkObject(segment->getStartPtr(), ONE * WORDS); Message did not contain a root pointer.",
+    );
     expect(Message_which(CapnpMessage.fromFlat(pair.a.receive()!).root())).toBe(Message.abort);
   });
 });
@@ -1107,7 +1111,9 @@ describe("promise chains shorten", () => {
     const late = promise.call(IFACE, 0, arg(2));
     await settle();
     expect((await late).content.getU32(0)).toBe(3);
-    expect(tb.sent.filter((k) => k === "resolve").length).toBe(2);
+    // capnp-C++ hands the export entry to the second promise and sends
+    // one Resolve, for the real target, once the chain has settled.
+    expect(tb.sent.filter((k) => k === "resolve").length).toBe(1);
     expect(ta.sent).not.toContain("abort");
     expect(b.disconnected).toBeUndefined();
   });
@@ -1201,8 +1207,7 @@ describe("pipeline-only calls", () => {
     peer.receive();
     a.pump();
     expect(server.seen).toEqual([76]);
-    const held = CapnpMessage.fromFlat(peer.receive()!).root();
-    expect(Return_which(Message_getReturn(held))).toBe(Return.resultsSentElsewhere);
+    expect(peer.receive()).toBeNull();
 
     const claim = (questionId: number): void => {
       peer.send(
@@ -1218,6 +1223,8 @@ describe("pipeline-only calls", () => {
     claim(first);
     a.pump();
     expect(a.disconnected).toBeUndefined();
+    const held = CapnpMessage.fromFlat(peer.receive()!).root();
+    expect(Return_which(Message_getReturn(held))).toBe(Return.resultsSentElsewhere);
     expect(a.answerContent(first)?.getU32(0)).toBe(77);
 
     claim(second);

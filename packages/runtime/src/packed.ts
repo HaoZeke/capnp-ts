@@ -67,10 +67,14 @@ function wordFewerThanTwoZeros(w: Uint8Array, off: number): boolean {
  * Byte ends of the segment table and each segment of the stream frame that
  * starts at `start`, or null when the buffer does not hold a whole frame there.
  */
-function frameEnds(input: Uint8Array, start: number): number[] | null {
+function frameEnds(
+  input: Uint8Array,
+  start: number,
+  maxSegments = MAX_SEGMENTS,
+): number[] | null {
   if (input.length - start < WORD_BYTES) return null;
   const nsegs = loadU32(input, start) + 1;
-  if (nsegs <= 0 || nsegs > MAX_SEGMENTS) return null;
+  if (nsegs <= 0 || nsegs > maxSegments) return null;
   let tableBytes = 4 + 4 * nsegs;
   if (tableBytes % WORD_BYTES !== 0) tableBytes += 4;
   if (start + tableBytes > input.length) return null;
@@ -191,12 +195,13 @@ export function pack(input: Uint8Array, opts?: PackOptions): Uint8Array {
 }
 
 /**
- * True when the unpacked words open with a stream frame that carries at
- * least one word. Raw word buffers that only start with zeros do not.
+ * The hard packed-frame error stays on the message-reader path.
+ * The raw fallback applies unless segment 0 has at least one word.
  */
 function startsWithFrame(flat: Uint8Array): boolean {
-  const ends = frameEnds(flat, 0);
-  return ends !== null && ends[ends.length - 1]! > ends[0]!;
+  const ends = frameEnds(flat, 0, Infinity);
+  if (ends === null || ends.length < 2) return false;
+  return ends[1]! > ends[0]!;
 }
 
 class PackedReader {
@@ -235,9 +240,10 @@ class PackedReader {
         const cnt = this.input[this.pos++]!;
         const run = cnt * WORD_BYTES;
         if (out.length + run > nbytes) {
+          const remain = nbytes - out.length;
           throw new CapnpError(
             "PACKED",
-            "Packed input did not end cleanly on a segment boundary.",
+            `expected runLength <= outEnd - out [${run} <= ${remain}]; Packed input did not end cleanly on a segment boundary.`,
           );
         }
         if (tag === 0) {
@@ -255,10 +261,15 @@ class PackedReader {
 
   readMessage(maxWords: number): number[] {
     const first = this.readExact(WORD_BYTES);
-    const nsegs = u32(first, 0) + 1;
-    if (nsegs <= 0 || nsegs > 511) {
-      throw new CapnpError("FRAMING", "Message has too many segments.");
+    const firstWord = u32(first, 0);
+    // InputStreamMessageReader: segmentCount-1 < 511, so at most 511 segments.
+    if (firstWord >= 511) {
+      throw new CapnpError(
+        "FRAMING",
+        `expected firstWord[0].get() < 511 [${firstWord} < 511]; Message has too many segments.`,
+      );
     }
+    const nsegs = firstWord + 1;
     let total = BigInt(u32(first, 4));
     const parts: number[][] = [first];
     if (nsegs > 1) {
@@ -301,25 +312,51 @@ function u32(b: number[], off: number): number {
  * @param opts.maxWords Cap on expanded words (default {@link MAX_UNPACKED_WORDS}).
  *   Exceeding the cap throws `CapnpError("PACKED")` before unbounded allocation.
  */
+function hardPackedFrameError(err: unknown): err is CapnpError {
+  if (!(err instanceof CapnpError)) return false;
+  const m = err.message;
+  return (
+    m.includes("segment boundary") ||
+    m.includes("too many segments") ||
+    m.includes("Premature") ||
+    m.includes("truncated") ||
+    m.includes("overflow")
+  );
+}
+
 export function unpack(
   input: Uint8Array,
   opts?: { maxWords?: number },
 ): Uint8Array {
   const maxWords = opts?.maxWords ?? MAX_UNPACKED_WORDS;
-  const flat = unpackFlat(input, maxWords);
-  if (startsWithFrame(flat)) {
-    try {
-      new PackedReader(input).readMessage(maxWords);
-    } catch (err) {
-      if (
-        err instanceof CapnpError &&
-        err.message.includes("segment boundary")
-      ) {
-        throw err;
-      }
-    }
+  let framed: Uint8Array | undefined;
+  let frameError: unknown;
+  try {
+    framed = Uint8Array.from(new PackedReader(input).readMessage(maxWords));
+  } catch (err) {
+    frameError = err;
   }
-  return flat;
+  let flat: Uint8Array | undefined;
+  let flatError: unknown;
+  try {
+    flat = unpackFlat(input, maxWords);
+  } catch (err) {
+    flatError = err;
+  }
+  // A complete raw unpack stays byte-for-byte, including a second message.
+  if (framed !== undefined && flat !== undefined) return flat;
+  // PackedMessageReader stops after one message when trailing bytes are partial.
+  if (framed !== undefined) return framed;
+  if (
+    flat !== undefined &&
+    startsWithFrame(flat) &&
+    hardPackedFrameError(frameError)
+  ) {
+    throw frameError;
+  }
+  if (flat !== undefined) return flat;
+  if (hardPackedFrameError(frameError)) throw frameError;
+  throw flatError;
 }
 
 function unpackFlat(input: Uint8Array, maxWords: number): Uint8Array {

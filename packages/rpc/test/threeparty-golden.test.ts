@@ -52,7 +52,7 @@ import {
   VAT_ID_PWORDS,
 } from "../src/rpc-threeparty.capnp.ts";
 import { MemoryTransportPair, type Transport } from "../src/transport.ts";
-import { RpcConnection, type RpcServer } from "../src/vat.ts";
+import { RpcConnection, type RpcServer, Vat } from "../src/vat.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const golden = (name: string): Uint8Array =>
@@ -74,7 +74,7 @@ class Marked implements RpcServer {
 /** Bob, with one capability bootstrapped so export 0 is live. */
 function bobWithExport(): { bob: RpcConnection; peer: Transport } {
   const pair = new MemoryTransportPair();
-  const bob = new RpcConnection(pair.b, new Marked());
+  const bob = new RpcConnection(pair.b, new Marked(), new Vat());
   const b = new MessageBuilder();
   const root = b.initRoot(MESSAGE_DWORDS, MESSAGE_PWORDS);
   root.setU16(0, Message.bootstrap);

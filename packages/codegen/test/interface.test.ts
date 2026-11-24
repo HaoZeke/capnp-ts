@@ -82,7 +82,7 @@ describe("interface stubs", () => {
     // Two Int64 arguments are two data words; one word would drop the
     // second argument on the wire without complaint.
     expect(src).toContain(
-      "add: { ordinal: 0, paramsDwords: 2, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] }",
+      "add: { ordinal: 0, paramsDwords: 2, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false }",
     );
   });
 
@@ -99,10 +99,21 @@ describe("interface stubs", () => {
     expect(src).toContain("m.paramsPwords");
   });
 
-  test("the wrong-interface message is a literal, not an interpolation", () => {
-    // `${Adder}` would name a variable that does not exist, and the
-    // generated module would not compile.
-    expect(src).toContain("`Adder: wrong interface ${interfaceId}`");
+  test("an unknown method or interface is unimplemented, as capnp-C++", () => {
+    const id = 0xea01e10cbc414411n.toString();
+    expect(src).toContain(
+      JSON.stringify(
+        "Method not implemented.; interfaceName = adder.capnp:Adder; typeId = " +
+          id +
+          "; methodId = ",
+      ) + " + methodId",
+    );
+    expect(src).toContain('{ type: "unimplemented" }');
+    expect(src).toContain(
+      JSON.stringify(
+        "Requested interface not implemented.; actualInterfaceName = adder.capnp:Adder; requestedTypeId = ",
+      ) + " + interfaceId",
+    );
     expect(src).not.toContain("${Adder}");
   });
 

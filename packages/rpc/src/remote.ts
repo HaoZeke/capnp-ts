@@ -50,6 +50,8 @@ export interface RemoteHost {
   promiseDropped(importId: number, client: ClientHook): void;
   /** Send a Disembargo on `target`; settles when it comes back. */
   startEmbargo(target: RpcClientHook): Settle<void>;
+  /** Close an OS descriptor this host owns. The transport implements it. */
+  closeFd?(fd: number): void;
 }
 
 /** A hook that knows how to name itself in a message. */
@@ -135,13 +137,37 @@ const RECEIVER_ANSWER = 4;
 export class ImportClient extends RefHook implements RpcClientHook {
   flow: WindowFlowController;
   readonly adoptedFlows: WindowFlowController[] = [];
+  /** FD received with this import. Closed on drop only when this process owns it. */
+  private attachedFd: number | undefined;
+  private ownsFd = false;
 
   constructor(
     private readonly host: RemoteHost,
     readonly importId: number,
+    fd?: number,
+    ownsFd = false,
   ) {
     super();
     this.flow = host.createFlowController();
+    this.attachedFd = fd;
+    this.ownsFd = ownsFd && fd !== undefined;
+  }
+
+  /**
+   * Take ownership of `fd`. The first one is stored. Another is closed,
+   * because this import already has a descriptor.
+   */
+  adoptFd(fd: number): void {
+    if (this.attachedFd === undefined) {
+      this.attachedFd = fd;
+      this.ownsFd = true;
+      return;
+    }
+    this.host.closeFd?.(fd);
+  }
+
+  getFd(): number | undefined {
+    return this.attachedFd;
   }
 
   adoptFlow(incoming: WindowFlowController): void {
@@ -212,6 +238,10 @@ export class ImportClient extends RefHook implements RpcClientHook {
   }
 
   protected dispose(): void {
+    if (this.ownsFd && this.attachedFd !== undefined) {
+      this.host.closeFd?.(this.attachedFd);
+    }
+    this.attachedFd = undefined;
     this.host.importDropped(this.importId, this);
   }
 }
@@ -347,6 +377,15 @@ export class PromiseClient extends RefHook implements RpcClientHook {
 
   getResolved(): ClientHook | undefined {
     return this.resolved ? this.cap : undefined;
+  }
+
+  /**
+   * Unresolved promises do not expose an FD. A resolved one uses the
+   * target's FD. See `PromiseClient::getFd` in `rpc.c++`.
+   */
+  getFd(): number | undefined {
+    if (!this.resolved) return undefined;
+    return this.cap.getFd?.();
   }
 
   /**

@@ -9,6 +9,9 @@
 // exit status.
 #include "interop.capnp.h"
 #include <capnp/ez-rpc.h>
+#include <capnp/membrane.h>
+#include <capnp/rpc-twoparty.h>
+#include <kj/async-io.h>
 #include <kj/async.h>
 #include <kj/debug.h>
 #include <cstdlib>
@@ -159,9 +162,14 @@ public:
 	}
 
 	kj::Promise<void> callHeld(CallHeldContext ctx) override {
-		auto req = held.incRequest();
-		req.setN(ctx.getParams().getN());
-		return req.send().then([ctx](auto r) mutable { ctx.getResults().setN(r.getN()); });
+		// A tail call, as the TypeScript server makes it: `Counter.inc`
+		// results have the same layout as `callHeld` results.
+		auto inc = held.incRequest();
+		inc.setN(ctx.getParams().getN());
+		Counter::IncParams::Builder params = inc;
+		auto hook = capnp::RequestHook::from(kj::mv(inc));
+		return ctx.tailCall(
+			capnp::Request<Counter::IncParams, Echo::CallHeldResults>(params, kj::mv(hook)));
 	}
 
 	kj::Promise<void> promiseOfHeld(PromiseOfHeldContext ctx) override {
@@ -203,6 +211,47 @@ private:
 
 void ok(const char *name) {
 	std::cout << "ok " << name << std::endl;
+}
+
+// A membrane policy that passes every call and cuts everything on revoke().
+class RevocablePolicy final : public capnp::MembranePolicy, public kj::Refcounted {
+public:
+	RevocablePolicy(kj::PromiseFulfillerPair<void> paf = kj::newPromiseAndFulfiller<void>())
+	    : fulfiller(kj::mv(paf.fulfiller)), revoked(paf.promise.fork()) {}
+	kj::Maybe<capnp::Capability::Client> inboundCall(uint64_t, uint16_t, capnp::Capability::Client) override {
+		return nullptr;
+	}
+	kj::Maybe<capnp::Capability::Client> outboundCall(uint64_t, uint16_t, capnp::Capability::Client) override {
+		return nullptr;
+	}
+	kj::Own<capnp::MembranePolicy> addRef() override { return kj::addRef(*this); }
+	kj::Maybe<kj::Promise<void>> onRevoked() override { return revoked.addBranch(); }
+	void revoke(const char *why) { fulfiller->reject(KJ_EXCEPTION(DISCONNECTED, why)); }
+
+private:
+	kj::Own<kj::PromiseFulfiller<void>> fulfiller;
+	kj::ForkedPromise<void> revoked;
+};
+
+template <typename F> bool failsWith(F &&f, const char *text) {
+	KJ_IF_MAYBE(e, kj::runCatchingExceptions(kj::fwd<F>(f))) {
+		KJ_REQUIRE(std::string(e->getDescription().cStr()).find(text) != std::string::npos,
+		           e->getDescription());
+		return true;
+	}
+	return false;
+}
+
+bool named(const std::vector<std::string> &only, const char *name) {
+	for (auto &o : only) if (o == name) return true;
+	return false;
+}
+
+template <typename F> std::string outcome(F &&f) {
+	KJ_IF_MAYBE(e, kj::runCatchingExceptions(kj::fwd<F>(f))) {
+		return e->getDescription().cStr();
+	}
+	return "ok";
 }
 
 bool wants(const std::vector<std::string> &only, const char *name) {
@@ -455,6 +504,118 @@ void runClient(const std::string &addr, const std::vector<std::string> &only) {
 		ok("persistent");
 	}
 
+	if (wants(only, "membrane")) {
+		// A capnp-C++ membrane around the TypeScript bootstrap capability.
+		auto policy = kj::refcounted<RevocablePolicy>();
+		auto &revocable = *policy;
+		Echo::Client outside = capnp::membrane(Echo::Client(echo), kj::mv(policy));
+		auto ping = outside.pingRequest();
+		ping.setN(1);
+		KJ_REQUIRE(ping.send().wait(ws).getN() == 2);
+
+		// A capability of ours that crosses the membrane and comes back is
+		// ours again, so revocation leaves it alone.
+		class Mine final : public Counter::Server {
+		public:
+			Mine(unsigned &calls) : calls(calls) {}
+			kj::Promise<void> inc(IncContext ctx) override {
+				++calls;
+				ctx.getResults().setN(ctx.getParams().getN() + 100);
+				return kj::READY_NOW;
+			}
+			unsigned &calls;
+		};
+		unsigned calls = 0;
+		auto echoed = outside.echoCapRequest();
+		echoed.setCap(kj::heap<Mine>(calls));
+		auto back = echoed.send().wait(ws).getCap();
+
+		// A capability the TypeScript side returns is behind the membrane too.
+		auto counter = outside.makeCounterRequest().send().wait(ws).getCounter();
+		auto inc = counter.incRequest();
+		inc.setN(1);
+		KJ_REQUIRE(inc.send().wait(ws).getN() == 2);
+
+		auto before = echo.statsRequest().send().wait(ws).getCancelled();
+		auto pending = outside.slowRequest().send();
+		echo.pingRequest().send().wait(ws);
+		revocable.revoke("access withdrawn");
+		KJ_REQUIRE(failsWith([&]() { pending.wait(ws); }, "access withdrawn"));
+		KJ_REQUIRE(failsWith([&]() { counter.incRequest().send().wait(ws); }, "access withdrawn"));
+		KJ_REQUIRE(failsWith([&]() { outside.pingRequest().send().wait(ws); }, "access withdrawn"));
+		auto &timer = client.getIoProvider().getTimer();
+		auto cancelled = before;
+		for (int i = 0; i < 50 && cancelled == before; i++) {
+			timer.afterDelay(10 * kj::MILLISECONDS).wait(ws);
+			cancelled = echo.statsRequest().send().wait(ws).getCancelled();
+		}
+		KJ_REQUIRE(cancelled == before + 1, "the revoked call was never canceled", cancelled, before);
+		echo.unblockRequest().send().wait(ws);
+
+		auto mine = back.incRequest();
+		mine.setN(1);
+		KJ_REQUIRE(mine.send().wait(ws).getN() == 101);
+		KJ_REQUIRE(calls == 1, calls);
+		auto plain = echo.pingRequest();
+		plain.setN(5);
+		KJ_REQUIRE(plain.send().wait(ws).getN() == 6);
+		ok("membrane");
+	}
+
+	// Against interop/raw_server.ts only: makeCounter's results name a
+	// capability the cap table cannot give.
+	if (named(only, "returncaps")) {
+		auto call = echo.makeCounterRequest().send();
+		auto early = call.getCounter().incRequest();
+		early.setN(1);
+		auto earlyP = early.send();
+		auto results = call.wait(ws);
+		std::cout << "read: " << outcome([&]() { results.getCounter(); }) << std::endl;
+		std::cout << "after: " << outcome([&]() {
+			auto inc = call.getCounter().incRequest();
+			inc.setN(2);
+			inc.send().wait(ws);
+		}) << std::endl;
+		std::cout << "early: " << outcome([&]() { earlyP.wait(ws); }) << std::endl;
+		ok("returncaps");
+	}
+	if (named(only, "echolocal")) {
+		uint32_t n = 0;
+		std::cout << "read: " << outcome([&]() {
+			auto req = echo.echoCapRequest();
+			req.setCap(kj::heap<CounterImpl>());
+			auto r = req.send().wait(ws);
+			auto inc = r.getCap().incRequest();
+			inc.setN(41);
+			n = inc.send().wait(ws).getN();
+		}) << " n=" << n << std::endl;
+	}
+	if (named(only, "cancelreturn")) {
+		// `getMain` forwards a call a turn later, so `slow` gets a turn on
+		// the wire before it is cancelled.
+		auto first = echo.pingRequest();
+		first.setN(1);
+		first.send().wait(ws);
+		{
+			auto slow = echo.slowRequest().send();
+			client.getIoProvider().getTimer().afterDelay(20 * kj::MILLISECONDS).wait(ws);
+		}
+		uint32_t n = 0;
+		std::cout << "read: " << outcome([&]() {
+			auto ping = echo.pingRequest();
+			ping.setN(7);
+			n = ping.send().wait(ws).getN();
+		}) << " n=" << n << std::endl;
+	}
+	if (named(only, "returncaps") || named(only, "echolocal") || named(only, "cancelreturn")) {
+		// The request objects' destructors queue Finish. Pump it onto the
+		// socket before EzRpcClient is destroyed, or the write is dropped.
+		{
+			auto &timer = client.getIoProvider().getTimer();
+			timer.afterDelay(20 * kj::MILLISECONDS).wait(ws);
+		}
+	}
+
 	if (wants(only, "abort")) {
 		echo.pingRequest().send().wait(ws);
 		bool failed = false;
@@ -470,6 +631,44 @@ void runClient(const std::string &addr, const std::vector<std::string> &only) {
 	}
 }
 
+// `EzRpcServer` offers no `setFlowLimit()`, so a limited server builds
+// each connection's `RpcSystem` itself. One restorer, the one
+// `EzRpcServer` uses, serves one Echo to every connection.
+struct EzRestorer final : public capnp::SturdyRefRestorer<capnp::AnyPointer> {
+	capnp::Capability::Client main = kj::heap<EchoImpl>();
+
+	capnp::Capability::Client restore(capnp::AnyPointer::Reader objectId) override {
+		if (objectId.isNull()) return main;
+		auto name = objectId.getAs<capnp::Text>();
+		KJ_FAIL_REQUIRE("Server exports no such capability.", name) { break; }
+		return nullptr;
+	}
+};
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+struct FlowConnection {
+	kj::Own<kj::AsyncIoStream> stream;
+	capnp::TwoPartyVatNetwork network;
+	capnp::RpcSystem<capnp::rpc::twoparty::VatId> rpc;
+
+	FlowConnection(kj::Own<kj::AsyncIoStream> s, EzRestorer &restorer, size_t limit)
+	    : stream(kj::mv(s)), network(*stream, capnp::rpc::twoparty::Side::SERVER),
+	      rpc(capnp::makeRpcServer(network, restorer)) {
+		rpc.setFlowLimit(limit);
+	}
+};
+#pragma GCC diagnostic pop
+
+kj::Promise<void> acceptFlow(kj::ConnectionReceiver &listener, EzRestorer &restorer, size_t limit) {
+	return listener.accept().then([&listener, &restorer, limit](kj::Own<kj::AsyncIoStream> stream) {
+		auto conn = kj::heap<FlowConnection>(kj::mv(stream), restorer, limit);
+		auto &network = conn->network;
+		network.onDisconnect().attach(kj::mv(conn)).detach([](kj::Exception &&) {});
+		return acceptFlow(listener, restorer, limit);
+	});
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -479,6 +678,14 @@ int main(int argc, char **argv) {
 		capnp::EzRpcServer server(kj::heap<EchoImpl>(), "127.0.0.1:" + port);
 		auto &waitScope = server.getWaitScope();
 		kj::NEVER_DONE.wait(waitScope);
+	}
+	if (mode == "serve-flow") {
+		size_t limit = std::stoul(argc > 3 ? argv[3] : "0");
+		auto io = kj::setupAsyncIo();
+		auto addr = io.provider->getNetwork().parseAddress("127.0.0.1", std::stoi(port)).wait(io.waitScope);
+		auto listener = addr->listen();
+		EzRestorer restorer;
+		acceptFlow(*listener, restorer, limit).wait(io.waitScope);
 	}
 	std::vector<std::string> only;
 	for (int i = 3; i < argc; i++) only.push_back(argv[i]);

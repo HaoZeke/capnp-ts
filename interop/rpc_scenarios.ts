@@ -9,7 +9,16 @@ import { connect, type Socket } from "node:net";
 import { strict as assert } from "node:assert";
 import type { StructBuilder } from "@haozeke/capnp";
 
-import { Client, membrane, savePersistent, RevocablePolicy, RpcError, RpcStream, type RpcConnection } from "../packages/rpc/src/index.ts";
+import {
+  Client,
+  membrane,
+  MemoryTransportPair,
+  savePersistent,
+  RevocablePolicy,
+  RpcConnection,
+  RpcError,
+  RpcStream,
+} from "../packages/rpc/src/index.ts";
 import type { ImportClient } from "../packages/rpc/src/remote.ts";
 import {
   attach,
@@ -52,6 +61,14 @@ const inc = (c: Client, n: number) => c.call(COUNTER_INTERFACE_ID, 0, arg(n), 1,
 const u32 = async (p: PromiseLike<{ content: { getU32(o: number): number } }>, off = 0) =>
   (await p).content.getU32(off);
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const outcome = async (f: () => unknown): Promise<string> => {
+  try {
+    await f();
+    return "ok";
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+};
 
 const scenarios: Record<string, () => Promise<void>> = {
   async ping() {
@@ -63,6 +80,62 @@ const scenarios: Record<string, () => Promise<void>> = {
     const counter = echo(M.makeCounter).pipeline(0);
     assert.equal(await u32(inc(counter, 1)), 2);
     counter.release();
+  },
+
+  async hints() {
+    // capnp-C++ keeps a pipeline-only answer without sending its Return.
+    const only = boot.call(ECHO_INTERFACE_ID, M.makeCounter.ordinal, undefined, 0, 0, {
+      onlyPromisePipeline: true,
+    });
+    const counter = only.pipeline(0);
+    assert.equal(await u32(inc(counter, 1)), 2);
+    counter.release();
+    only.release();
+    assert.equal((conn as unknown as { gotReturnForHighQuestionId: boolean }).gotReturnForHighQuestionId, false);
+    const plain = boot.call(ECHO_INTERFACE_ID, M.ping.ordinal, arg(1), 1, 0, { noPromisePipelining: true });
+    assert.equal(await u32(plain), 2);
+    assert.ok(plain.pipeline(0).isBroken);
+  },
+
+  async tailhint() {
+    // A vat in between tail-calls the C++ peer for a call that only
+    // pipelines; capnp-C++ `directTailCall` would use `sendForPipeline()`.
+    const pair = new MemoryTransportPair();
+    const middle = new RpcConnection(pair.b, {
+      dispatch(_i, _m, _p, _r, ctx) {
+        return ctx.tailCall(boot, ECHO_INTERFACE_ID, M.makeCounter.ordinal, undefined, 0, 0);
+      },
+    });
+    const caller = new RpcConnection(pair.a);
+    const tick = setInterval(() => {
+      caller.pump();
+      middle.pump();
+    }, 1);
+    const peer = conn as unknown as { nextHighQuestionId: number; gotReturnForHighQuestionId: boolean };
+    const highBefore = peer.nextHighQuestionId;
+    try {
+      const front = caller.bootstrap();
+      const only = front.call(ECHO_INTERFACE_ID, M.makeCounter.ordinal, undefined, 0, 0, {
+        onlyPromisePipeline: true,
+      });
+      const counter = only.pipeline(0);
+      assert.equal(await u32(inc(counter, 1)), 2);
+      assert.equal(peer.nextHighQuestionId, highBefore + 1, "the tail call was not pipeline-only");
+      await u32(echo(M.ping, arg(0), 1, 0));
+      assert.equal(peer.gotReturnForHighQuestionId, false);
+      counter.release();
+      only.release();
+      front.release();
+    } finally {
+      clearInterval(tick);
+    }
+  },
+
+  async named() {
+    // capnp-C++ `EzRpcServer` looks a named Bootstrap up in its export map.
+    const missing = conn.restore("nope");
+    await assert.rejects(Promise.resolve(inc(missing, 1)), /Server exports no such capability\.; name = nope/);
+    missing.release();
   },
 
   async nullpipeline() {
@@ -314,21 +387,6 @@ const scenarios: Record<string, () => Promise<void>> = {
     keep.release();
   },
 
-  async levels() {
-    // capnp-C++ implements neither the level 3 handoff nor level 4 Join, and
-    // answers them Unimplemented.
-    const provide = conn.sendProvide(0, { vineId: 0, host: "127.0.0.1", port: 1 }, 5n);
-    const accept = conn.sendAccept(6n);
-    const join = conn.sendJoin(0, 1, 1, 0);
-    for (let i = 0; i < 50 && !(conn.isAnswered(provide) && conn.isAnswered(accept) && conn.isAnswered(join)); i++) {
-      await wait(10);
-    }
-    for (const [name, q] of [["provide", provide], ["accept", accept], ["join", join]] as const) {
-      assert.ok(conn.isFailed(q), `${name} did not fail`);
-      assert.equal(conn.answerError(q)?.type, "unimplemented", `${name}: ${conn.answerError(q)?.message}`);
-    }
-  },
-
   async membrane() {
     // A membrane around the C++ peer's bootstrap capability.
     const policy = new RevocablePolicy();
@@ -375,6 +433,21 @@ const scenarios: Record<string, () => Promise<void>> = {
     assert.equal(await u32(echo(M.ping, arg(5), 1, 0)), 6);
   },
 
+  async levels() {
+    // A two-party peer echoes Provide. Receiving that echo aborts, as
+    // capnp-C++ does for a message it requires. A second connection is
+    // used so the abort does not end the other scenarios.
+    const extra = await dial(20);
+    const other = attach(extra);
+    other.sendProvide(0, { vineId: 0, host: "127.0.0.1", port: 1 }, 5n);
+    for (let i = 0; i < 50 && other.disconnected === undefined; i++) await wait(10);
+    assert.match(
+      other.disconnected?.message ?? "",
+      /Peer did not implement required RPC message type\.; \(uint\)message\.which\(\) = 10/,
+    );
+    extra.destroy();
+  },
+
   async disconnect() {
     const pending = echo(M.slow);
     await u32(echo(M.ping, arg(0), 1, 0));
@@ -384,11 +457,72 @@ const scenarios: Record<string, () => Promise<void>> = {
     await assert.rejects(Promise.resolve(echo(M.ping, arg(1), 1, 0)), (e: RpcError) => e.type === "disconnected");
     assert.ok(conn.disconnected);
   },
+
+  // Against interop/raw_server.ts only: makeCounter's results name a
+  // capability the cap table cannot give.
+  async returncaps() {
+    const call = echo(M.makeCounter);
+    const piped = call.pipeline(0);
+    const earlyP = inc(piped, 1);
+    const early = outcome(() => earlyP);
+    const results = await call;
+    console.log(`read: ${await outcome(() => results.getCap(results.content.getP(0)))}`);
+    console.log(`after: ${await outcome(() => inc(call.pipeline(0), 2))}`);
+    console.log(`early: ${await early}`);
+    // The request objects are done. Drop them so Finish is written before
+    // the socket closes, in the same order capnp-C++ destroys them.
+    earlyP.release();
+    piped.release();
+    call.release();
+  },
+
+  // Against interop/raw_server.ts only: the results name our param cap
+  // as `receiverHosted`.
+  async echolocal() {
+    let n = 0;
+    const read = await outcome(async () => {
+      const local = Client.local(new CounterImpl());
+      const call = echo(
+        M.echoCap,
+        ((p: StructBuilder, b: { setCap(s: StructBuilder, i: number, h: unknown): void }) =>
+          b.setCap(p, 0, local.hook.addRef())) as never,
+        0,
+        1,
+      );
+      const results = await call;
+      const back = new Client(results.getCap(results.content.getP(0)));
+      const r = inc(back, 41);
+      n = await u32(r);
+      r.release();
+      back.release();
+      call.release();
+      local.release();
+    });
+    console.log(`read: ${read} n=${n}`);
+  },
+
+  // Against interop/raw_server.ts only: a cancelled call gets a Return
+  // that does not fit it.
+  async cancelreturn() {
+    const first = echo(M.ping, arg(1), 1, 0);
+    await first;
+    first.release();
+    echo(M.slow).release();
+    let n = 0;
+    const read = await outcome(async () => {
+      const ping = echo(M.ping, arg(7), 1, 0);
+      n = await u32(ping);
+      ping.release();
+    });
+    console.log(`read: ${read} n=${n}`);
+  },
 };
+
+const explicitOnly = new Set(["returncaps", "echolocal", "cancelreturn"]);
 
 let failed = false;
 for (const [name, run] of Object.entries(scenarios)) {
-  if (only.length > 0 && !only.includes(name)) continue;
+  if (only.length > 0 ? !only.includes(name) : explicitOnly.has(name)) continue;
   try {
     await run();
     console.log(`ok ${name}`);
