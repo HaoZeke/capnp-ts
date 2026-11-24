@@ -211,6 +211,11 @@ describe("packed codec", () => {
     expect([...unpack(packed)]).toEqual([...frame]);
   });
 
+  test("pack accepts a large verbatim input", () => {
+    const input = new Uint8Array(8 * 200_000).fill(0xff);
+    expect(unpack(pack(input))).toEqual(input);
+  });
+
   test("multi-segment pack does not run across segment boundaries", () => {
     // Three segments. The first two are all zeros, so one continuous run
     // would swallow both. The packed writer stops the run at each segment.
