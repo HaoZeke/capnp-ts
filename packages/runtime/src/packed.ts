@@ -154,12 +154,15 @@ export function pack(input: Uint8Array, opts?: PackOptions): Uint8Array {
   }
   const ends = framedPieceEnds(source);
   const out: number[] = [];
+  const append = (bytes: readonly number[]): void => {
+    for (const byte of bytes) out.push(byte);
+  };
   if (!ends) {
-    out.push(...packRange(source, 0, source.length));
+    append(packRange(source, 0, source.length));
   } else {
     let start = 0;
     for (const end of ends) {
-      out.push(...packRange(source, start, end));
+      append(packRange(source, start, end));
       start = end;
     }
   }

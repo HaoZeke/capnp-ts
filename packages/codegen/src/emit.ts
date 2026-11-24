@@ -339,19 +339,33 @@ function ownerPtrReceiver(owner: NodeAst, typeName: string): string {
   return `ptr: ${typeName}_Ptr<${names.join(", ")}>`;
 }
 
+function implicitMethodParamName(
+  index: number,
+  method?: MethodAst,
+): string {
+  const direct = method?.implicitParameters?.[index];
+  if (direct !== undefined) return ident(direct) || `M${index}`;
+  return `M${index}`;
+}
+
 /** TypeScript type of one brand binding. Pointer types stay in the Capnp* family. */
-function tsBrandArg(t: TypeAst, ctx: ModuleEmitContext, owner: NodeAst): string {
+function tsBrandArg(
+  t: TypeAst,
+  ctx: ModuleEmitContext,
+  owner: NodeAst,
+  method?: MethodAst,
+): string {
   switch (t.which) {
     case "text":
       return "CapnpText";
     case "data":
       return "CapnpData";
     case "list":
-      return `CapnpList<${tsBrandArg(t.elementType, ctx, owner)}>`;
+      return `CapnpList<${tsBrandArg(t.elementType, ctx, owner, method)}>`;
     case "struct":
-      return ptrTypeForStruct(t.typeId, ctx, t.brand, owner);
+      return ptrTypeForStruct(t.typeId, ctx, t.brand, owner, method);
     case "interface":
-      return ptrTypeForInterface(t.typeId, ctx, t.brand, owner);
+      return ptrTypeForInterface(t.typeId, ctx, t.brand, owner, method);
     case "anyPointer":
       if (t.constraint.which === "parameter") {
         const scopeNode = ctx.byId.get(t.constraint.scopeId);
@@ -361,7 +375,7 @@ function tsBrandArg(t: TypeAst, ctx: ModuleEmitContext, owner: NodeAst): string 
         return ident(raw) || `T${t.constraint.parameterIndex}`;
       }
       if (t.constraint.which === "implicitMethodParameter") {
-        return `M${t.constraint.parameterIndex}`;
+        return implicitMethodParamName(t.constraint.parameterIndex, method);
       }
       switch (t.constraint.anyKind) {
         case "struct":
@@ -383,6 +397,7 @@ function brandArgList(
   brand: BrandAst | undefined,
   ctx: ModuleEmitContext,
   owner: NodeAst,
+  method?: MethodAst,
 ): string {
   const n = ctx.byId.get(typeId);
   const params = n?.parameters;
@@ -400,7 +415,7 @@ function brandArgList(
   const binds = scope.bind ?? [];
   const args = params.map((_, i) => {
     const b = binds[i];
-    return b ? tsBrandArg(b, ctx, owner) : "CapnpAnyPointer";
+    return b ? tsBrandArg(b, ctx, owner, method) : "CapnpAnyPointer";
   });
   return `<${args.join(", ")}>`;
 }
@@ -410,10 +425,11 @@ function ptrTypeForStruct(
   ctx: ModuleEmitContext,
   brand?: BrandAst,
   owner?: NodeAst,
+  method?: MethodAst,
 ): string {
   const n = ctx.byId.get(typeId);
   if (!n) return "Ptr";
-  const args = owner ? brandArgList(typeId, brand, ctx, owner) : "";
+  const args = owner ? brandArgList(typeId, brand, ctx, owner, method) : "";
   const external = ctx.externalAliasNames.get(typeId);
   if (external) return external + args;
   const base = `${shortTypeName(n.displayName)}_Ptr`;
@@ -428,10 +444,11 @@ function ptrTypeForInterface(
   ctx: ModuleEmitContext,
   brand?: BrandAst,
   owner?: NodeAst,
+  method?: MethodAst,
 ): string {
   const n = ctx.byId.get(typeId);
   if (!n) return "Ptr";
-  const args = owner ? brandArgList(typeId, brand, ctx, owner) : "";
+  const args = owner ? brandArgList(typeId, brand, ctx, owner, method) : "";
   const external = ctx.externalAliasNames.get(typeId);
   if (external) return external + args;
   const base = `${shortTypeName(n.displayName)}_Capability`;
@@ -506,10 +523,11 @@ function structAliasType(
   brand: BrandAst | undefined,
   ctx: ModuleEmitContext,
   owner: NodeAst,
+  method?: MethodAst,
 ): string {
   const n = ctx.byId.get(id);
   if (!n || n.which !== "struct") return "Ptr";
-  const rendered = ptrTypeForStruct(id, ctx, brand, owner);
+  const rendered = ptrTypeForStruct(id, ctx, brand, owner, method);
   if (rendered.includes("<")) return rendered;
   const names = effectiveParamNames(n, ctx);
   if (names.length === 0) return rendered;
@@ -1209,6 +1227,7 @@ function emitInterface(
       m.paramBrand,
       ctx,
       node,
+      m,
     );
     lines.push(
       `  abstract ${m.name}${clause}(params: ${paramsType}, results: StructBuilder): void;`,

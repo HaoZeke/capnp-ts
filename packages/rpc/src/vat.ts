@@ -1303,10 +1303,14 @@ export class RpcConnection implements RemoteHost {
     other.resultsClaimed = true;
     if (q.finished) {
       other.call.release();
+      this.sendRedirectReturn(otherAnswerId, other);
       return;
     }
     other.call.result.onSettled((s) => {
-      if (q.finished) return;
+      if (q.finished) {
+        if (q.call.result.state === "pending") q.call.result.resolve(emptyPayload());
+        return;
+      }
       if (s.state !== "ok") q.call.result.reject(s.error);
       else {
         q.failed = false;
@@ -1565,9 +1569,28 @@ export class RpcConnection implements RemoteHost {
     this.completeAnswer(questionId, answer, answer.call.result);
   }
 
+  private sendRedirectReturn(questionId: number, answer: AnswerState): void {
+    if (answer.returned) return;
+    answer.returned = true;
+    if (answer.finished && this.answers.get(questionId) === answer) {
+      this.answers.delete(questionId);
+    }
+    if (this.gone !== undefined) return;
+    const { b, root } = newMessage(Message.return);
+    const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
+    ret.setU32(OFF.returnAnswerId, questionId);
+    ret.setU16(OFF.returnUnion, Return.resultsSentElsewhere);
+    ret.setBool(OFF.returnReleaseParamCaps, false, true);
+    this.transport.send(b.toFlat());
+  }
+
   private completeAnswer(questionId: number, answer: AnswerState, s: Settle<Payload>): void {
     if (answer.tailSent) {
       if (answer.finished) this.answers.delete(questionId);
+      return;
+    }
+    if (answer.resultsElsewhere) {
+      this.sendRedirectReturn(questionId, answer);
       return;
     }
     if (answer.onlyPromisePipeline) {
@@ -1581,17 +1604,6 @@ export class RpcConnection implements RemoteHost {
     const finished = answer.finished;
     if (finished) this.answers.delete(questionId);
     if (this.gone !== undefined) return;
-    if (answer.resultsElsewhere) {
-      // Even when the call failed or was canceled, a sendResultsTo.yourself
-      // Return must be resultsSentElsewhere so the peer does not abort.
-      const { b, root } = newMessage(Message.return);
-      const ret = root.initStruct(0, RETURN_DWORDS, RETURN_PWORDS);
-      ret.setU32(OFF.returnAnswerId, questionId);
-      ret.setU16(OFF.returnUnion, Return.resultsSentElsewhere);
-      ret.setBool(OFF.returnReleaseParamCaps, false, true);
-      this.transport.send(b.toFlat());
-      return;
-    }
     if (finished) {
       // The caller sent Finish before we returned; reply Return.canceled so
       // it can release the question table entry without waiting forever.

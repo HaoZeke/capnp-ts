@@ -485,6 +485,11 @@ export class PromiseClient extends RefHook implements RpcClientHook {
   protected dispose(): void {
     this.disposed = true;
     if (this.importId !== undefined) this.host.promiseDropped(this.importId, this);
+    if (!this.resolved) {
+      this.more.reject(
+        this.host.disconnected ?? new RpcError("Promise client was released", "disconnected"),
+      );
+    }
     if (this.resolved) this.cap.release();
     else (this.cap as ClientHook).release();
   }

@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { formatType, walkCgr } from "../src/cgr-walk.ts";
+import { type CgrAst, formatType, walkCgr } from "../src/cgr-walk.ts";
+import { emitModuleSource } from "../src/emit.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixturesDir = join(here, "fixtures");
@@ -98,5 +99,122 @@ describe("generic parameters and brands", () => {
       throw new Error("expected unconstrained AnyPointer in kitchen fixture");
     }
     expect(stuff.constraint.anyKind).toBe("anyPointer");
+  });
+
+  test("method brands use declared implicit parameter names through direct and nested Box", () => {
+    const ast = {
+      nodes: [
+        {
+          id: 1n,
+          displayName: "test.capnp:Box",
+          displayNamePrefixLength: 12,
+          scopeId: 0n,
+          which: "struct",
+          whichTag: 1,
+          nestedNodes: [],
+          parameters: ["T"],
+          struct: {
+            dataWordCount: 0,
+            pointerCount: 0,
+            isGroup: false,
+            discriminantCount: 0,
+            discriminantOffset: 0,
+            fields: [],
+          },
+        },
+        {
+          id: 2n,
+          displayName: "test.capnp:Service",
+          displayNamePrefixLength: 12,
+          scopeId: 0n,
+          which: "interface",
+          whichTag: 3,
+          nestedNodes: [],
+          methods: [
+            {
+              name: "call",
+              ordinal: 0,
+              paramStructType: 1n,
+              resultStructType: 3n,
+              paramBrand: {
+                scopes: [
+                  {
+                    scopeId: 1n,
+                    which: "bind",
+                    bind: [
+                      {
+                        which: "struct",
+                        typeId: 1n,
+                        brand: {
+                          scopes: [
+                            {
+                              scopeId: 1n,
+                              which: "bind",
+                              bind: [
+                                {
+                                  which: "anyPointer",
+                                  constraint: {
+                                    which: "implicitMethodParameter",
+                                    parameterIndex: 0,
+                                  },
+                                },
+                              ],
+                            },
+                          ],
+                        },
+                      },
+                    ],
+                  },
+                ],
+              },
+              implicitParameters: ["Value"],
+            },
+          ],
+        },
+        {
+          id: 3n,
+          displayName: "test.capnp:Service.call$results",
+          displayNamePrefixLength: 12,
+          scopeId: 2n,
+          which: "struct",
+          whichTag: 1,
+          nestedNodes: [],
+          struct: {
+            dataWordCount: 0,
+            pointerCount: 0,
+            isGroup: false,
+            discriminantCount: 0,
+            discriminantOffset: 0,
+            fields: [],
+          },
+        },
+      ],
+      requestedFiles: [],
+    } as CgrAst;
+
+    const source = emitModuleSource(ast, "test.capnp");
+    expect(source).toContain("params: Box_Ptr<Box_Ptr<Value>>");
+    expect(source).not.toContain("Box_Ptr<Box_Ptr<M0>>");
+
+    const singleLevelAst = structuredClone(ast);
+    const singleLevelBind = (
+      singleLevelAst as unknown as {
+        nodes: Array<{
+          methods: Array<{
+            paramBrand: { scopes: Array<{ bind: unknown[] }> };
+          }>;
+        }>;
+      }
+    ).nodes[1].methods[0].paramBrand.scopes[0].bind;
+    singleLevelBind[0] = {
+      which: "anyPointer",
+      constraint: {
+        which: "implicitMethodParameter",
+        parameterIndex: 0,
+      },
+    };
+    const singleLevelSource = emitModuleSource(singleLevelAst, "test.capnp");
+    expect(singleLevelSource).toContain("params: Box_Ptr<Value>");
+    expect(singleLevelSource).not.toContain("Box_Ptr<M0>");
   });
 });
