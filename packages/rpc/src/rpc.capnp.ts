@@ -8,7 +8,7 @@
  * Enums are const maps (Bun strip-safe). UInt64/Int64 use getU64/bigint.
  */
 
-import type { Ptr } from "@haozeke/capnp";
+import type { Ptr, StructBuilder } from "@haozeke/capnp";
 
 export const __capnpcTsMeta = {
   schemaPath: "rpc.capnp",
@@ -17,6 +17,13 @@ export const __capnpcTsMeta = {
   fileId: 0xb312981b2552a250n,
   emittedNodes: 21,
 } as const;
+
+export const FILE_APPLIED_ANNOTATIONS = [{ id: 0xb9c6f99ebf805f2cn, value: "capnp::rpc" }] as const;
+
+export type CapnpAnyPointer = Ptr;
+export type CapnpAnyStruct = Ptr;
+export type CapnpAnyList = Ptr;
+export type CapnpCapability = Ptr;
 
 /** Enum rpc.capnp:Exception.Type (const map; no TS enum keyword). */
 export const Exception_Type = {
@@ -32,6 +39,7 @@ export const MESSAGE_DWORDS = 1;
 export const MESSAGE_PWORDS = 1;
 export const Message_dataWordCount = 1;
 export const Message_pointerCount = 1;
+export type Message_Ptr = Ptr;
 /** Union discriminant byte offset (u16). */
 export const Message_discriminantOffset = 0;
 export function Message_which(ptr: Ptr): number {
@@ -55,60 +63,190 @@ export const Message = {
 } as const;
 export type Message = (typeof Message)[keyof typeof Message];
 
-export function Message_getUnimplemented(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Message_getUnimplemented(ptr: Ptr): Message_Ptr {
+  return ptr.getP(0, "struct") as Message_Ptr;
 }
 
-export function Message_getAbort(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Message_setUnimplemented(ptr: StructBuilder, value: Message_Ptr): void {
+  ptr.setU16(0, 0);
+  ptr.setP(0, value);
 }
 
-export function Message_getCall(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Message_initUnimplemented(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(0, 0);
+  return ptr.initStruct(0, 1, 1);
 }
 
-export function Message_getReturn(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Message_getAbort(ptr: Ptr): Exception_Ptr {
+  return ptr.getP(0, "struct") as Exception_Ptr;
 }
 
-export function Message_getFinish(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Message_setAbort(ptr: StructBuilder, value: Exception_Ptr): void {
+  ptr.setU16(0, 1);
+  ptr.setP(0, value);
 }
 
-export function Message_getResolve(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Message_initAbort(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(0, 1);
+  return ptr.initStruct(0, 1, 2);
 }
 
-export function Message_getRelease(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Message_getCall(ptr: Ptr): Call_Ptr {
+  return ptr.getP(0, "struct") as Call_Ptr;
 }
 
-export function Message_getObsoleteSave(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Message_setCall(ptr: StructBuilder, value: Call_Ptr): void {
+  ptr.setU16(0, 2);
+  ptr.setP(0, value);
 }
 
-export function Message_getBootstrap(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Message_initCall(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(0, 2);
+  return ptr.initStruct(0, 3, 3);
 }
 
-export function Message_getObsoleteDelete(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Message_getReturn(ptr: Ptr): Return_Ptr {
+  return ptr.getP(0, "struct") as Return_Ptr;
 }
 
-export function Message_getProvide(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Message_setReturn(ptr: StructBuilder, value: Return_Ptr): void {
+  ptr.setU16(0, 3);
+  ptr.setP(0, value);
 }
 
-export function Message_getAccept(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Message_initReturn(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(0, 3);
+  return ptr.initStruct(0, 2, 1);
 }
 
-export function Message_getJoin(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Message_getFinish(ptr: Ptr): Finish_Ptr {
+  return ptr.getP(0, "struct") as Finish_Ptr;
 }
 
-export function Message_getDisembargo(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Message_setFinish(ptr: StructBuilder, value: Finish_Ptr): void {
+  ptr.setU16(0, 4);
+  ptr.setP(0, value);
+}
+
+export function Message_initFinish(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(0, 4);
+  return ptr.initStruct(0, 1, 0);
+}
+
+export function Message_getResolve(ptr: Ptr): Resolve_Ptr {
+  return ptr.getP(0, "struct") as Resolve_Ptr;
+}
+
+export function Message_setResolve(ptr: StructBuilder, value: Resolve_Ptr): void {
+  ptr.setU16(0, 5);
+  ptr.setP(0, value);
+}
+
+export function Message_initResolve(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(0, 5);
+  return ptr.initStruct(0, 1, 1);
+}
+
+export function Message_getRelease(ptr: Ptr): Release_Ptr {
+  return ptr.getP(0, "struct") as Release_Ptr;
+}
+
+export function Message_setRelease(ptr: StructBuilder, value: Release_Ptr): void {
+  ptr.setU16(0, 6);
+  ptr.setP(0, value);
+}
+
+export function Message_initRelease(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(0, 6);
+  return ptr.initStruct(0, 1, 0);
+}
+
+export function Message_getObsoleteSave(ptr: Ptr): CapnpAnyPointer {
+  return ptr.getP(0) as CapnpAnyPointer;
+}
+
+export function Message_setObsoleteSave(ptr: StructBuilder, value: CapnpAnyPointer): void {
+  ptr.setU16(0, 7);
+  ptr.setP(0, value);
+}
+
+export function Message_getBootstrap(ptr: Ptr): Bootstrap_Ptr {
+  return ptr.getP(0, "struct") as Bootstrap_Ptr;
+}
+
+export function Message_setBootstrap(ptr: StructBuilder, value: Bootstrap_Ptr): void {
+  ptr.setU16(0, 8);
+  ptr.setP(0, value);
+}
+
+export function Message_initBootstrap(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(0, 8);
+  return ptr.initStruct(0, 1, 1);
+}
+
+export function Message_getObsoleteDelete(ptr: Ptr): CapnpAnyPointer {
+  return ptr.getP(0) as CapnpAnyPointer;
+}
+
+export function Message_setObsoleteDelete(ptr: StructBuilder, value: CapnpAnyPointer): void {
+  ptr.setU16(0, 9);
+  ptr.setP(0, value);
+}
+
+export function Message_getProvide(ptr: Ptr): Provide_Ptr {
+  return ptr.getP(0, "struct") as Provide_Ptr;
+}
+
+export function Message_setProvide(ptr: StructBuilder, value: Provide_Ptr): void {
+  ptr.setU16(0, 10);
+  ptr.setP(0, value);
+}
+
+export function Message_initProvide(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(0, 10);
+  return ptr.initStruct(0, 1, 2);
+}
+
+export function Message_getAccept(ptr: Ptr): Accept_Ptr {
+  return ptr.getP(0, "struct") as Accept_Ptr;
+}
+
+export function Message_setAccept(ptr: StructBuilder, value: Accept_Ptr): void {
+  ptr.setU16(0, 11);
+  ptr.setP(0, value);
+}
+
+export function Message_initAccept(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(0, 11);
+  return ptr.initStruct(0, 1, 1);
+}
+
+export function Message_getJoin(ptr: Ptr): Join_Ptr {
+  return ptr.getP(0, "struct") as Join_Ptr;
+}
+
+export function Message_setJoin(ptr: StructBuilder, value: Join_Ptr): void {
+  ptr.setU16(0, 12);
+  ptr.setP(0, value);
+}
+
+export function Message_initJoin(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(0, 12);
+  return ptr.initStruct(0, 1, 2);
+}
+
+export function Message_getDisembargo(ptr: Ptr): Disembargo_Ptr {
+  return ptr.getP(0, "struct") as Disembargo_Ptr;
+}
+
+export function Message_setDisembargo(ptr: StructBuilder, value: Disembargo_Ptr): void {
+  ptr.setU16(0, 13);
+  ptr.setP(0, value);
+}
+
+export function Message_initDisembargo(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(0, 13);
+  return ptr.initStruct(0, 1, 1);
 }
 
 /** Struct rpc.capnp:Exception. */
@@ -116,25 +254,46 @@ export const EXCEPTION_DWORDS = 1;
 export const EXCEPTION_PWORDS = 2;
 export const Exception_dataWordCount = 1;
 export const Exception_pointerCount = 2;
+export type Exception_Ptr = Ptr;
 
 export function Exception_getReason(ptr: Ptr): string {
   return ptr.getText(0);
+}
+
+export function Exception_setReason(ptr: StructBuilder, value: string): void {
+  ptr.setText(0, value);
 }
 
 export function Exception_getObsoleteIsCallersFault(ptr: Ptr, dflt = false): boolean {
   return ptr.getBool(0, dflt);
 }
 
+export function Exception_setObsoleteIsCallersFault(ptr: StructBuilder, value: boolean, dflt = false): void {
+  ptr.setBool(0, value, dflt);
+}
+
 export function Exception_getObsoleteDurability(ptr: Ptr, dflt = 0): number {
   return ptr.getU16(2, dflt);
+}
+
+export function Exception_setObsoleteDurability(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU16(2, value, dflt);
 }
 
 export function Exception_getType(ptr: Ptr, dflt = 0): number {
   return ptr.getU16(4, dflt);
 }
 
+export function Exception_setType(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU16(4, value, dflt);
+}
+
 export function Exception_getTrace(ptr: Ptr): string {
   return ptr.getText(1);
+}
+
+export function Exception_setTrace(ptr: StructBuilder, value: string): void {
+  ptr.setText(1, value);
 }
 
 /** Struct rpc.capnp:Call. */
@@ -142,26 +301,54 @@ export const CALL_DWORDS = 3;
 export const CALL_PWORDS = 3;
 export const Call_dataWordCount = 3;
 export const Call_pointerCount = 3;
+export type Call_Ptr = Ptr;
 
 export function Call_getQuestionId(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
 }
 
-export function Call_getTarget(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Call_setQuestionId(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
+export function Call_getTarget(ptr: Ptr): MessageTarget_Ptr {
+  return ptr.getP(0, "struct") as MessageTarget_Ptr;
+}
+
+export function Call_setTarget(ptr: StructBuilder, value: MessageTarget_Ptr): void {
+  ptr.setP(0, value);
+}
+
+export function Call_initTarget(ptr: StructBuilder): StructBuilder {
+  return ptr.initStruct(0, 1, 1);
 }
 
 export function Call_getInterfaceId(ptr: Ptr, dflt: bigint = 0n): bigint {
   return ptr.getU64(8, dflt);
 }
 
+export function Call_setInterfaceId(ptr: StructBuilder, value: bigint, dflt: bigint = 0n): void {
+  ptr.setU64(8, value, dflt);
+}
+
 export function Call_getMethodId(ptr: Ptr, dflt = 0): number {
   return ptr.getU16(4, dflt);
 }
 
-export function Call_getParams(ptr: Ptr): Ptr {
-  // capnp-C++ `call.getParams()` is a struct read. A list aborts the connection.
-  return ptr.getP(1, "struct");
+export function Call_setMethodId(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU16(4, value, dflt);
+}
+
+export function Call_getParams(ptr: Ptr): Payload_Ptr {
+  return ptr.getP(1, "struct") as Payload_Ptr;
+}
+
+export function Call_setParams(ptr: StructBuilder, value: Payload_Ptr): void {
+  ptr.setP(1, value);
+}
+
+export function Call_initParams(ptr: StructBuilder): StructBuilder {
+  return ptr.initStruct(1, 0, 2);
 }
 
 /** Group field `sendResultsTo` — same wire Ptr as parent; see group node helpers. */
@@ -169,16 +356,34 @@ export function Call_getSendResultsTo(ptr: Ptr): Ptr {
   return ptr;
 }
 
+export function Call_initSendResultsTo(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(6, 0);
+  ptr.clearPointer(2);
+  return ptr;
+}
+
 export function Call_getAllowThirdPartyTailCall(ptr: Ptr, dflt = false): boolean {
   return ptr.getBool(128, dflt);
+}
+
+export function Call_setAllowThirdPartyTailCall(ptr: StructBuilder, value: boolean, dflt = false): void {
+  ptr.setBool(128, value, dflt);
 }
 
 export function Call_getNoPromisePipelining(ptr: Ptr, dflt = false): boolean {
   return ptr.getBool(129, dflt);
 }
 
+export function Call_setNoPromisePipelining(ptr: StructBuilder, value: boolean, dflt = false): void {
+  ptr.setBool(129, value, dflt);
+}
+
 export function Call_getOnlyPromisePipeline(ptr: Ptr, dflt = false): boolean {
   return ptr.getBool(130, dflt);
+}
+
+export function Call_setOnlyPromisePipeline(ptr: StructBuilder, value: boolean, dflt = false): void {
+  ptr.setBool(130, value, dflt);
 }
 
 /** Struct rpc.capnp:Return. */
@@ -186,6 +391,7 @@ export const RETURN_DWORDS = 2;
 export const RETURN_PWORDS = 1;
 export const Return_dataWordCount = 2;
 export const Return_pointerCount = 1;
+export type Return_Ptr = Ptr;
 /** Union discriminant byte offset (u16). */
 export const Return_discriminantOffset = 6;
 export function Return_which(ptr: Ptr): number {
@@ -205,28 +411,78 @@ export function Return_getAnswerId(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
 }
 
+export function Return_setAnswerId(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
 export function Return_getReleaseParamCaps(ptr: Ptr, dflt = true): boolean {
   return ptr.getBool(32, dflt);
 }
 
-export function Return_getResults(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Return_setReleaseParamCaps(ptr: StructBuilder, value: boolean, dflt = true): void {
+  ptr.setBool(32, value, dflt);
 }
 
-export function Return_getException(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Return_getResults(ptr: Ptr): Payload_Ptr {
+  return ptr.getP(0, "struct") as Payload_Ptr;
+}
+
+export function Return_setResults(ptr: StructBuilder, value: Payload_Ptr): void {
+  ptr.setU16(6, 0);
+  ptr.setP(0, value);
+}
+
+export function Return_initResults(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(6, 0);
+  return ptr.initStruct(0, 0, 2);
+}
+
+export function Return_getException(ptr: Ptr): Exception_Ptr {
+  return ptr.getP(0, "struct") as Exception_Ptr;
+}
+
+export function Return_setException(ptr: StructBuilder, value: Exception_Ptr): void {
+  ptr.setU16(6, 1);
+  ptr.setP(0, value);
+}
+
+export function Return_initException(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(6, 1);
+  return ptr.initStruct(0, 1, 2);
+}
+
+export function Return_setCanceled(ptr: StructBuilder): void {
+  ptr.setU16(6, 2);
+}
+
+export function Return_setResultsSentElsewhere(ptr: StructBuilder): void {
+  ptr.setU16(6, 3);
 }
 
 export function Return_getTakeFromOtherQuestion(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(8, dflt);
 }
 
-export function Return_getAcceptFromThirdParty(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Return_setTakeFromOtherQuestion(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU16(6, 4);
+  ptr.setU32(8, value, dflt);
+}
+
+export function Return_getAcceptFromThirdParty(ptr: Ptr): CapnpAnyPointer {
+  return ptr.getP(0) as CapnpAnyPointer;
+}
+
+export function Return_setAcceptFromThirdParty(ptr: StructBuilder, value: CapnpAnyPointer): void {
+  ptr.setU16(6, 5);
+  ptr.setP(0, value);
 }
 
 export function Return_getNoFinishNeeded(ptr: Ptr, dflt = false): boolean {
   return ptr.getBool(33, dflt);
+}
+
+export function Return_setNoFinishNeeded(ptr: StructBuilder, value: boolean, dflt = false): void {
+  ptr.setBool(33, value, dflt);
 }
 
 /** Struct rpc.capnp:Finish. */
@@ -234,17 +490,30 @@ export const FINISH_DWORDS = 1;
 export const FINISH_PWORDS = 0;
 export const Finish_dataWordCount = 1;
 export const Finish_pointerCount = 0;
+export type Finish_Ptr = Ptr;
 
 export function Finish_getQuestionId(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
+}
+
+export function Finish_setQuestionId(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
 }
 
 export function Finish_getReleaseResultCaps(ptr: Ptr, dflt = true): boolean {
   return ptr.getBool(32, dflt);
 }
 
+export function Finish_setReleaseResultCaps(ptr: StructBuilder, value: boolean, dflt = true): void {
+  ptr.setBool(32, value, dflt);
+}
+
 export function Finish_getRequireEarlyCancellationWorkaround(ptr: Ptr, dflt = true): boolean {
   return ptr.getBool(33, dflt);
+}
+
+export function Finish_setRequireEarlyCancellationWorkaround(ptr: StructBuilder, value: boolean, dflt = true): void {
+  ptr.setBool(33, value, dflt);
 }
 
 /** Struct rpc.capnp:Resolve. */
@@ -252,6 +521,7 @@ export const RESOLVE_DWORDS = 1;
 export const RESOLVE_PWORDS = 1;
 export const Resolve_dataWordCount = 1;
 export const Resolve_pointerCount = 1;
+export type Resolve_Ptr = Ptr;
 /** Union discriminant byte offset (u16). */
 export const Resolve_discriminantOffset = 4;
 export function Resolve_which(ptr: Ptr): number {
@@ -267,12 +537,36 @@ export function Resolve_getPromiseId(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
 }
 
-export function Resolve_getCap(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Resolve_setPromiseId(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
 }
 
-export function Resolve_getException(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Resolve_getCap(ptr: Ptr): CapDescriptor_Ptr {
+  return ptr.getP(0, "struct") as CapDescriptor_Ptr;
+}
+
+export function Resolve_setCap(ptr: StructBuilder, value: CapDescriptor_Ptr): void {
+  ptr.setU16(4, 0);
+  ptr.setP(0, value);
+}
+
+export function Resolve_initCap(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(4, 0);
+  return ptr.initStruct(0, 1, 1);
+}
+
+export function Resolve_getException(ptr: Ptr): Exception_Ptr {
+  return ptr.getP(0, "struct") as Exception_Ptr;
+}
+
+export function Resolve_setException(ptr: StructBuilder, value: Exception_Ptr): void {
+  ptr.setU16(4, 1);
+  ptr.setP(0, value);
+}
+
+export function Resolve_initException(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(4, 1);
+  return ptr.initStruct(0, 1, 2);
 }
 
 /** Struct rpc.capnp:Release. */
@@ -280,13 +574,22 @@ export const RELEASE_DWORDS = 1;
 export const RELEASE_PWORDS = 0;
 export const Release_dataWordCount = 1;
 export const Release_pointerCount = 0;
+export type Release_Ptr = Ptr;
 
 export function Release_getId(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
 }
 
+export function Release_setId(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
 export function Release_getReferenceCount(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(4, dflt);
+}
+
+export function Release_setReferenceCount(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(4, value, dflt);
 }
 
 /** Struct rpc.capnp:Bootstrap. */
@@ -294,13 +597,22 @@ export const BOOTSTRAP_DWORDS = 1;
 export const BOOTSTRAP_PWORDS = 1;
 export const Bootstrap_dataWordCount = 1;
 export const Bootstrap_pointerCount = 1;
+export type Bootstrap_Ptr = Ptr;
 
 export function Bootstrap_getQuestionId(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
 }
 
-export function Bootstrap_getDeprecatedObjectId(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Bootstrap_setQuestionId(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
+export function Bootstrap_getDeprecatedObjectId(ptr: Ptr): CapnpAnyPointer {
+  return ptr.getP(0) as CapnpAnyPointer;
+}
+
+export function Bootstrap_setDeprecatedObjectId(ptr: StructBuilder, value: CapnpAnyPointer): void {
+  ptr.setP(0, value);
 }
 
 /** Struct rpc.capnp:Provide. */
@@ -308,17 +620,34 @@ export const PROVIDE_DWORDS = 1;
 export const PROVIDE_PWORDS = 2;
 export const Provide_dataWordCount = 1;
 export const Provide_pointerCount = 2;
+export type Provide_Ptr = Ptr;
 
 export function Provide_getQuestionId(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
 }
 
-export function Provide_getTarget(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Provide_setQuestionId(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
 }
 
-export function Provide_getRecipient(ptr: Ptr): Ptr {
-  return ptr.getP(1);
+export function Provide_getTarget(ptr: Ptr): MessageTarget_Ptr {
+  return ptr.getP(0, "struct") as MessageTarget_Ptr;
+}
+
+export function Provide_setTarget(ptr: StructBuilder, value: MessageTarget_Ptr): void {
+  ptr.setP(0, value);
+}
+
+export function Provide_initTarget(ptr: StructBuilder): StructBuilder {
+  return ptr.initStruct(0, 1, 1);
+}
+
+export function Provide_getRecipient(ptr: Ptr): CapnpAnyPointer {
+  return ptr.getP(1) as CapnpAnyPointer;
+}
+
+export function Provide_setRecipient(ptr: StructBuilder, value: CapnpAnyPointer): void {
+  ptr.setP(1, value);
 }
 
 /** Struct rpc.capnp:Accept. */
@@ -326,17 +655,30 @@ export const ACCEPT_DWORDS = 1;
 export const ACCEPT_PWORDS = 1;
 export const Accept_dataWordCount = 1;
 export const Accept_pointerCount = 1;
+export type Accept_Ptr = Ptr;
 
 export function Accept_getQuestionId(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
 }
 
-export function Accept_getProvision(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Accept_setQuestionId(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
+export function Accept_getProvision(ptr: Ptr): CapnpAnyPointer {
+  return ptr.getP(0) as CapnpAnyPointer;
+}
+
+export function Accept_setProvision(ptr: StructBuilder, value: CapnpAnyPointer): void {
+  ptr.setP(0, value);
 }
 
 export function Accept_getEmbargo(ptr: Ptr, dflt = false): boolean {
   return ptr.getBool(32, dflt);
+}
+
+export function Accept_setEmbargo(ptr: StructBuilder, value: boolean, dflt = false): void {
+  ptr.setBool(32, value, dflt);
 }
 
 /** Struct rpc.capnp:Join. */
@@ -344,17 +686,34 @@ export const JOIN_DWORDS = 1;
 export const JOIN_PWORDS = 2;
 export const Join_dataWordCount = 1;
 export const Join_pointerCount = 2;
+export type Join_Ptr = Ptr;
 
 export function Join_getQuestionId(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
 }
 
-export function Join_getTarget(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Join_setQuestionId(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
 }
 
-export function Join_getKeyPart(ptr: Ptr): Ptr {
-  return ptr.getP(1);
+export function Join_getTarget(ptr: Ptr): MessageTarget_Ptr {
+  return ptr.getP(0, "struct") as MessageTarget_Ptr;
+}
+
+export function Join_setTarget(ptr: StructBuilder, value: MessageTarget_Ptr): void {
+  ptr.setP(0, value);
+}
+
+export function Join_initTarget(ptr: StructBuilder): StructBuilder {
+  return ptr.initStruct(0, 1, 1);
+}
+
+export function Join_getKeyPart(ptr: Ptr): CapnpAnyPointer {
+  return ptr.getP(1) as CapnpAnyPointer;
+}
+
+export function Join_setKeyPart(ptr: StructBuilder, value: CapnpAnyPointer): void {
+  ptr.setP(1, value);
 }
 
 /** Struct rpc.capnp:Disembargo. */
@@ -362,13 +721,30 @@ export const DISEMBARGO_DWORDS = 1;
 export const DISEMBARGO_PWORDS = 1;
 export const Disembargo_dataWordCount = 1;
 export const Disembargo_pointerCount = 1;
+export type Disembargo_Ptr = Ptr;
 
-export function Disembargo_getTarget(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Disembargo_getTarget(ptr: Ptr): MessageTarget_Ptr {
+  return ptr.getP(0, "struct") as MessageTarget_Ptr;
+}
+
+export function Disembargo_setTarget(ptr: StructBuilder, value: MessageTarget_Ptr): void {
+  ptr.setP(0, value);
+}
+
+export function Disembargo_initTarget(ptr: StructBuilder): StructBuilder {
+  return ptr.initStruct(0, 1, 1);
 }
 
 /** Group field `context` — same wire Ptr as parent; see group node helpers. */
 export function Disembargo_getContext(ptr: Ptr): Ptr {
+  return ptr;
+}
+
+export function Disembargo_initContext(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(4, 0);
+  ptr.setU32(0, 0);
+  ptr.setU32(0, 0);
+  ptr.setU32(0, 0);
   return ptr;
 }
 
@@ -377,6 +753,7 @@ export const CALL_SEND_RESULTS_TO_DWORDS = 3;
 export const CALL_SEND_RESULTS_TO_PWORDS = 3;
 export const Call_sendResultsTo_dataWordCount = 3;
 export const Call_sendResultsTo_pointerCount = 3;
+export type Call_sendResultsTo_Ptr = Ptr;
 /** Union discriminant byte offset (u16). */
 export const Call_sendResultsTo_discriminantOffset = 6;
 export function Call_sendResultsTo_which(ptr: Ptr): number {
@@ -389,8 +766,21 @@ export const Call_sendResultsTo = {
 } as const;
 export type Call_sendResultsTo = (typeof Call_sendResultsTo)[keyof typeof Call_sendResultsTo];
 
-export function Call_sendResultsTo_getThirdParty(ptr: Ptr): Ptr {
-  return ptr.getP(2);
+export function Call_sendResultsTo_setCaller(ptr: StructBuilder): void {
+  ptr.setU16(6, 0);
+}
+
+export function Call_sendResultsTo_setYourself(ptr: StructBuilder): void {
+  ptr.setU16(6, 1);
+}
+
+export function Call_sendResultsTo_getThirdParty(ptr: Ptr): CapnpAnyPointer {
+  return ptr.getP(2) as CapnpAnyPointer;
+}
+
+export function Call_sendResultsTo_setThirdParty(ptr: StructBuilder, value: CapnpAnyPointer): void {
+  ptr.setU16(6, 2);
+  ptr.setP(2, value);
 }
 
 /** Struct rpc.capnp:MessageTarget. */
@@ -398,6 +788,7 @@ export const MESSAGE_TARGET_DWORDS = 1;
 export const MESSAGE_TARGET_PWORDS = 1;
 export const MessageTarget_dataWordCount = 1;
 export const MessageTarget_pointerCount = 1;
+export type MessageTarget_Ptr = Ptr;
 /** Union discriminant byte offset (u16). */
 export const MessageTarget_discriminantOffset = 4;
 export function MessageTarget_which(ptr: Ptr): number {
@@ -413,8 +804,23 @@ export function MessageTarget_getImportedCap(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
 }
 
-export function MessageTarget_getPromisedAnswer(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function MessageTarget_setImportedCap(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU16(4, 0);
+  ptr.setU32(0, value, dflt);
+}
+
+export function MessageTarget_getPromisedAnswer(ptr: Ptr): PromisedAnswer_Ptr {
+  return ptr.getP(0, "struct") as PromisedAnswer_Ptr;
+}
+
+export function MessageTarget_setPromisedAnswer(ptr: StructBuilder, value: PromisedAnswer_Ptr): void {
+  ptr.setU16(4, 1);
+  ptr.setP(0, value);
+}
+
+export function MessageTarget_initPromisedAnswer(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(4, 1);
+  return ptr.initStruct(0, 1, 1);
 }
 
 /** Struct rpc.capnp:Payload. */
@@ -422,21 +828,34 @@ export const PAYLOAD_DWORDS = 0;
 export const PAYLOAD_PWORDS = 2;
 export const Payload_dataWordCount = 0;
 export const Payload_pointerCount = 2;
+export type Payload_Ptr = Ptr;
 
-export function Payload_getContent(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function Payload_getContent(ptr: Ptr): CapnpAnyPointer {
+  return ptr.getP(0) as CapnpAnyPointer;
+}
+
+export function Payload_setContent(ptr: StructBuilder, value: CapnpAnyPointer): void {
+  ptr.setP(0, value);
 }
 
 export function Payload_getCapTable(ptr: Ptr): Ptr {
-  return ptr.getP(1);
+  return ptr.getP(1) as Ptr;
 }
 
 export function Payload_getCapTableLen(ptr: Ptr): number {
-  return ptr.getP(1).listLen();
+  return Payload_getCapTable(ptr).listLen();
 }
 
-export function Payload_getCapTableAt(ptr: Ptr, index: number): Ptr {
-  return ptr.getP(1).listGetP(index);
+export function Payload_getCapTableAt(ptr: Ptr, index: number): CapDescriptor_Ptr {
+  return Payload_getCapTable(ptr).listGetStruct(index) as CapDescriptor_Ptr;
+}
+
+export function Payload_setCapTable(ptr: StructBuilder, value: Ptr): void {
+  ptr.setP(1, value);
+}
+
+export function Payload_initCapTable(ptr: StructBuilder, count: number): StructBuilder {
+  return ptr.initList(1, count, 1, 1);
 }
 
 /** Struct rpc.capnp:PromisedAnswer. */
@@ -444,21 +863,34 @@ export const PROMISED_ANSWER_DWORDS = 1;
 export const PROMISED_ANSWER_PWORDS = 1;
 export const PromisedAnswer_dataWordCount = 1;
 export const PromisedAnswer_pointerCount = 1;
+export type PromisedAnswer_Ptr = Ptr;
 
 export function PromisedAnswer_getQuestionId(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
 }
 
+export function PromisedAnswer_setQuestionId(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
+}
+
 export function PromisedAnswer_getTransform(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+  return ptr.getP(0) as Ptr;
 }
 
 export function PromisedAnswer_getTransformLen(ptr: Ptr): number {
-  return ptr.getP(0).listLen();
+  return PromisedAnswer_getTransform(ptr).listLen();
 }
 
-export function PromisedAnswer_getTransformAt(ptr: Ptr, index: number): Ptr {
-  return ptr.getP(0).listGetP(index);
+export function PromisedAnswer_getTransformAt(ptr: Ptr, index: number): PromisedAnswer_Op_Ptr {
+  return PromisedAnswer_getTransform(ptr).listGetStruct(index) as PromisedAnswer_Op_Ptr;
+}
+
+export function PromisedAnswer_setTransform(ptr: StructBuilder, value: Ptr): void {
+  ptr.setP(0, value);
+}
+
+export function PromisedAnswer_initTransform(ptr: StructBuilder, count: number): StructBuilder {
+  return ptr.initList(0, count, 1, 0);
 }
 
 /** Struct rpc.capnp:PromisedAnswer.Op. */
@@ -466,6 +898,7 @@ export const PROMISED_ANSWER_OP_DWORDS = 1;
 export const PROMISED_ANSWER_OP_PWORDS = 0;
 export const PromisedAnswer_Op_dataWordCount = 1;
 export const PromisedAnswer_Op_pointerCount = 0;
+export type PromisedAnswer_Op_Ptr = Ptr;
 /** Union discriminant byte offset (u16). */
 export const PromisedAnswer_Op_discriminantOffset = 0;
 export function PromisedAnswer_Op_which(ptr: Ptr): number {
@@ -477,8 +910,17 @@ export const PromisedAnswer_Op = {
 } as const;
 export type PromisedAnswer_Op = (typeof PromisedAnswer_Op)[keyof typeof PromisedAnswer_Op];
 
+export function PromisedAnswer_Op_setNoop(ptr: StructBuilder): void {
+  ptr.setU16(0, 0);
+}
+
 export function PromisedAnswer_Op_getGetPointerField(ptr: Ptr, dflt = 0): number {
   return ptr.getU16(2, dflt);
+}
+
+export function PromisedAnswer_Op_setGetPointerField(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU16(0, 1);
+  ptr.setU16(2, value, dflt);
 }
 
 /** Struct rpc.capnp:CapDescriptor. */
@@ -486,6 +928,7 @@ export const CAP_DESCRIPTOR_DWORDS = 1;
 export const CAP_DESCRIPTOR_PWORDS = 1;
 export const CapDescriptor_dataWordCount = 1;
 export const CapDescriptor_pointerCount = 1;
+export type CapDescriptor_Ptr = Ptr;
 /** Union discriminant byte offset (u16). */
 export const CapDescriptor_discriminantOffset = 0;
 export function CapDescriptor_which(ptr: Ptr): number {
@@ -501,28 +944,71 @@ export const CapDescriptor = {
 } as const;
 export type CapDescriptor = (typeof CapDescriptor)[keyof typeof CapDescriptor];
 
+export function CapDescriptor_setNone(ptr: StructBuilder): void {
+  ptr.setU16(0, 0);
+}
+
 export function CapDescriptor_getSenderHosted(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(4, dflt);
+}
+
+export function CapDescriptor_setSenderHosted(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU16(0, 1);
+  ptr.setU32(4, value, dflt);
 }
 
 export function CapDescriptor_getSenderPromise(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(4, dflt);
 }
 
+export function CapDescriptor_setSenderPromise(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU16(0, 2);
+  ptr.setU32(4, value, dflt);
+}
+
 export function CapDescriptor_getReceiverHosted(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(4, dflt);
 }
 
-export function CapDescriptor_getReceiverAnswer(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function CapDescriptor_setReceiverHosted(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU16(0, 3);
+  ptr.setU32(4, value, dflt);
 }
 
-export function CapDescriptor_getThirdPartyHosted(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function CapDescriptor_getReceiverAnswer(ptr: Ptr): PromisedAnswer_Ptr {
+  return ptr.getP(0, "struct") as PromisedAnswer_Ptr;
+}
+
+export function CapDescriptor_setReceiverAnswer(ptr: StructBuilder, value: PromisedAnswer_Ptr): void {
+  ptr.setU16(0, 4);
+  ptr.setP(0, value);
+}
+
+export function CapDescriptor_initReceiverAnswer(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(0, 4);
+  return ptr.initStruct(0, 1, 1);
+}
+
+export function CapDescriptor_getThirdPartyHosted(ptr: Ptr): ThirdPartyCapDescriptor_Ptr {
+  return ptr.getP(0, "struct") as ThirdPartyCapDescriptor_Ptr;
+}
+
+export function CapDescriptor_setThirdPartyHosted(ptr: StructBuilder, value: ThirdPartyCapDescriptor_Ptr): void {
+  ptr.setU16(0, 5);
+  ptr.setP(0, value);
+}
+
+export function CapDescriptor_initThirdPartyHosted(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(0, 5);
+  return ptr.initStruct(0, 1, 1);
 }
 
 export function CapDescriptor_getAttachedFd(ptr: Ptr, dflt = 255): number {
   return ptr.getU8(2, dflt);
+}
+
+export function CapDescriptor_setAttachedFd(ptr: StructBuilder, value: number, dflt = 255): void {
+  ptr.setU8(2, value, dflt);
 }
 
 /** Struct rpc.capnp:ThirdPartyCapDescriptor. */
@@ -530,13 +1016,22 @@ export const THIRD_PARTY_CAP_DESCRIPTOR_DWORDS = 1;
 export const THIRD_PARTY_CAP_DESCRIPTOR_PWORDS = 1;
 export const ThirdPartyCapDescriptor_dataWordCount = 1;
 export const ThirdPartyCapDescriptor_pointerCount = 1;
+export type ThirdPartyCapDescriptor_Ptr = Ptr;
 
-export function ThirdPartyCapDescriptor_getId(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function ThirdPartyCapDescriptor_getId(ptr: Ptr): CapnpAnyPointer {
+  return ptr.getP(0) as CapnpAnyPointer;
+}
+
+export function ThirdPartyCapDescriptor_setId(ptr: StructBuilder, value: CapnpAnyPointer): void {
+  ptr.setP(0, value);
 }
 
 export function ThirdPartyCapDescriptor_getVineId(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
+}
+
+export function ThirdPartyCapDescriptor_setVineId(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
 }
 
 /** Struct rpc.capnp:Disembargo.context (group / union overlay). */
@@ -544,6 +1039,7 @@ export const DISEMBARGO_CONTEXT_DWORDS = 1;
 export const DISEMBARGO_CONTEXT_PWORDS = 1;
 export const Disembargo_context_dataWordCount = 1;
 export const Disembargo_context_pointerCount = 1;
+export type Disembargo_context_Ptr = Ptr;
 /** Union discriminant byte offset (u16). */
 export const Disembargo_context_discriminantOffset = 4;
 export function Disembargo_context_which(ptr: Ptr): number {
@@ -561,10 +1057,29 @@ export function Disembargo_context_getSenderLoopback(ptr: Ptr, dflt = 0): number
   return ptr.getU32(0, dflt);
 }
 
+export function Disembargo_context_setSenderLoopback(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU16(4, 0);
+  ptr.setU32(0, value, dflt);
+}
+
 export function Disembargo_context_getReceiverLoopback(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
 }
 
+export function Disembargo_context_setReceiverLoopback(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU16(4, 1);
+  ptr.setU32(0, value, dflt);
+}
+
+export function Disembargo_context_setAccept(ptr: StructBuilder): void {
+  ptr.setU16(4, 2);
+}
+
 export function Disembargo_context_getProvide(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
+}
+
+export function Disembargo_context_setProvide(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU16(4, 3);
+  ptr.setU32(0, value, dflt);
 }
