@@ -186,7 +186,11 @@ function scalarDefaultExpr(
     case "float32":
     case "float64":
       if (dv.which === "float32" || dv.which === "float64") {
-        // -0 === 0, and the XOR mask still has to keep that sign bit.
+        // Generated C++ for Cap'n Proto 1.4.0 passes a mask to getDataField
+        // and setDataField only when the float default compares unequal to
+        // zero. -0.0 compares equal to zero, so the mask is 0 and the raw
+        // bits stay on the wire.
+        if (dv.value === 0) return "0";
         return jsNumberLiteral(dv.value);
       }
       return "0";
