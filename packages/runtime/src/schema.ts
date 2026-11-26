@@ -542,6 +542,185 @@ function decodeRawNode(n: Ptr): RawNodeRecord {
   };
 }
 
+/** Low 32 bits of a product, matching C++ uint32 multiply in SchemaLoader. */
+function u32mul(a: number, b: number): number {
+  return Math.imul(a, b) >>> 0;
+}
+
+function unionTag(p: Ptr | null): number {
+  if (!p || p.kind !== PtrKind.Struct) return 0;
+  return p.getU16(0);
+}
+
+/**
+ * Data width of a schema Type tag. Null means the tag is outside the C++
+ * switch, which leaves the field size at zero and skips the value-tag check.
+ */
+function slotLayout(typeTag: number): { bits: number; pointer: boolean } | null {
+  switch (typeTag) {
+    case TypeKind.Void:
+      return { bits: 0, pointer: false };
+    case TypeKind.Bool:
+      return { bits: 1, pointer: false };
+    case TypeKind.Int8:
+    case TypeKind.UInt8:
+      return { bits: 8, pointer: false };
+    case TypeKind.Int16:
+    case TypeKind.UInt16:
+    case TypeKind.Enum:
+      return { bits: 16, pointer: false };
+    case TypeKind.Int32:
+    case TypeKind.UInt32:
+    case TypeKind.Float32:
+      return { bits: 32, pointer: false };
+    case TypeKind.Int64:
+    case TypeKind.UInt64:
+    case TypeKind.Float64:
+      return { bits: 64, pointer: false };
+    case TypeKind.Text:
+    case TypeKind.Data:
+    case TypeKind.List:
+    case TypeKind.Struct:
+    case TypeKind.Interface:
+    case TypeKind.AnyPointer:
+      return { bits: 0, pointer: true };
+    default:
+      return null;
+  }
+}
+
+function assertValueMatches(
+  typePtr: Ptr | null,
+  valuePtr: Ptr,
+): { bits: number; pointer: boolean } {
+  const typeTag = unionTag(typePtr);
+  const layout = slotLayout(typeTag);
+  if (!layout) return { bits: 0, pointer: false };
+  assertCapnp(
+    unionTag(valuePtr) === typeTag,
+    "SCHEMA",
+    "Value did not match type.",
+  );
+  return layout;
+}
+
+function assertStructNode(raw: RawNodeRecord): void {
+  const fields = raw.fields;
+  const dataSizeInBits = (raw.dataWordCount * 64) >>> 0;
+  const pointerCount = raw.pointerCount >>> 0;
+
+  if (raw.discriminantCount > 0) {
+    assertCapnp(
+      raw.discriminantCount !== 1,
+      "SCHEMA",
+      "union must have at least two members",
+    );
+    assertCapnp(
+      raw.discriminantCount <= fields.length,
+      "SCHEMA",
+      "struct can't have more union fields than total fields",
+    );
+    const discSpan = u32mul((raw.discriminantOffset + 1) >>> 0, 16);
+    assertCapnp(
+      discSpan <= dataSizeInBits,
+      "SCHEMA",
+      "union discriminant is out-of-bounds",
+    );
+  }
+
+  const names = new Set<string>();
+  const sawCodeOrder = new Array<boolean>(fields.length);
+  for (const field of fields) {
+    assertCapnp(
+      !names.has(field.name),
+      "SCHEMA",
+      `duplicate name; name = ${field.name}`,
+    );
+    names.add(field.name);
+    assertCapnp(
+      field.codeOrder < sawCodeOrder.length && !sawCodeOrder[field.codeOrder],
+      "SCHEMA",
+      "invalid codeOrder",
+    );
+    sawCodeOrder[field.codeOrder] = true;
+
+    if (field.kind !== "slot") continue;
+    const layout = assertValueMatches(field.typePtr, field.proto.getP(3));
+    const off1 = (field.offset + 1) >>> 0;
+    assertCapnp(
+      u32mul(layout.bits, off1) <= dataSizeInBits &&
+        u32mul(layout.pointer ? 1 : 0, off1) <= pointerCount,
+      "SCHEMA",
+      "field offset out-of-bounds",
+    );
+  }
+}
+
+function assertEnumNode(raw: RawNodeRecord): void {
+  const enumerants = raw.enumerants;
+  const names = new Set<string>();
+  const sawCodeOrder = new Array<boolean>(enumerants.length);
+  for (const enumerant of enumerants) {
+    assertCapnp(
+      !names.has(enumerant.name),
+      "SCHEMA",
+      `duplicate name; name = ${enumerant.name}`,
+    );
+    names.add(enumerant.name);
+    assertCapnp(
+      enumerant.codeOrder < sawCodeOrder.length &&
+        !sawCodeOrder[enumerant.codeOrder],
+      "SCHEMA",
+      "invalid codeOrder",
+    );
+    sawCodeOrder[enumerant.codeOrder] = true;
+  }
+}
+
+function assertInterfaceNames(raw: RawNodeRecord): void {
+  const names = new Set<string>();
+  for (const method of raw.methods) {
+    assertCapnp(
+      !names.has(method.name),
+      "SCHEMA",
+      `duplicate name; name = ${method.name}`,
+    );
+    names.add(method.name);
+  }
+}
+
+/**
+ * C++ 1.4.0 SchemaLoader::Validator checks. A failure throws before the node
+ * is stored. Offset math wraps as uint32, so an offset the C++ loader accepts
+ * still loads here.
+ */
+function validateLoadedNode(raw: RawNodeRecord): void {
+  if (raw.parameters.length > 0) {
+    assertCapnp(
+      raw.isGeneric,
+      "SCHEMA",
+      "if parameter list is non-empty, isGeneric must be true",
+    );
+  }
+
+  switch (raw.which) {
+    case "struct":
+      assertStructNode(raw);
+      break;
+    case "enum":
+      assertEnumNode(raw);
+      break;
+    case "interface":
+      assertInterfaceNames(raw);
+      break;
+    case "const":
+      assertValueMatches(raw.constTypePtr, raw.proto.getP(4));
+      break;
+    default:
+      break;
+  }
+}
+
 export interface BrandParameterRef {
   readonly scopeId: bigint;
   readonly index: number;
@@ -1764,6 +1943,7 @@ export class SchemaLoader {
 
   loadNode(nodePtr: Ptr): Schema {
     const raw = decodeRawNode(nodePtr);
+    validateLoadedNode(raw);
     this.rawNodes.set(raw.id, raw);
     return this.get(raw.id);
   }
@@ -1787,6 +1967,7 @@ export class SchemaLoader {
     if (nodesList.kind === PtrKind.List) {
       for (let i = 0; i < nodesList.listLen(); i++) {
         const raw = decodeRawNode(nodesList.listGetP(i));
+        validateLoadedNode(raw);
         this.rawNodes.set(raw.id, raw);
       }
     }
