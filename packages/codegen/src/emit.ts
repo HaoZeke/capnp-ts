@@ -186,6 +186,9 @@ function scalarDefaultExpr(
     case "float32":
     case "float64":
       if (dv.which === "float32" || dv.which === "float64") {
+        // capnpc-c++ emits a mask only when `getFloat*() != 0`.
+        // -0.0 compares equal to 0, so the accessor keeps the raw bits.
+        if (dv.value === 0) return "0";
         return jsNumberLiteral(dv.value);
       }
       return "0";
