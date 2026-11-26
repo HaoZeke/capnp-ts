@@ -8,6 +8,10 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- An unknown method on the generated dispatch raises an 'unimplemented' RPC error, as Cap'n Proto C++ does.
+
 ## [0.1.0] - 2026-11-22
 
 First release of the pure TypeScript ESM Cap'n Proto family for Node >= 18
