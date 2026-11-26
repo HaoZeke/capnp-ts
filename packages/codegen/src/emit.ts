@@ -1028,13 +1028,14 @@ function emitFieldGetter(
         retType = anyTy.typeName;
         generic = ownerGenericClause(owner, anyTy.genericParam);
       }
+      const kindArg = t.which === "struct" ? `, "struct"` : "";
       if (ptrDefaultBytes && ptrDefaultBytes.length > 0) {
         const dflt = `${upperSnake(typeName)}_${upperSnake(fname)}_DEFAULT`;
         lines.push(
           `const ${dflt}_BYTES = new Uint8Array([${ptrDefaultBytes.join(", ")}]);`,
           `const ${dflt}_PTR = CapnpMessage.fromFlat(${dflt}_BYTES).root();`,
           `export function ${fn}${generic}(${recv}): ${retType} {`,
-          `  const p = ptr.getP(${off});`,
+          `  const p = ptr.getP(${off}${kindArg});`,
           `  return (p.kind === PtrKind.Null ? ${dflt}_PTR : p) as ${retType};`,
           `}`,
           ``,
@@ -1042,7 +1043,7 @@ function emitFieldGetter(
       } else {
         lines.push(
           `export function ${fn}${generic}(${recv}): ${retType} {`,
-          `  return ptr.getP(${off}) as ${retType};`,
+          `  return ptr.getP(${off}${kindArg}) as ${retType};`,
           `}`,
           ``,
         );

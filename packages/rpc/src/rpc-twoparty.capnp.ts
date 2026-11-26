@@ -8,7 +8,7 @@
  * Enums are const maps (Bun strip-safe). UInt64/Int64 use getU64/bigint.
  */
 
-import type { Ptr } from "@haozeke/capnp";
+import type { Ptr, StructBuilder } from "@haozeke/capnp";
 
 export const __capnpcTsMeta = {
   schemaPath: "rpc-twoparty.capnp",
@@ -17,6 +17,13 @@ export const __capnpcTsMeta = {
   fileId: 0xa184c7885cdaf2a1n,
   emittedNodes: 7,
 } as const;
+
+export const FILE_APPLIED_ANNOTATIONS = [{ id: 0xb9c6f99ebf805f2cn, value: "capnp::rpc::twoparty" }] as const;
+
+export type CapnpAnyPointer = Ptr;
+export type CapnpAnyStruct = Ptr;
+export type CapnpAnyList = Ptr;
+export type CapnpCapability = Ptr;
 
 /** Enum rpc-twoparty.capnp:Side (const map; no TS enum keyword). */
 export const Side = {
@@ -30,9 +37,14 @@ export const VAT_ID_DWORDS = 1;
 export const VAT_ID_PWORDS = 0;
 export const VatId_dataWordCount = 1;
 export const VatId_pointerCount = 0;
+export type VatId_Ptr = Ptr;
 
 export function VatId_getSide(ptr: Ptr, dflt = 0): number {
   return ptr.getU16(0, dflt);
+}
+
+export function VatId_setSide(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU16(0, value, dflt);
 }
 
 /** Struct rpc-twoparty.capnp:ProvisionId. */
@@ -40,9 +52,14 @@ export const PROVISION_ID_DWORDS = 1;
 export const PROVISION_ID_PWORDS = 0;
 export const ProvisionId_dataWordCount = 1;
 export const ProvisionId_pointerCount = 0;
+export type ProvisionId_Ptr = Ptr;
 
 export function ProvisionId_getJoinId(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
+}
+
+export function ProvisionId_setJoinId(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
 }
 
 /** Struct rpc-twoparty.capnp:RecipientId. */
@@ -50,29 +67,44 @@ export const RECIPIENT_ID_DWORDS = 0;
 export const RECIPIENT_ID_PWORDS = 0;
 export const RecipientId_dataWordCount = 0;
 export const RecipientId_pointerCount = 0;
+export type RecipientId_Ptr = Ptr;
 
 /** Struct rpc-twoparty.capnp:ThirdPartyCapId. */
 export const THIRD_PARTY_CAP_ID_DWORDS = 0;
 export const THIRD_PARTY_CAP_ID_PWORDS = 0;
 export const ThirdPartyCapId_dataWordCount = 0;
 export const ThirdPartyCapId_pointerCount = 0;
+export type ThirdPartyCapId_Ptr = Ptr;
 
 /** Struct rpc-twoparty.capnp:JoinKeyPart. */
 export const JOIN_KEY_PART_DWORDS = 1;
 export const JOIN_KEY_PART_PWORDS = 0;
 export const JoinKeyPart_dataWordCount = 1;
 export const JoinKeyPart_pointerCount = 0;
+export type JoinKeyPart_Ptr = Ptr;
 
 export function JoinKeyPart_getJoinId(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
+}
+
+export function JoinKeyPart_setJoinId(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
 }
 
 export function JoinKeyPart_getPartCount(ptr: Ptr, dflt = 0): number {
   return ptr.getU16(4, dflt);
 }
 
+export function JoinKeyPart_setPartCount(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU16(4, value, dflt);
+}
+
 export function JoinKeyPart_getPartNum(ptr: Ptr, dflt = 0): number {
   return ptr.getU16(6, dflt);
+}
+
+export function JoinKeyPart_setPartNum(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU16(6, value, dflt);
 }
 
 /** Struct rpc-twoparty.capnp:JoinResult. */
@@ -80,15 +112,28 @@ export const JOIN_RESULT_DWORDS = 1;
 export const JOIN_RESULT_PWORDS = 1;
 export const JoinResult_dataWordCount = 1;
 export const JoinResult_pointerCount = 1;
+export type JoinResult_Ptr = Ptr;
 
 export function JoinResult_getJoinId(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
+}
+
+export function JoinResult_setJoinId(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
 }
 
 export function JoinResult_getSucceeded(ptr: Ptr, dflt = false): boolean {
   return ptr.getBool(32, dflt);
 }
 
-export function JoinResult_getCap(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+export function JoinResult_setSucceeded(ptr: StructBuilder, value: boolean, dflt = false): void {
+  ptr.setBool(32, value, dflt);
+}
+
+export function JoinResult_getCap(ptr: Ptr): CapnpCapability {
+  return ptr.getP(0) as CapnpCapability;
+}
+
+export function JoinResult_setCap(ptr: StructBuilder, value: CapnpCapability): void {
+  ptr.setP(0, value);
 }

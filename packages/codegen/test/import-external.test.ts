@@ -16,7 +16,7 @@ function hasCapnp(): boolean {
 
 const STUB = `
 export class Ptr {
-  getP(_index: number): Ptr { return this; }
+  getP(_index: number, _expected?: "struct" | "text" | "data" | "copy" | "list"): Ptr { return this; }
   listLen(): number { return 0; }
   listGetStruct(_index: number): Ptr { return this; }
   listGetP(_index: number): Ptr { return this; }

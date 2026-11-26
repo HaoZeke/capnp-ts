@@ -3,7 +3,7 @@
  *
  * Source schema: adder.capnp
  * CodeGeneratorRequest: nodes=4, requestedFiles=1
- * File id: 0xbf5e831ac9f0d2a1 (emitted 1 nested nodes)
+ * File id: 0xbf5e831ac9f0d2a1 (emitted 3 nested nodes)
  *
  * Enums are const maps (Bun strip-safe). UInt64/Int64 use getU64/bigint.
  */
@@ -15,14 +15,53 @@ export const __capnpcTsMeta = {
   nodeCount: 4,
   requestedFileCount: 1,
   fileId: 0xbf5e831ac9f0d2a1n,
-  emittedNodes: 1,
+  emittedNodes: 3,
 } as const;
+
+/** Struct adder.capnp:Adder.add$Params. */
+export const ADDER_ADD_PARAMS_DWORDS = 2;
+export const ADDER_ADD_PARAMS_PWORDS = 0;
+export const Adder_add_Params_dataWordCount = 2;
+export const Adder_add_Params_pointerCount = 0;
+export type Adder_add_Params_Ptr = Ptr;
+
+export function Adder_add_Params_getA(ptr: Ptr, dflt: bigint = 0n): bigint {
+  return BigInt.asIntN(64, ptr.getU64(0, dflt));
+}
+
+export function Adder_add_Params_setA(ptr: StructBuilder, value: bigint, dflt: bigint = 0n): void {
+  ptr.setU64(0, value, dflt);
+}
+
+export function Adder_add_Params_getB(ptr: Ptr, dflt: bigint = 0n): bigint {
+  return BigInt.asIntN(64, ptr.getU64(8, dflt));
+}
+
+export function Adder_add_Params_setB(ptr: StructBuilder, value: bigint, dflt: bigint = 0n): void {
+  ptr.setU64(8, value, dflt);
+}
+
+/** Struct adder.capnp:Adder.add$Results. */
+export const ADDER_ADD_RESULTS_DWORDS = 1;
+export const ADDER_ADD_RESULTS_PWORDS = 0;
+export const Adder_add_Results_dataWordCount = 1;
+export const Adder_add_Results_pointerCount = 0;
+export type Adder_add_Results_Ptr = Ptr;
+
+export function Adder_add_Results_getSum(ptr: Ptr, dflt: bigint = 0n): bigint {
+  return BigInt.asIntN(64, ptr.getU64(0, dflt));
+}
+
+export function Adder_add_Results_setSum(ptr: StructBuilder, value: bigint, dflt: bigint = 0n): void {
+  ptr.setU64(0, value, dflt);
+}
 
 /** Interface adder.capnp:Adder. */
 export const ADDER_INTERFACE_ID = 0xea01e10cbc414411n;
+export type Adder_Capability = Ptr;
 
 export const Adder_methods = {
-  add: { ordinal: 0, paramsDwords: 2, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0 },
+  add: { ordinal: 0, paramsDwords: 2, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
 } as const;
 
 /** Calls Adder methods on an imported capability. */
@@ -58,7 +97,7 @@ export class AdderClient {
 
 /** Implement Adder by extending this and overriding its methods. */
 export abstract class AdderServer {
-  abstract add(params: Ptr, results: StructBuilder): void;
+  abstract add(params: Adder_add_Params_Ptr, results: StructBuilder): void;
 
   /** Route one Call. Throws when the id or ordinal is not ours. */
   dispatch(
@@ -67,15 +106,15 @@ export abstract class AdderServer {
     params: Ptr,
     results: StructBuilder,
   ): void {
-    if (interfaceId !== ADDER_INTERFACE_ID) {
-      throw new Error(`Adder: wrong interface ${interfaceId}`);
+    if (interfaceId === ADDER_INTERFACE_ID) {
+      switch (methodId) {
+        case 0:
+          this.add(params, results);
+          return;
+        default:
+          throw Object.assign(new Error("Method not implemented.; interfaceName = adder.capnp:Adder; typeId = 16862005924666098705; methodId = " + methodId), { type: "unimplemented" });
+      }
     }
-    switch (methodId) {
-      case 0:
-        this.add(params, results);
-        return;
-      default:
-        throw new Error(`Adder: no method ${methodId}`);
-    }
+    throw Object.assign(new Error("Requested interface not implemented.; actualInterfaceName = adder.capnp:Adder; requestedTypeId = " + interfaceId), { type: "unimplemented" });
   }
 }

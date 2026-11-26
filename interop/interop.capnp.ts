@@ -9,6 +9,7 @@
  */
 
 import type { Ptr, StructBuilder } from "@haozeke/capnp";
+import * as __capnp_b8630836983feed7 from "./persistent.ts";
 
 export const __capnpcTsMeta = {
   schemaPath: "interop.capnp",
@@ -556,7 +557,7 @@ export const COUNTER_INTERFACE_ID = 0xf4e1e864ee16d853n;
 export type Counter_Capability = Ptr;
 
 export const Counter_methods = {
-  inc: { ordinal: 0, paramsDwords: 1, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  inc: { ordinal: 0, paramsDwords: 1, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
 } as const;
 
 /** Calls Counter methods on an imported capability. */
@@ -601,16 +602,16 @@ export abstract class CounterServer {
     params: Ptr,
     results: StructBuilder,
   ): void {
-    if (interfaceId !== COUNTER_INTERFACE_ID) {
-      throw new Error(`Counter: wrong interface ${interfaceId}`);
+    if (interfaceId === COUNTER_INTERFACE_ID) {
+      switch (methodId) {
+        case 0:
+          this.inc(params, results);
+          return;
+        default:
+          throw Object.assign(new Error("Method not implemented.; interfaceName = interop.capnp:Counter; typeId = 17645640335203162195; methodId = " + methodId), { type: "unimplemented" });
+      }
     }
-    switch (methodId) {
-      case 0:
-        this.inc(params, results);
-        return;
-      default:
-        throw new Error(`Counter: no method ${methodId}`);
-    }
+    throw Object.assign(new Error("Requested interface not implemented.; actualInterfaceName = interop.capnp:Counter; requestedTypeId = " + interfaceId), { type: "unimplemented" });
   }
 }
 
@@ -619,8 +620,8 @@ export const SINK_INTERFACE_ID = 0x845071e1200cdff7n;
 export type Sink_Capability = Ptr;
 
 export const Sink_methods = {
-  write: { ordinal: 0, paramsDwords: 0, paramsPwords: 1, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  done: { ordinal: 1, paramsDwords: 0, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  write: { ordinal: 0, paramsDwords: 0, paramsPwords: 1, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: true },
+  done: { ordinal: 1, paramsDwords: 0, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
 } as const;
 
 /** Calls Sink methods on an imported capability. */
@@ -679,19 +680,19 @@ export abstract class SinkServer {
     params: Ptr,
     results: StructBuilder,
   ): void {
-    if (interfaceId !== SINK_INTERFACE_ID) {
-      throw new Error(`Sink: wrong interface ${interfaceId}`);
+    if (interfaceId === SINK_INTERFACE_ID) {
+      switch (methodId) {
+        case 0:
+          this.write(params, results);
+          return;
+        case 1:
+          this.done(params, results);
+          return;
+        default:
+          throw Object.assign(new Error("Method not implemented.; interfaceName = interop.capnp:Sink; typeId = 9534245622862634999; methodId = " + methodId), { type: "unimplemented" });
+      }
     }
-    switch (methodId) {
-      case 0:
-        this.write(params, results);
-        return;
-      case 1:
-        this.done(params, results);
-        return;
-      default:
-        throw new Error(`Sink: no method ${methodId}`);
-    }
+    throw Object.assign(new Error("Requested interface not implemented.; actualInterfaceName = interop.capnp:Sink; requestedTypeId = " + interfaceId), { type: "unimplemented" });
   }
 }
 
@@ -700,7 +701,7 @@ export const KEEP_INTERFACE_ID = 0x8b20375f0f23dc45n;
 export type Keep_Capability = Ptr;
 
 export const Keep_methods = {
-  value: { ordinal: 0, paramsDwords: 0, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  value: { ordinal: 0, paramsDwords: 0, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
 } as const;
 
 /** Calls Keep methods on an imported capability. */
@@ -732,10 +733,23 @@ export class KeepClient {
     );
   }
 
+  /** Send Persistent.save; returns the questionId. */
+  save(fillParams?: (params: StructBuilder) => void): number {
+    const m = __capnp_b8630836983feed7.Persistent_methods.save;
+    return this.conn.sendCall(
+      this.importedCapId,
+      __capnp_b8630836983feed7.PERSISTENT_INTERFACE_ID,
+      m.ordinal,
+      fillParams,
+      m.paramsDwords,
+      m.paramsPwords,
+    );
+  }
+
 }
 
 /** Implement Keep by extending this and overriding its methods. */
-export abstract class KeepServer {
+export abstract class KeepServer extends __capnp_b8630836983feed7.PersistentServer {
   abstract value(params: Keep_value_Params_Ptr, results: StructBuilder): void;
 
   /** Route one Call. Throws when the id or ordinal is not ours. */
@@ -745,16 +759,20 @@ export abstract class KeepServer {
     params: Ptr,
     results: StructBuilder,
   ): void {
-    if (interfaceId !== KEEP_INTERFACE_ID) {
-      throw new Error(`Keep: wrong interface ${interfaceId}`);
+    if (interfaceId === KEEP_INTERFACE_ID) {
+      switch (methodId) {
+        case 0:
+          this.value(params, results);
+          return;
+        default:
+          throw Object.assign(new Error("Method not implemented.; interfaceName = interop.capnp:Keep; typeId = 10025073651942153285; methodId = " + methodId), { type: "unimplemented" });
+      }
     }
-    switch (methodId) {
-      case 0:
-        this.value(params, results);
-        return;
-      default:
-        throw new Error(`Keep: no method ${methodId}`);
+    if (interfaceId === __capnp_b8630836983feed7.PERSISTENT_INTERFACE_ID) {
+      super.dispatch(interfaceId, methodId, params, results);
+      return;
     }
+    throw Object.assign(new Error("Requested interface not implemented.; actualInterfaceName = interop.capnp:Keep; requestedTypeId = " + interfaceId), { type: "unimplemented" });
   }
 }
 
@@ -763,26 +781,28 @@ export const ECHO_INTERFACE_ID = 0xda75289ac99b543bn;
 export type Echo_Capability = Ptr;
 
 export const Echo_methods = {
-  ping: { ordinal: 0, paramsDwords: 1, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  makeCounter: { ordinal: 1, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  makePromise: { ordinal: 2, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  resolveLater: { ordinal: 3, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  slow: { ordinal: 4, paramsDwords: 0, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  unblock: { ordinal: 5, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  stats: { ordinal: 6, paramsDwords: 0, paramsPwords: 0, resultsDwords: 2, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  callBack: { ordinal: 7, paramsDwords: 1, paramsPwords: 1, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  echoCap: { ordinal: 8, paramsDwords: 0, paramsPwords: 1, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  fail: { ordinal: 9, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  brokenCap: { ordinal: 10, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  hold: { ordinal: 11, paramsDwords: 0, paramsPwords: 1, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  callHeld: { ordinal: 12, paramsDwords: 1, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  promiseOfHeld: { ordinal: 13, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  resolveHeld: { ordinal: 14, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  slowUncancelable: { ordinal: 15, paramsDwords: 0, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  die: { ordinal: 16, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  openSink: { ordinal: 17, paramsDwords: 1, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [] },
-  openKeep: { ordinal: 18, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [] },
+  ping: { ordinal: 0, paramsDwords: 1, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  makeCounter: { ordinal: 1, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  makePromise: { ordinal: 2, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  resolveLater: { ordinal: 3, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  slow: { ordinal: 4, paramsDwords: 0, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  unblock: { ordinal: 5, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  stats: { ordinal: 6, paramsDwords: 0, paramsPwords: 0, resultsDwords: 2, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  callBack: { ordinal: 7, paramsDwords: 1, paramsPwords: 1, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  echoCap: { ordinal: 8, paramsDwords: 0, paramsPwords: 1, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  fail: { ordinal: 9, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  brokenCap: { ordinal: 10, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  hold: { ordinal: 11, paramsDwords: 0, paramsPwords: 1, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  callHeld: { ordinal: 12, paramsDwords: 1, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  promiseOfHeld: { ordinal: 13, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  resolveHeld: { ordinal: 14, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  slowUncancelable: { ordinal: 15, paramsDwords: 0, paramsPwords: 0, resultsDwords: 1, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  die: { ordinal: 16, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 0, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  openSink: { ordinal: 17, paramsDwords: 1, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
+  openKeep: { ordinal: 18, paramsDwords: 0, paramsPwords: 0, resultsDwords: 0, resultsPwords: 1, paramBrand: [], resultBrand: [], implicitParameters: [], streaming: false },
 } as const;
+
+export const ECHO_SLOW_APPLIED_ANNOTATIONS = [{ id: 0xac7096ff8cfc9dcen }] as const;
 
 /** Calls Echo methods on an imported capability. */
 export class EchoClient {
@@ -1078,69 +1098,69 @@ export abstract class EchoServer {
     params: Ptr,
     results: StructBuilder,
   ): void {
-    if (interfaceId !== ECHO_INTERFACE_ID) {
-      throw new Error(`Echo: wrong interface ${interfaceId}`);
+    if (interfaceId === ECHO_INTERFACE_ID) {
+      switch (methodId) {
+        case 0:
+          this.ping(params, results);
+          return;
+        case 1:
+          this.makeCounter(params, results);
+          return;
+        case 2:
+          this.makePromise(params, results);
+          return;
+        case 3:
+          this.resolveLater(params, results);
+          return;
+        case 4:
+          this.slow(params, results);
+          return;
+        case 5:
+          this.unblock(params, results);
+          return;
+        case 6:
+          this.stats(params, results);
+          return;
+        case 7:
+          this.callBack(params, results);
+          return;
+        case 8:
+          this.echoCap(params, results);
+          return;
+        case 9:
+          this.fail(params, results);
+          return;
+        case 10:
+          this.brokenCap(params, results);
+          return;
+        case 11:
+          this.hold(params, results);
+          return;
+        case 12:
+          this.callHeld(params, results);
+          return;
+        case 13:
+          this.promiseOfHeld(params, results);
+          return;
+        case 14:
+          this.resolveHeld(params, results);
+          return;
+        case 15:
+          this.slowUncancelable(params, results);
+          return;
+        case 16:
+          this.die(params, results);
+          return;
+        case 17:
+          this.openSink(params, results);
+          return;
+        case 18:
+          this.openKeep(params, results);
+          return;
+        default:
+          throw Object.assign(new Error("Method not implemented.; interfaceName = interop.capnp:Echo; typeId = 15741532717815911483; methodId = " + methodId), { type: "unimplemented" });
+      }
     }
-    switch (methodId) {
-      case 0:
-        this.ping(params, results);
-        return;
-      case 1:
-        this.makeCounter(params, results);
-        return;
-      case 2:
-        this.makePromise(params, results);
-        return;
-      case 3:
-        this.resolveLater(params, results);
-        return;
-      case 4:
-        this.slow(params, results);
-        return;
-      case 5:
-        this.unblock(params, results);
-        return;
-      case 6:
-        this.stats(params, results);
-        return;
-      case 7:
-        this.callBack(params, results);
-        return;
-      case 8:
-        this.echoCap(params, results);
-        return;
-      case 9:
-        this.fail(params, results);
-        return;
-      case 10:
-        this.brokenCap(params, results);
-        return;
-      case 11:
-        this.hold(params, results);
-        return;
-      case 12:
-        this.callHeld(params, results);
-        return;
-      case 13:
-        this.promiseOfHeld(params, results);
-        return;
-      case 14:
-        this.resolveHeld(params, results);
-        return;
-      case 15:
-        this.slowUncancelable(params, results);
-        return;
-      case 16:
-        this.die(params, results);
-        return;
-      case 17:
-        this.openSink(params, results);
-        return;
-      case 18:
-        this.openKeep(params, results);
-        return;
-      default:
-        throw new Error(`Echo: no method ${methodId}`);
-    }
+    throw Object.assign(new Error("Requested interface not implemented.; actualInterfaceName = interop.capnp:Echo; requestedTypeId = " + interfaceId), { type: "unimplemented" });
   }
 }

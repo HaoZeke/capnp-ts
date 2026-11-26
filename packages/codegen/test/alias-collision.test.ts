@@ -142,7 +142,7 @@ describe("unrequested external aliases", () => {
       join(dir, "stub.ts"),
       `export class Ptr {
   kind = 0;
-  getP(_index: number): Ptr { return this; }
+  getP(_index: number, _expected?: "struct" | "text" | "data" | "copy" | "list"): Ptr { return this; }
   getU16(_byte: number, _dflt?: number): number { return 0; }
 }
 export class StructBuilder {

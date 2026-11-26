@@ -8,7 +8,7 @@
  * Enums are const maps (Bun strip-safe). UInt64/Int64 use getU64/bigint.
  */
 
-import type { Ptr } from "@haozeke/capnp";
+import type { Ptr, StructBuilder } from "@haozeke/capnp";
 
 export const __capnpcTsMeta = {
   schemaPath: "schema/addressbook.capnp",
@@ -31,33 +31,61 @@ export const PERSON_DWORDS = 1;
 export const PERSON_PWORDS = 4;
 export const Person_dataWordCount = 1;
 export const Person_pointerCount = 4;
+export type Person_Ptr = Ptr;
 
 export function Person_getId(ptr: Ptr, dflt = 0): number {
   return ptr.getU32(0, dflt);
+}
+
+export function Person_setId(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU32(0, value, dflt);
 }
 
 export function Person_getName(ptr: Ptr): string {
   return ptr.getText(0);
 }
 
+export function Person_setName(ptr: StructBuilder, value: string): void {
+  ptr.setText(0, value);
+}
+
 export function Person_getEmail(ptr: Ptr): string {
   return ptr.getText(1);
 }
 
+export function Person_setEmail(ptr: StructBuilder, value: string): void {
+  ptr.setText(1, value);
+}
+
 export function Person_getPhones(ptr: Ptr): Ptr {
-  return ptr.getP(2);
+  return ptr.getP(2) as Ptr;
 }
 
 export function Person_getPhonesLen(ptr: Ptr): number {
-  return ptr.getP(2).listLen();
+  return Person_getPhones(ptr).listLen();
 }
 
-export function Person_getPhonesAt(ptr: Ptr, index: number): Ptr {
-  return ptr.getP(2).listGetP(index);
+export function Person_getPhonesAt(ptr: Ptr, index: number): Person_PhoneNumber_Ptr {
+  return Person_getPhones(ptr).listGetStruct(index) as Person_PhoneNumber_Ptr;
+}
+
+export function Person_setPhones(ptr: StructBuilder, value: Ptr): void {
+  ptr.setP(2, value);
+}
+
+export function Person_initPhones(ptr: StructBuilder, count: number): StructBuilder {
+  return ptr.initList(2, count, 1, 1);
 }
 
 /** Group field `employment` — same wire Ptr as parent; see group node helpers. */
 export function Person_getEmployment(ptr: Ptr): Ptr {
+  return ptr;
+}
+
+export function Person_initEmployment(ptr: StructBuilder): StructBuilder {
+  ptr.setU16(4, 0);
+  ptr.clearPointer(3);
+  ptr.clearPointer(3);
   return ptr;
 }
 
@@ -66,6 +94,7 @@ export const PERSON_EMPLOYMENT_DWORDS = 1;
 export const PERSON_EMPLOYMENT_PWORDS = 4;
 export const Person_employment_dataWordCount = 1;
 export const Person_employment_pointerCount = 4;
+export type Person_employment_Ptr = Ptr;
 /** Union discriminant byte offset (u16). */
 export const Person_employment_discriminantOffset = 4;
 export function Person_employment_which(ptr: Ptr): number {
@@ -79,12 +108,30 @@ export const Person_employment = {
 } as const;
 export type Person_employment = (typeof Person_employment)[keyof typeof Person_employment];
 
+export function Person_employment_setUnemployed(ptr: StructBuilder): void {
+  ptr.setU16(4, 0);
+}
+
 export function Person_employment_getEmployer(ptr: Ptr): string {
   return ptr.getText(3);
 }
 
+export function Person_employment_setEmployer(ptr: StructBuilder, value: string): void {
+  ptr.setU16(4, 1);
+  ptr.setText(3, value);
+}
+
 export function Person_employment_getSchool(ptr: Ptr): string {
   return ptr.getText(3);
+}
+
+export function Person_employment_setSchool(ptr: StructBuilder, value: string): void {
+  ptr.setU16(4, 2);
+  ptr.setText(3, value);
+}
+
+export function Person_employment_setSelfEmployed(ptr: StructBuilder): void {
+  ptr.setU16(4, 3);
 }
 
 /** Struct schema/addressbook.capnp:Person.PhoneNumber. */
@@ -92,13 +139,22 @@ export const PERSON_PHONE_NUMBER_DWORDS = 1;
 export const PERSON_PHONE_NUMBER_PWORDS = 1;
 export const Person_PhoneNumber_dataWordCount = 1;
 export const Person_PhoneNumber_pointerCount = 1;
+export type Person_PhoneNumber_Ptr = Ptr;
 
 export function Person_PhoneNumber_getNumber(ptr: Ptr): string {
   return ptr.getText(0);
 }
 
+export function Person_PhoneNumber_setNumber(ptr: StructBuilder, value: string): void {
+  ptr.setText(0, value);
+}
+
 export function Person_PhoneNumber_getType(ptr: Ptr, dflt = 0): number {
   return ptr.getU16(0, dflt);
+}
+
+export function Person_PhoneNumber_setType(ptr: StructBuilder, value: number, dflt = 0): void {
+  ptr.setU16(0, value, dflt);
 }
 
 /** Struct schema/addressbook.capnp:AddressBook. */
@@ -106,15 +162,24 @@ export const ADDRESS_BOOK_DWORDS = 0;
 export const ADDRESS_BOOK_PWORDS = 1;
 export const AddressBook_dataWordCount = 0;
 export const AddressBook_pointerCount = 1;
+export type AddressBook_Ptr = Ptr;
 
 export function AddressBook_getPeople(ptr: Ptr): Ptr {
-  return ptr.getP(0);
+  return ptr.getP(0) as Ptr;
 }
 
 export function AddressBook_getPeopleLen(ptr: Ptr): number {
-  return ptr.getP(0).listLen();
+  return AddressBook_getPeople(ptr).listLen();
 }
 
-export function AddressBook_getPeopleAt(ptr: Ptr, index: number): Ptr {
-  return ptr.getP(0).listGetP(index);
+export function AddressBook_getPeopleAt(ptr: Ptr, index: number): Person_Ptr {
+  return AddressBook_getPeople(ptr).listGetStruct(index) as Person_Ptr;
+}
+
+export function AddressBook_setPeople(ptr: StructBuilder, value: Ptr): void {
+  ptr.setP(0, value);
+}
+
+export function AddressBook_initPeople(ptr: StructBuilder, count: number): StructBuilder {
+  return ptr.initList(0, count, 1, 4);
 }
