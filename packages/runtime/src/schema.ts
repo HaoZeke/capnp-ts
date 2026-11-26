@@ -606,6 +606,23 @@ function assertValueMatches(
 
 type LoadedNodes = ReadonlyMap<bigint, RawNodeRecord>;
 
+type GroupSizer = (
+  scopeId: bigint,
+  dataWordCount: number,
+  pointerCount: number,
+) => void;
+
+/** Raise a struct's stored size. C++ rewrites the node with the max of each count. */
+function growStruct(
+  raw: RawNodeRecord,
+  dataWordCount: number,
+  pointerCount: number,
+): void {
+  const slot = raw as { dataWordCount: number; pointerCount: number };
+  if (slot.dataWordCount < dataWordCount) slot.dataWordCount = dataWordCount;
+  if (slot.pointerCount < pointerCount) slot.pointerCount = pointerCount;
+}
+
 /**
  * Pointer-ness of a Type tag, matching Validator's brand check. A tag the
  * C++ switch does not name stays a pointer, so the binding is allowed.
@@ -725,6 +742,7 @@ function assertStructNode(
   raw: RawNodeRecord,
   loaded: LoadedNodes,
   pendingKinds: Map<bigint, SchemaNodeWhich>,
+  onGroup: GroupSizer,
 ): void {
   const fields = raw.fields;
   const dataSizeInBits = (raw.dataWordCount * 64) >>> 0;
@@ -829,6 +847,8 @@ function assertStructNode(
 
   if (raw.isGroup) {
     assertCapnp(raw.scopeId !== 0n, "SCHEMA", "group node missing scopeId");
+    // C++ requireStructSize grows the scope before the parent kind check.
+    onGroup(raw.scopeId, raw.dataWordCount, raw.pointerCount);
     assertLoadedKind(loaded, pendingKinds, raw.scopeId, "struct");
   }
 }
@@ -890,7 +910,11 @@ function assertInterfaceNode(
  * C++ 1.4.0 SchemaLoader::Validator checks. A failure throws before the node
  * is stored. Offset products wrap as uint32, matching the C++ uint multiply.
  */
-function validateLoadedNode(raw: RawNodeRecord, loaded: LoadedNodes): void {
+function validateLoadedNode(
+  raw: RawNodeRecord,
+  loaded: LoadedNodes,
+  onGroup: GroupSizer,
+): void {
   if (raw.parameters.length > 0) {
     assertCapnp(
       raw.isGeneric,
@@ -902,7 +926,7 @@ function validateLoadedNode(raw: RawNodeRecord, loaded: LoadedNodes): void {
   const pendingKinds = new Map<bigint, SchemaNodeWhich>();
   switch (raw.which) {
     case "struct":
-      assertStructNode(raw, loaded, pendingKinds);
+      assertStructNode(raw, loaded, pendingKinds, onGroup);
       break;
     case "enum":
       assertEnumNode(raw);
@@ -2135,6 +2159,11 @@ export class SchemaLoader {
   private readonly rawNodes = new Map<bigint, RawNodeRecord>();
   private readonly instances = new Map<string, Schema>();
   private readonly reqFiles: RequestedFileSchema[] = [];
+  /** Largest group size that must fit in each struct, keyed by type id. */
+  private readonly structSizeRequirements = new Map<
+    bigint,
+    { dataWordCount: number; pointerCount: number }
+  >();
 
   static fromCgr(input: Uint8Array | Message): SchemaLoader {
     const loader = new SchemaLoader();
@@ -2144,9 +2173,46 @@ export class SchemaLoader {
 
   loadNode(nodePtr: Ptr): Schema {
     const raw = decodeRawNode(nodePtr);
-    validateLoadedNode(raw, this.rawNodes);
+    this.prepareNode(raw);
     this.rawNodes.set(raw.id, raw);
     return this.get(raw.id);
+  }
+
+  /**
+   * C++ SchemaLoader::Impl::requireStructSize. A group may be wider than the
+   * struct declared as its scope; that struct grows so the group can be used.
+   */
+  private requireStructSize(
+    id: bigint,
+    dataWordCount: number,
+    pointerCount: number,
+  ): void {
+    const dw = dataWordCount & 0xffff;
+    const pw = pointerCount & 0xffff;
+    const prev = this.structSizeRequirements.get(id);
+    if (prev) {
+      if (dw > prev.dataWordCount) prev.dataWordCount = dw;
+      if (pw > prev.pointerCount) prev.pointerCount = pw;
+    } else {
+      this.structSizeRequirements.set(id, { dataWordCount: dw, pointerCount: pw });
+    }
+    const loaded = this.rawNodes.get(id);
+    if (loaded && loaded.which === "struct") growStruct(loaded, dw, pw);
+  }
+
+  /** Apply a recorded group size before the struct's own bounds checks. */
+  private applyPendingStructSize(raw: RawNodeRecord): void {
+    if (raw.which !== "struct") return;
+    const req = this.structSizeRequirements.get(raw.id);
+    if (!req) return;
+    growStruct(raw, req.dataWordCount, req.pointerCount);
+  }
+
+  private prepareNode(raw: RawNodeRecord): void {
+    this.applyPendingStructSize(raw);
+    validateLoadedNode(raw, this.rawNodes, (scopeId, dataWordCount, pointerCount) => {
+      this.requireStructSize(scopeId, dataWordCount, pointerCount);
+    });
   }
 
   loadCgr(input: Uint8Array | Message): void {
@@ -2168,7 +2234,7 @@ export class SchemaLoader {
     if (nodesList.kind === PtrKind.List) {
       for (let i = 0; i < nodesList.listLen(); i++) {
         const raw = decodeRawNode(nodesList.listGetP(i));
-        validateLoadedNode(raw, this.rawNodes);
+        this.prepareNode(raw);
         this.rawNodes.set(raw.id, raw);
       }
     }
