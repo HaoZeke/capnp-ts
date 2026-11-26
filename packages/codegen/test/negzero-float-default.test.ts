@@ -1,20 +1,20 @@
 /**
- * Explicit Float32/Float64 default -0.0 emits no XOR mask.
- * capnpc-c++ 1.4.0 (8b892a8) skips the mask when getFloat*() != 0 is false.
- * Flat hex below is that compiler's builder output for negzero-float.capnp.
+ * Float32/Float64 default -0.0 keeps its sign bit in the XOR mask.
+ * Cap'n Proto 1.4.0 `capnp decode` prints f32 = -0, f64 = -0 for a zero body.
+ * DynamicStruct reads 0x80000000 and 0x8000000000000000.
+ * Writing -0.0 stores zero bits. Writing +0.0 stores the sign bit.
+ * scripts/negzero-float-probe.sh prints those bits again.
+ * The schema language has no literal for a non-canonical NaN payload.
  */
 import { describe, expect, test } from "bun:test";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { emitModuleSource, walkCgr } from "../src/index.ts";
 import {
+  bitsToF32,
+  bitsToF64,
   f32ToBits,
   f64ToBits,
   Message,
@@ -22,23 +22,18 @@ import {
 } from "../../runtime/src/index.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = join(here, "..", "..", "..");
 const fixturePath = join(here, "fixtures", "negzero-float.cgr.bin");
 
-/** capnpc-c++ 1.4.0 unset root. Body is zero. */
-const CPP_UNSET =
-  "0000000006000000000000000500000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
-/** capnpc-c++ 1.4.0 setF32/setF64/setF32p/setF64p(1.25). keep and wide stay unset. */
-const CPP_SET125 =
-  "000000000600000000000000050000000000a03f0000a03f000000000000f43f000000000000f43f00000000000000000000000000000000";
-/** Same sets, plus setKeep/setWide(1.25), so nonzero masks stay on the wire. */
-const CPP_SETALL =
-  "000000000600000000000000050000000000a03f0000a03f000000000000f43f000000000000f43f0000600000000000000000000000f6ff";
-
-const F32_125 = 0x3fa00000;
-const F64_125 = 0x3ff4000000000000n;
-const F32_1_5 = 0x3fc00000;
-const F64_NEG_2_25 = 0xc002000000000000n;
+/** DynamicStruct unset read. scripts/negzero-float-probe.sh prints these. */
+const UNSET_F32 = 0x80000000;
+const UNSET_F64 = 0x8000000000000000n;
+/**
+ * Canonical quiet NaN bits from the 1.4.0 probe (`f32nan` / `f64nan`).
+ * `nan(1)` and `-nan` are not schema literals. Bun canonicalizes every
+ * NaN number to these bits, so a non-canonical payload has no JS value.
+ */
+const NAN_F32 = 0x7fc00000;
+const NAN_F64 = 0x7ff8000000000000n;
 
 type Gen = {
   Z_dataWordCount: number;
@@ -86,9 +81,7 @@ async function loadGenerated(): Promise<{ src: string; gen: Gen }> {
 
   const fileId = ast.requestedFiles.find((f) => f.filename === "nz.capnp")?.id;
   const src = emitModuleSource(ast, "nz.capnp", fileId);
-  const scratch = join(repoRoot, ".tmp-codegen-tests");
-  mkdirSync(scratch, { recursive: true });
-  const outDir = mkdtempSync(join(scratch, "negzero-"));
+  const outDir = mkdtempSync(join(tmpdir(), "negzero-"));
   const outFile = join(outDir, "nz.ts");
   try {
     writeFileSync(outFile, src, "utf8");
@@ -99,44 +92,45 @@ async function loadGenerated(): Promise<{ src: string; gen: Gen }> {
   }
 }
 
-function buildFlat(gen: Gen, mode: "unset" | "set125" | "setall"): Uint8Array {
+function flatOf(gen: Gen, fill?: (z: unknown) => void): Uint8Array {
   const builder = new MessageBuilder();
   const z = builder.initRoot(gen.Z_dataWordCount, gen.Z_pointerCount);
-  if (mode !== "unset") {
-    gen.Z_setF32(z, 1.25);
-    gen.Z_setF64(z, 1.25);
-    gen.Z_setF32p(z, 1.25);
-    gen.Z_setF64p(z, 1.25);
-  }
-  if (mode === "setall") {
-    gen.Z_setKeep(z, 1.25);
-    gen.Z_setWide(z, 1.25);
-  }
+  fill?.(z);
   return builder.toFlat();
 }
 
-function readRoot(gen: Gen, bytes: Uint8Array) {
-  const root = Message.fromFlat(bytes).root();
-  return {
-    f32: gen.Z_getF32(root),
-    f64: gen.Z_getF64(root),
-    f32p: gen.Z_getF32p(root),
-    f64p: gen.Z_getF64p(root),
-    keep: gen.Z_getKeep(root),
-    wide: gen.Z_getWide(root),
-  };
+/** Data section bytes of a single-segment struct message. */
+function structData(flat: Uint8Array): Uint8Array {
+  const view = new DataView(flat.buffer, flat.byteOffset, flat.byteLength);
+  const nSegs = view.getUint32(0, true) + 1;
+  let header = 4 * (1 + nSegs);
+  if (header % 8 !== 0) header += 4;
+  const ptr = view.getBigUint64(header, true);
+  const raw = Number((ptr >> 2n) & 0x3fffffffn);
+  const off = raw & 0x20000000 ? raw - 0x40000000 : raw;
+  const dataWords = Number((ptr >> 32n) & 0xffffn);
+  const start = header + 8 + off * 8;
+  return flat.subarray(start, start + dataWords * 8);
+}
+
+function nonzeroBytes(data: Uint8Array): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < data.length; i++) {
+    if (data[i] !== 0) out.push(i);
+  }
+  return out;
 }
 
 describe("explicit -0.0 float defaults", () => {
-  test("emits dflt = 0 and leaves +0 and nonzero defaults in place", async () => {
+  test("emits dflt = -0 for a negative zero and leaves other defaults", async () => {
     const { src } = await loadGenerated();
-    expect(src).toContain("export function Z_getF32(ptr: Ptr, dflt = 0): number");
+    expect(src).toContain("export function Z_getF32(ptr: Ptr, dflt = -0): number");
     expect(src).toContain(
-      "export function Z_setF32(ptr: StructBuilder, value: number, dflt = 0): void",
+      "export function Z_setF32(ptr: StructBuilder, value: number, dflt = -0): void",
     );
-    expect(src).toContain("export function Z_getF64(ptr: Ptr, dflt = 0): number");
+    expect(src).toContain("export function Z_getF64(ptr: Ptr, dflt = -0): number");
     expect(src).toContain(
-      "export function Z_setF64(ptr: StructBuilder, value: number, dflt = 0): void",
+      "export function Z_setF64(ptr: StructBuilder, value: number, dflt = -0): void",
     );
     expect(src).toContain("export function Z_getF32p(ptr: Ptr, dflt = 0): number");
     expect(src).toContain(
@@ -148,66 +142,90 @@ describe("explicit -0.0 float defaults", () => {
     );
     expect(src).toContain("export function Z_getKeep(ptr: Ptr, dflt = 1.5): number");
     expect(src).toContain(
-      "export function Z_setKeep(ptr: StructBuilder, value: number, dflt = 1.5): void",
-    );
-    expect(src).toContain(
       "export function Z_getWide(ptr: Ptr, dflt = -2.25): number",
     );
-    expect(src).toContain(
-      "export function Z_setWide(ptr: StructBuilder, value: number, dflt = -2.25): void",
-    );
-    expect(src).not.toContain("dflt = -0");
-    expect(src).toContain("export const Z_dataWordCount = 5;");
-    expect(src).toContain("export const Z_pointerCount = 0;");
   });
 
-  test("unset getter bits are +0 and set(1.25) cross-reads on both sides", async () => {
+  test("unset reads -0 and the wire distinguishes -0 from +0", async () => {
     const { gen } = await loadGenerated();
-    expect(gen.Z_dataWordCount).toBe(5);
-    expect(gen.Z_pointerCount).toBe(0);
+    const unsetFlat = flatOf(gen);
+    const unsetRoot = Message.fromFlat(unsetFlat).root();
+    expect(Object.is(gen.Z_getF32(unsetRoot), -0)).toBe(true);
+    expect(f32ToBits(gen.Z_getF32(unsetRoot))).toBe(UNSET_F32);
+    expect(Object.is(gen.Z_getF64(unsetRoot), -0)).toBe(true);
+    expect(f64ToBits(gen.Z_getF64(unsetRoot))).toBe(UNSET_F64);
+    expect(Object.is(gen.Z_getF32p(unsetRoot), 0)).toBe(true);
+    expect(f32ToBits(gen.Z_getF32p(unsetRoot))).toBe(0);
+    expect(Object.is(gen.Z_getF64p(unsetRoot), 0)).toBe(true);
+    expect(f64ToBits(gen.Z_getF64p(unsetRoot))).toBe(0n);
+    expect(gen.Z_getKeep(unsetRoot)).toBe(1.5);
+    expect(gen.Z_getWide(unsetRoot)).toBe(-2.25);
+    expect(nonzeroBytes(structData(unsetFlat))).toEqual([]);
 
-    const unset = readRoot(gen, Buffer.from(CPP_UNSET, "hex"));
-    expect(Object.is(unset.f32, 0)).toBe(true);
-    expect(f32ToBits(unset.f32)).toBe(0);
-    expect(Object.is(unset.f64, 0)).toBe(true);
-    expect(f64ToBits(unset.f64)).toBe(0n);
-    expect(Object.is(unset.f32p, 0)).toBe(true);
-    expect(f32ToBits(unset.f32p)).toBe(0);
-    expect(Object.is(unset.f64p, 0)).toBe(true);
-    expect(f64ToBits(unset.f64p)).toBe(0n);
-    expect(unset.keep).toBe(1.5);
-    expect(f32ToBits(unset.keep)).toBe(F32_1_5);
-    expect(unset.wide).toBe(-2.25);
-    expect(f64ToBits(unset.wide)).toBe(F64_NEG_2_25);
+    const negFlat = flatOf(gen, (z) => {
+      gen.Z_setF32(z, -0);
+      gen.Z_setF64(z, -0);
+    });
+    expect(nonzeroBytes(structData(negFlat))).toEqual([]);
+    const negRoot = Message.fromFlat(negFlat).root();
+    expect(f32ToBits(gen.Z_getF32(negRoot, 0))).toBe(0);
+    expect(f64ToBits(gen.Z_getF64(negRoot, 0))).toBe(0n);
+    expect(Object.is(gen.Z_getF32(negRoot), -0)).toBe(true);
+    expect(Object.is(gen.Z_getF64(negRoot), -0)).toBe(true);
 
-    const set125 = readRoot(gen, Buffer.from(CPP_SET125, "hex"));
-    expect(set125.f32).toBe(1.25);
-    expect(f32ToBits(set125.f32)).toBe(F32_125);
-    expect(set125.f64).toBe(1.25);
-    expect(f64ToBits(set125.f64)).toBe(F64_125);
-    expect(set125.f32p).toBe(1.25);
-    expect(f32ToBits(set125.f32p)).toBe(F32_125);
-    expect(set125.f64p).toBe(1.25);
-    expect(f64ToBits(set125.f64p)).toBe(F64_125);
-    expect(set125.keep).toBe(1.5);
-    expect(f32ToBits(set125.keep)).toBe(F32_1_5);
-    expect(set125.wide).toBe(-2.25);
-    expect(f64ToBits(set125.wide)).toBe(F64_NEG_2_25);
+    const pos32 = flatOf(gen, (z) => {
+      gen.Z_setF32(z, 0);
+    });
+    const pos32Bytes = nonzeroBytes(structData(pos32));
+    expect(pos32Bytes.length).toBe(1);
+    expect(structData(pos32)[pos32Bytes[0]!]).toBe(0x80);
+    expect(pos32Bytes[0]! % 4).toBe(3);
+    const pos32Root = Message.fromFlat(pos32).root();
+    expect(f32ToBits(gen.Z_getF32(pos32Root, 0))).toBe(UNSET_F32);
+    expect(Object.is(gen.Z_getF32(pos32Root), 0)).toBe(true);
 
-    const setall = readRoot(gen, Buffer.from(CPP_SETALL, "hex"));
-    expect(setall.f32).toBe(1.25);
-    expect(f32ToBits(setall.f32)).toBe(F32_125);
-    expect(setall.f64).toBe(1.25);
-    expect(f64ToBits(setall.f64)).toBe(F64_125);
-    expect(setall.f32p).toBe(1.25);
-    expect(setall.f64p).toBe(1.25);
-    expect(setall.keep).toBe(1.25);
-    expect(f32ToBits(setall.keep)).toBe(F32_125);
-    expect(setall.wide).toBe(1.25);
-    expect(f64ToBits(setall.wide)).toBe(F64_125);
+    const pos64 = flatOf(gen, (z) => {
+      gen.Z_setF64(z, 0);
+    });
+    const pos64Bytes = nonzeroBytes(structData(pos64));
+    expect(pos64Bytes.length).toBe(1);
+    expect(structData(pos64)[pos64Bytes[0]!]).toBe(0x80);
+    expect(pos64Bytes[0]! % 8).toBe(7);
+    const pos64Root = Message.fromFlat(pos64).root();
+    expect(f64ToBits(gen.Z_getF64(pos64Root, 0))).toBe(UNSET_F64);
+    expect(Object.is(gen.Z_getF64(pos64Root), 0)).toBe(true);
+  });
 
-    expect(Buffer.from(buildFlat(gen, "unset")).toString("hex")).toBe(CPP_UNSET);
-    expect(Buffer.from(buildFlat(gen, "set125")).toString("hex")).toBe(CPP_SET125);
-    expect(Buffer.from(buildFlat(gen, "setall")).toString("hex")).toBe(CPP_SETALL);
+  test("a NaN payload default round-trips bit-exact", () => {
+    const nan32 = bitsToF32(NAN_F32);
+    const nan64 = bitsToF64(NAN_F64);
+    expect(f32ToBits(nan32)).toBe(NAN_F32);
+    expect(f64ToBits(nan64)).toBe(NAN_F64);
+    const builder = new MessageBuilder();
+    const blank = builder.initRoot(2, 0);
+    const blankFlat = builder.toFlat();
+    const blankRoot = Message.fromFlat(blankFlat).root();
+    expect(f32ToBits(blankRoot.getF32(0, nan32))).toBe(NAN_F32);
+    expect(f64ToBits(blankRoot.getF64(8, nan64))).toBe(NAN_F64);
+    expect(nonzeroBytes(structData(blankFlat))).toEqual([]);
+
+    blank.setF32(0, nan32, nan32);
+    blank.setF64(8, nan64, nan64);
+    const sameFlat = builder.toFlat();
+    expect(nonzeroBytes(structData(sameFlat))).toEqual([]);
+    const sameRoot = Message.fromFlat(sameFlat).root();
+    expect(f32ToBits(sameRoot.getF32(0, nan32))).toBe(NAN_F32);
+    expect(f64ToBits(sameRoot.getF64(8, nan64))).toBe(NAN_F64);
+
+    const pos = new MessageBuilder();
+    const w = pos.initRoot(2, 0);
+    w.setF32(0, 0, nan32);
+    w.setF64(8, 0, nan64);
+    const posFlat = pos.toFlat();
+    const raw = Message.fromFlat(posFlat).root();
+    expect(f32ToBits(raw.getF32(0, 0))).toBe(NAN_F32);
+    expect(f64ToBits(raw.getF64(8, 0))).toBe(NAN_F64);
+    expect(Object.is(raw.getF32(0, nan32), 0)).toBe(true);
+    expect(Object.is(raw.getF64(8, nan64), 0)).toBe(true);
   });
 });
