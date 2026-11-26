@@ -604,7 +604,128 @@ function assertValueMatches(
   return layout;
 }
 
-function assertStructNode(raw: RawNodeRecord): void {
+type LoadedNodes = ReadonlyMap<bigint, RawNodeRecord>;
+
+/**
+ * Pointer-ness of a Type tag, matching Validator's brand check. A tag the
+ * C++ switch does not name stays a pointer, so the binding is allowed.
+ */
+function isPointerTypeTag(tag: number): boolean {
+  switch (tag) {
+    case TypeKind.Void:
+    case TypeKind.Bool:
+    case TypeKind.Int8:
+    case TypeKind.Int16:
+    case TypeKind.Int32:
+    case TypeKind.Int64:
+    case TypeKind.UInt8:
+    case TypeKind.UInt16:
+    case TypeKind.UInt32:
+    case TypeKind.UInt64:
+    case TypeKind.Float32:
+    case TypeKind.Float64:
+    case TypeKind.Enum:
+      return false;
+    default:
+      return true;
+  }
+}
+
+/**
+ * Kind check from Validator::validateTypeId. An id that is not loaded yet is
+ * recorded for this node only; a later use of that id with another kind fails
+ * the same way a placeholder of the first kind would.
+ */
+function assertLoadedKind(
+  loaded: LoadedNodes,
+  pendingKinds: Map<bigint, SchemaNodeWhich>,
+  id: bigint,
+  expected: SchemaNodeWhich,
+): void {
+  const existing = loaded.get(id);
+  if (existing) {
+    assertCapnp(
+      existing.which === expected,
+      "SCHEMA",
+      "expected a different kind of node for this ID",
+    );
+  }
+  const prior = pendingKinds.get(id);
+  if (prior !== undefined) {
+    assertCapnp(
+      prior === expected,
+      "SCHEMA",
+      "expected a different kind of node for this ID",
+    );
+    return;
+  }
+  if (!existing) pendingKinds.set(id, expected);
+}
+
+function assertBrand(
+  brandPtr: Ptr | null,
+  loaded: LoadedNodes,
+  pendingKinds: Map<bigint, SchemaNodeWhich>,
+): void {
+  if (!brandPtr || brandPtr.kind !== PtrKind.Struct) return;
+  const scopes = brandPtr.getP(0);
+  if (scopes.kind !== PtrKind.List) return;
+  for (let i = 0; i < scopes.listLen(); i++) {
+    const scope = scopes.listGetP(i);
+    if (scope.kind !== PtrKind.Struct) continue;
+    // Brand.Scope: bind = 0, inherit = 1. Other tags are not errors.
+    if (scope.getU16(8) !== 0) continue;
+    const bindings = scope.getP(0);
+    if (bindings.kind !== PtrKind.List) continue;
+    for (let j = 0; j < bindings.listLen(); j++) {
+      const binding = bindings.listGetP(j);
+      if (binding.kind !== PtrKind.Struct) continue;
+      // Brand.Binding: unbound = 0, type = 1.
+      if (binding.getU16(0) !== 1) continue;
+      const typePtr = binding.getP(0);
+      assertSchemaType(typePtr, loaded, pendingKinds);
+      assertCapnp(
+        isPointerTypeTag(unionTag(typePtr)),
+        "SCHEMA",
+        "generic type parameter must be a pointer type",
+      );
+    }
+  }
+}
+
+function assertSchemaType(
+  typePtr: Ptr | null,
+  loaded: LoadedNodes,
+  pendingKinds: Map<bigint, SchemaNodeWhich>,
+): void {
+  if (!typePtr || typePtr.kind !== PtrKind.Struct) return;
+  const tag = typePtr.getU16(0);
+  switch (tag) {
+    case TypeKind.Struct:
+      assertLoadedKind(loaded, pendingKinds, typePtr.getU64(8), "struct");
+      assertBrand(typePtr.getP(0), loaded, pendingKinds);
+      break;
+    case TypeKind.Enum:
+      assertLoadedKind(loaded, pendingKinds, typePtr.getU64(8), "enum");
+      assertBrand(typePtr.getP(0), loaded, pendingKinds);
+      break;
+    case TypeKind.Interface:
+      assertLoadedKind(loaded, pendingKinds, typePtr.getU64(8), "interface");
+      assertBrand(typePtr.getP(0), loaded, pendingKinds);
+      break;
+    case TypeKind.List:
+      assertSchemaType(typePtr.getP(0), loaded, pendingKinds);
+      break;
+    default:
+      break;
+  }
+}
+
+function assertStructNode(
+  raw: RawNodeRecord,
+  loaded: LoadedNodes,
+  pendingKinds: Map<bigint, SchemaNodeWhich>,
+): void {
   const fields = raw.fields;
   const dataSizeInBits = (raw.dataWordCount * 64) >>> 0;
   const pointerCount = raw.pointerCount >>> 0;
@@ -630,6 +751,11 @@ function assertStructNode(raw: RawNodeRecord): void {
 
   const names = new Set<string>();
   const sawCodeOrder = new Array<boolean>(fields.length);
+  const sawDiscriminant = new Array<boolean>(raw.discriminantCount);
+  let discriminantPos = 0;
+  let nonDiscriminantPos = raw.discriminantCount;
+  let nextOrdinal = 0;
+
   for (const field of fields) {
     assertCapnp(
       !names.has(field.name),
@@ -644,15 +770,66 @@ function assertStructNode(raw: RawNodeRecord): void {
     );
     sawCodeOrder[field.codeOrder] = true;
 
-    if (field.kind !== "slot") continue;
-    const layout = assertValueMatches(field.typePtr, field.proto.getP(3));
-    const off1 = (field.offset + 1) >>> 0;
-    assertCapnp(
-      u32mul(layout.bits, off1) <= dataSizeInBits &&
-        u32mul(layout.pointer ? 1 : 0, off1) <= pointerCount,
-      "SCHEMA",
-      "field offset out-of-bounds",
-    );
+    if (field.explicitOrdinal !== null) {
+      assertCapnp(
+        field.explicitOrdinal >= nextOrdinal,
+        "SCHEMA",
+        "fields were not ordered by ordinal",
+      );
+      nextOrdinal = field.explicitOrdinal + 1;
+    }
+
+    if (field.discriminantValue !== NO_DISCRIMINANT) {
+      assertCapnp(
+        field.discriminantValue < sawDiscriminant.length &&
+          !sawDiscriminant[field.discriminantValue],
+        "SCHEMA",
+        "invalid discriminantValue",
+      );
+      sawDiscriminant[field.discriminantValue] = true;
+      discriminantPos += 1;
+    } else {
+      assertCapnp(
+        nonDiscriminantPos <= fields.length,
+        "SCHEMA",
+        "discriminantCount did not match fields",
+      );
+      nonDiscriminantPos += 1;
+    }
+
+    // Field union: slot = 0, group = 1. Any other tag has no check.
+    const fieldWhich = field.proto.getU16(8);
+    if (fieldWhich === 0) {
+      assertSchemaType(field.typePtr, loaded, pendingKinds);
+      const layout = assertValueMatches(field.typePtr, field.proto.getP(3));
+      const off1 = (field.offset + 1) >>> 0;
+      assertCapnp(
+        u32mul(layout.bits, off1) <= dataSizeInBits &&
+          u32mul(layout.pointer ? 1 : 0, off1) <= pointerCount,
+        "SCHEMA",
+        "field offset out-of-bounds",
+      );
+    } else if (fieldWhich === 1) {
+      assertLoadedKind(loaded, pendingKinds, field.groupTypeId, "struct");
+    }
+  }
+
+  // Reachable when the union is exactly one member short: the per-field
+  // non-member check still passes, and C++ then hits KJ_ASSERT.
+  assertCapnp(
+    discriminantPos === raw.discriminantCount,
+    "SCHEMA",
+    "discriminantCount did not match fields",
+  );
+  assertCapnp(
+    nonDiscriminantPos === fields.length,
+    "SCHEMA",
+    "discriminantCount did not match fields",
+  );
+
+  if (raw.isGroup) {
+    assertCapnp(raw.scopeId !== 0n, "SCHEMA", "group node missing scopeId");
+    assertLoadedKind(loaded, pendingKinds, raw.scopeId, "struct");
   }
 }
 
@@ -677,8 +854,18 @@ function assertEnumNode(raw: RawNodeRecord): void {
   }
 }
 
-function assertInterfaceNames(raw: RawNodeRecord): void {
+function assertInterfaceNode(
+  raw: RawNodeRecord,
+  loaded: LoadedNodes,
+  pendingKinds: Map<bigint, SchemaNodeWhich>,
+): void {
+  for (const superclass of raw.superclasses) {
+    assertLoadedKind(loaded, pendingKinds, superclass.id, "interface");
+    assertBrand(superclass.brandPtr, loaded, pendingKinds);
+  }
+
   const names = new Set<string>();
+  const sawCodeOrder = new Array<boolean>(raw.methods.length);
   for (const method of raw.methods) {
     assertCapnp(
       !names.has(method.name),
@@ -686,15 +873,24 @@ function assertInterfaceNames(raw: RawNodeRecord): void {
       `duplicate name; name = ${method.name}`,
     );
     names.add(method.name);
+    assertCapnp(
+      method.codeOrder < sawCodeOrder.length && !sawCodeOrder[method.codeOrder],
+      "SCHEMA",
+      "invalid codeOrder",
+    );
+    sawCodeOrder[method.codeOrder] = true;
+    assertLoadedKind(loaded, pendingKinds, method.paramStructType, "struct");
+    assertBrand(method.paramBrandPtr, loaded, pendingKinds);
+    assertLoadedKind(loaded, pendingKinds, method.resultStructType, "struct");
+    assertBrand(method.resultBrandPtr, loaded, pendingKinds);
   }
 }
 
 /**
  * C++ 1.4.0 SchemaLoader::Validator checks. A failure throws before the node
- * is stored. Offset math wraps as uint32, so an offset the C++ loader accepts
- * still loads here.
+ * is stored. Offset products wrap as uint32, matching the C++ uint multiply.
  */
-function validateLoadedNode(raw: RawNodeRecord): void {
+function validateLoadedNode(raw: RawNodeRecord, loaded: LoadedNodes): void {
   if (raw.parameters.length > 0) {
     assertCapnp(
       raw.isGeneric,
@@ -703,18 +899,23 @@ function validateLoadedNode(raw: RawNodeRecord): void {
     );
   }
 
+  const pendingKinds = new Map<bigint, SchemaNodeWhich>();
   switch (raw.which) {
     case "struct":
-      assertStructNode(raw);
+      assertStructNode(raw, loaded, pendingKinds);
       break;
     case "enum":
       assertEnumNode(raw);
       break;
     case "interface":
-      assertInterfaceNames(raw);
+      assertInterfaceNode(raw, loaded, pendingKinds);
       break;
     case "const":
+      assertSchemaType(raw.constTypePtr, loaded, pendingKinds);
       assertValueMatches(raw.constTypePtr, raw.proto.getP(4));
+      break;
+    case "annotation":
+      assertSchemaType(raw.annotationTypePtr, loaded, pendingKinds);
       break;
     default:
       break;
@@ -1943,7 +2144,7 @@ export class SchemaLoader {
 
   loadNode(nodePtr: Ptr): Schema {
     const raw = decodeRawNode(nodePtr);
-    validateLoadedNode(raw);
+    validateLoadedNode(raw, this.rawNodes);
     this.rawNodes.set(raw.id, raw);
     return this.get(raw.id);
   }
@@ -1967,7 +2168,7 @@ export class SchemaLoader {
     if (nodesList.kind === PtrKind.List) {
       for (let i = 0; i < nodesList.listLen(); i++) {
         const raw = decodeRawNode(nodesList.listGetP(i));
-        validateLoadedNode(raw);
+        validateLoadedNode(raw, this.rawNodes);
         this.rawNodes.set(raw.id, raw);
       }
     }
