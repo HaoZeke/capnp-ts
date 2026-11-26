@@ -19,7 +19,7 @@ export class Ptr {
   kind = 0;
   getU16(_offset: number, _dflt?: number): number { return 0; }
   getU32(_offset: number, _dflt?: number): number { return 0; }
-  getP(_index: number): Ptr { return this; }
+  getP(_index: number, _expected?: "struct" | "text" | "data" | "copy" | "list"): Ptr { return this; }
 }
 export const PtrKind = { Null: 0, Struct: 1, List: 2, Cap: 3 };
 export class StructBuilder {
