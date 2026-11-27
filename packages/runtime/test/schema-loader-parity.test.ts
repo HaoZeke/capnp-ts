@@ -358,6 +358,7 @@ interface FieldSpec {
   typeId?: bigint;
   element?: number;
   elementId?: bigint;
+  groupId?: bigint;
 }
 
 function declNode(opts: {
@@ -442,11 +443,15 @@ function declNode(opts: {
 function writeField(field: StructBuilder, spec: FieldSpec, index: number): void {
   field.setText(0, spec.name);
   field.setU16(0, index);
-  field.setU16(8, 0);
+  field.setU16(8, spec.groupId !== undefined ? 1 : 0);
   field.setU32(4, spec.offset ?? 0);
   field.setU16(10, 1);
   field.setU16(12, spec.ordinal ?? index);
   if (spec.disc !== undefined) field.setU16(2, spec.disc, NO_DISCRIMINANT);
+  if (spec.groupId !== undefined) {
+    field.setU64(16, spec.groupId);
+    return;
+  }
   const type = field.initStruct(2, TYPE_DW, TYPE_PW);
   type.setU16(0, spec.type);
   if (spec.typeId !== undefined) type.setU64(8, spec.typeId);
@@ -1181,5 +1186,519 @@ describe("SchemaLoader upgrade bookkeeping", () => {
       expect(seen.displayName).toBe("Real");
       expect(loader.get(spec.target).displayName).toBe("Real");
     }
+  });
+
+  test("slot and group fields upgrade in both directions", () => {
+    const slotFirst = new SchemaLoader();
+    const groupId = 0xac01n;
+    loadFlat(
+      slotFirst,
+      declNode({
+        id: 0xac00n,
+        name: "V1",
+        dataWords: 1,
+        fields: [{ name: "x", type: TypeKind.UInt64, def: 4n }],
+      }),
+    );
+    loadFlat(slotFirst, groupNode(0xac00n, "V2", groupId, 1));
+    const upgraded = slotFirst.get(0xac00n).asStruct();
+    expect(upgraded.displayName).toBe("V2");
+    expect(upgraded.getFields()[0]!.kind).toBe("group");
+    const placeholder = upgraded.getFields()[0]!.getType().asStruct();
+    expect(placeholder.id).toBe(groupId);
+    expect(placeholder.getFields()[0]!.name).toBe("member0");
+    expect(placeholder.getFields()[0]!.getType().which).toBe("uint64");
+
+    const groupFirst = new SchemaLoader();
+    const kept = 0xac11n;
+    loadFlat(
+      groupFirst,
+      declNode({
+        id: kept,
+        name: "G",
+        dataWords: 1,
+        fields: [{ name: "x", type: TypeKind.UInt64, def: 4n }],
+      }),
+    );
+    loadFlat(groupFirst, groupNode(0xac10n, "V1", kept, 1));
+    loadFlat(
+      groupFirst,
+      declNode({
+        id: 0xac10n,
+        name: "V2",
+        dataWords: 1,
+        fields: [{ name: "x", type: TypeKind.UInt64, def: 4n }],
+      }),
+    );
+    expect(groupFirst.get(0xac10n).displayName).toBe("V1");
+    expect(groupFirst.get(0xac10n).asStruct().getFields()[0]!.kind).toBe("group");
+  });
+
+  test("a group id change is rejected", () => {
+    const loader = new SchemaLoader();
+    const parent = 0xaa00n;
+    const first = 0xaa01n;
+    const second = 0xaa02n;
+    loadFlat(
+      loader,
+      declNode({
+        id: parent,
+        name: "V1",
+        fields: [{ name: "g", type: TypeKind.Void, groupId: first }],
+      }),
+    );
+    const thrown = capture(() => {
+      loadFlat(
+        loader,
+        declNode({
+          id: parent,
+          name: "V2",
+          fields: [{ name: "g", type: TypeKind.Void, groupId: second }],
+        }),
+      );
+    });
+    expect(thrown).toBeInstanceOf(CapnpError);
+    expect((thrown as CapnpError).message).toContain("group id changed");
+    expect(loader.get(parent).displayName).toBe("V1");
+    expect(loader.has(second)).toBe(false);
+    expect(loader.get(parent).asStruct().getFields()[0]!.getType().asStruct().id).toBe(first);
+  });
+
+  test("a group scope change is rejected", () => {
+    const loader = new SchemaLoader();
+    const group = 0xaa10n;
+    const scope1 = 0xaa11n;
+    const scope2 = 0xaa12n;
+    loadFlat(loader, declNode({ id: scope1, name: "S1" }));
+    loadFlat(loader, declNode({ id: scope2, name: "S2" }));
+    loadFlat(
+      loader,
+      declNode({
+        id: group,
+        name: "G1",
+        scopeId: scope1,
+        isGroup: true,
+        dataWords: 2,
+      }),
+    );
+    expect(loader.get(scope1).asStruct().dataWordCount).toBe(2);
+    const thrown = capture(() => {
+      loadFlat(
+        loader,
+        declNode({
+          id: group,
+          name: "G2",
+          scopeId: scope2,
+          isGroup: true,
+          dataWords: 4,
+        }),
+      );
+    });
+    expect(thrown).toBeInstanceOf(CapnpError);
+    expect((thrown as CapnpError).message).toContain("group node's scope changed");
+    expect(loader.get(group).displayName).toBe("G1");
+    expect(loader.get(group).scopeId).toBe(scope1);
+    expect(loader.get(group).asStruct().dataWordCount).toBe(2);
+    expect(loader.get(scope1).asStruct().dataWordCount).toBe(2);
+    expect(loader.get(scope2).asStruct().dataWordCount).toBe(0);
+  });
+
+  test("interface superclass branches follow one direction", () => {
+    const b1 = 0xab01n;
+    const b2 = 0xab02n;
+    const b3 = 0xab03n;
+    const api = 0xab00n;
+    const bases = [b1, b2, b3];
+
+    function fresh(name: string, supers: readonly bigint[]): SchemaLoader {
+      const loader = new SchemaLoader();
+      for (const id of bases) {
+        loadFlat(
+          loader,
+          declNode({
+            id,
+            name: `Base${id.toString(16)}`,
+            which: SchemaNodeKind.Interface,
+          }),
+        );
+      }
+      loadFlat(
+        loader,
+        declNode({ id: api, name, which: SchemaNodeKind.Interface, supers }),
+      );
+      return loader;
+    }
+
+    function reload(loader: SchemaLoader, name: string, supers: readonly bigint[]): void {
+      loadFlat(
+        loader,
+        declNode({ id: api, name, which: SchemaNodeKind.Interface, supers }),
+      );
+    }
+
+    const added = fresh("V1", [b1]);
+    reload(added, "V2", [b1, b2]);
+    expect(added.get(api).displayName).toBe("V2");
+    expect(added.get(api).asInterface().getSuperclasses().map((sc) => sc.id)).toEqual([b1, b2]);
+
+    const dropped = fresh("V1", [b1, b2]);
+    reload(dropped, "V2", [b1]);
+    expect(dropped.get(api).displayName).toBe("V1");
+    expect(dropped.get(api).asInterface().getSuperclasses().map((sc) => sc.id)).toEqual([
+      b1,
+      b2,
+    ]);
+
+    const lowerNew = fresh("V1", [b2, b3]);
+    reload(lowerNew, "V2", [b1, b2, b3]);
+    expect(lowerNew.get(api).displayName).toBe("V2");
+    expect(lowerNew.get(api).asInterface().getSuperclasses().map((sc) => sc.id)).toEqual([
+      b1,
+      b2,
+      b3,
+    ]);
+
+    const lowerGone = fresh("V1", [b1, b3]);
+    reload(lowerGone, "V2", [b3]);
+    expect(lowerGone.get(api).displayName).toBe("V1");
+    expect(lowerGone.get(api).asInterface().getSuperclasses().map((sc) => sc.id)).toEqual([
+      b1,
+      b3,
+    ]);
+
+    const swapped = fresh("V1", [b1]);
+    const thrown = capture(() => {
+      reload(swapped, "V2", [b2]);
+    });
+    expect(thrown).toBeInstanceOf(CapnpError);
+    expect((thrown as CapnpError).message).toContain("upgrades and some");
+    expect(swapped.get(api).displayName).toBe("V1");
+    expect(swapped.get(api).asInterface().getSuperclasses().map((sc) => sc.id)).toEqual([b1]);
+  });
+
+  test("enum struct and interface ids must match", () => {
+    const cases: ReadonlyArray<{
+      id: bigint;
+      left: bigint;
+      right: bigint;
+      type: number;
+      which: number;
+      dataWords: number;
+      pointers: number;
+      message: string;
+      read: (loader: SchemaLoader, id: bigint) => bigint;
+    }> = [
+      {
+        id: 0xae00n,
+        left: 0xae01n,
+        right: 0xae02n,
+        type: TypeKind.Enum,
+        which: SchemaNodeKind.Enum,
+        dataWords: 1,
+        pointers: 0,
+        message: "type changed enum type",
+        read: (loader, id) =>
+          loader.get(id).asStruct().getFields()[0]!.getType().asEnum().id,
+      },
+      {
+        id: 0xae10n,
+        left: 0xae11n,
+        right: 0xae12n,
+        type: TypeKind.Struct,
+        which: SchemaNodeKind.Struct,
+        dataWords: 0,
+        pointers: 1,
+        message: "type changed to incompatible struct type",
+        read: (loader, id) =>
+          loader.get(id).asStruct().getFields()[0]!.getType().asStruct().id,
+      },
+      {
+        id: 0xae20n,
+        left: 0xae21n,
+        right: 0xae22n,
+        type: TypeKind.Interface,
+        which: SchemaNodeKind.Interface,
+        dataWords: 0,
+        pointers: 1,
+        message: "type changed to incompatible interface type",
+        read: (loader, id) =>
+          loader.get(id).asStruct().getFields()[0]!.getType().asInterface().id,
+      },
+    ];
+    for (const spec of cases) {
+      const loader = new SchemaLoader();
+      loadFlat(
+        loader,
+        declNode({
+          id: spec.left,
+          name: "Left",
+          which: spec.which,
+          enumerants: spec.which === SchemaNodeKind.Enum ? ["a"] : [],
+        }),
+      );
+      loadFlat(
+        loader,
+        declNode({
+          id: spec.right,
+          name: "Right",
+          which: spec.which,
+          enumerants: spec.which === SchemaNodeKind.Enum ? ["b"] : [],
+        }),
+      );
+      loadFlat(
+        loader,
+        declNode({
+          id: spec.id,
+          name: "V1",
+          dataWords: spec.dataWords,
+          pointers: spec.pointers,
+          fields: [{ name: "item", type: spec.type, typeId: spec.left }],
+        }),
+      );
+      const thrown = capture(() => {
+        loadFlat(
+          loader,
+          declNode({
+            id: spec.id,
+            name: "V2",
+            dataWords: spec.dataWords,
+            pointers: spec.pointers,
+            fields: [{ name: "item", type: spec.type, typeId: spec.right }],
+          }),
+        );
+      });
+      expect(thrown).toBeInstanceOf(CapnpError);
+      expect((thrown as CapnpError).message).toContain(spec.message);
+      expect(loader.get(spec.id).displayName).toBe("V1");
+      expect(spec.read(loader, spec.id)).toBe(spec.left);
+    }
+  });
+
+  test("an older Data or AnyPointer list element stays in place", () => {
+    const cases: ReadonlyArray<{
+      id: bigint;
+      older: number;
+      elementId?: bigint;
+      which: "data" | "anyPointer";
+    }> = [
+      { id: 0xaf00n, older: TypeKind.Text, which: "data" },
+      { id: 0xaf20n, older: TypeKind.Text, which: "anyPointer" },
+      { id: 0xaf30n, older: TypeKind.Data, which: "anyPointer" },
+      { id: 0xaf40n, older: TypeKind.Struct, elementId: 0xaf41n, which: "anyPointer" },
+    ];
+    for (const spec of cases) {
+      const loader = new SchemaLoader();
+      const element = spec.which === "data" ? TypeKind.Data : TypeKind.AnyPointer;
+      loadFlat(
+        loader,
+        declNode({
+          id: spec.id,
+          name: "V1",
+          pointers: 1,
+          fields: [{ name: "b", type: TypeKind.List, element }],
+        }),
+      );
+      loadFlat(
+        loader,
+        declNode({
+          id: spec.id,
+          name: "V2",
+          pointers: 1,
+          fields: [
+            {
+              name: "b",
+              type: TypeKind.List,
+              element: spec.older,
+              elementId: spec.elementId,
+            },
+          ],
+        }),
+      );
+      expect(loader.get(spec.id).displayName).toBe("V1");
+      expect(
+        loader.get(spec.id).asStruct().getFields()[0]!.getType().asList().getElementType().which,
+      ).toBe(spec.which);
+    }
+  });
+
+  test("a reverse list element upgrade keeps the struct list", () => {
+    const loader = new SchemaLoader();
+    const target = 0xb001n;
+    loadFlat(
+      loader,
+      declNode({
+        id: 0xb000n,
+        name: "Box",
+        pointers: 1,
+        fields: [
+          {
+            name: "items",
+            type: TypeKind.List,
+            element: TypeKind.Struct,
+            elementId: target,
+          },
+        ],
+      }),
+    );
+    expect(loader.has(target)).toBe(false);
+    loadFlat(
+      loader,
+      declNode({
+        id: 0xb000n,
+        name: "BoxOld",
+        pointers: 1,
+        fields: [{ name: "items", type: TypeKind.List, element: TypeKind.UInt32 }],
+      }),
+    );
+    expect(loader.get(0xb000n).displayName).toBe("Box");
+    expect(loader.has(target)).toBe(false);
+    const element = loader
+      .get(0xb000n)
+      .asStruct()
+      .getFields()[0]!
+      .getType()
+      .asList()
+      .getElementType();
+    expect(element.which).toBe("struct");
+    expect(element.asStruct().dataWordCount).toBe(1);
+    expect(element.asStruct().pointerCount).toBe(0);
+    expect(element.asStruct().getFields()[0]!.name).toBe("member0");
+    expect(element.asStruct().getFields()[0]!.getType().which).toBe("uint32");
+  });
+
+  test("struct size requirements keep the earlier maximum", () => {
+    const parent = 0xad00n;
+    const loader = new SchemaLoader();
+    loadFlat(loader, declNode({ id: parent, name: "Outer" }));
+    loadFlat(
+      loader,
+      declNode({
+        id: 0xad01n,
+        name: "G1",
+        scopeId: parent,
+        isGroup: true,
+        dataWords: 2,
+      }),
+    );
+    expect(loader.get(parent).asStruct().dataWordCount).toBe(2);
+    expect(loader.get(parent).asStruct().pointerCount).toBe(0);
+    loadFlat(
+      loader,
+      declNode({
+        id: 0xad02n,
+        name: "G2",
+        scopeId: parent,
+        isGroup: true,
+        pointers: 3,
+      }),
+    );
+    expect(loader.get(parent).asStruct().dataWordCount).toBe(2);
+    expect(loader.get(parent).asStruct().pointerCount).toBe(3);
+    expect(loader.get(parent).getProto().getU16(14)).toBe(2);
+    expect(loader.get(parent).getProto().getU16(24)).toBe(3);
+    loadFlat(
+      loader,
+      declNode({
+        id: 0xad03n,
+        name: "G3",
+        scopeId: parent,
+        isGroup: true,
+        dataWords: 1,
+        pointers: 1,
+      }),
+    );
+    expect(loader.get(parent).asStruct().dataWordCount).toBe(2);
+    expect(loader.get(parent).asStruct().pointerCount).toBe(3);
+    expect(loader.get(parent).getProto().getU16(14)).toBe(2);
+    expect(loader.get(parent).getProto().getU16(24)).toBe(3);
+
+    const later = new SchemaLoader();
+    const parent2 = 0xad10n;
+    loadFlat(
+      later,
+      declNode({
+        id: 0xad11n,
+        name: "H1",
+        scopeId: parent2,
+        isGroup: true,
+        dataWords: 4,
+        pointers: 1,
+      }),
+    );
+    loadFlat(
+      later,
+      declNode({
+        id: 0xad12n,
+        name: "H2",
+        scopeId: parent2,
+        isGroup: true,
+        dataWords: 2,
+        pointers: 5,
+      }),
+    );
+    loadFlat(later, declNode({ id: parent2, name: "Outer2", dataWords: 1 }));
+    const applied = later.get(parent2).asStruct();
+    expect(applied.displayName).toBe("Outer2");
+    expect(applied.dataWordCount).toBe(4);
+    expect(applied.pointerCount).toBe(5);
+    expect(applied.getProto().getU16(14)).toBe(4);
+    expect(applied.getProto().getU16(24)).toBe(5);
+    loadFlat(
+      later,
+      declNode({
+        id: 0xad13n,
+        name: "H3",
+        scopeId: parent2,
+        isGroup: true,
+        dataWords: 1,
+        pointers: 1,
+      }),
+    );
+    expect(later.get(parent2).asStruct().dataWordCount).toBe(4);
+    expect(later.get(parent2).asStruct().pointerCount).toBe(5);
+  });
+
+  test("a void list element upgrades to a zero size struct", () => {
+    const loader = new SchemaLoader();
+    const target = 0xb101n;
+    loadFlat(
+      loader,
+      declNode({
+        id: 0xb100n,
+        name: "V1",
+        pointers: 1,
+        fields: [{ name: "items", type: TypeKind.List, element: TypeKind.Void }],
+      }),
+    );
+    loadFlat(
+      loader,
+      declNode({
+        id: 0xb100n,
+        name: "V2",
+        pointers: 1,
+        fields: [
+          {
+            name: "items",
+            type: TypeKind.List,
+            element: TypeKind.Struct,
+            elementId: target,
+          },
+        ],
+      }),
+    );
+    expect(loader.get(0xb100n).displayName).toBe("V2");
+    const element = loader
+      .get(0xb100n)
+      .asStruct()
+      .getFields()[0]!
+      .getType()
+      .asList()
+      .getElementType()
+      .asStruct();
+    expect(element.dataWordCount).toBe(0);
+    expect(element.pointerCount).toBe(0);
+    expect(element.getFields()).toHaveLength(1);
+    expect(element.getFields()[0]!.name).toBe("member0");
+    expect(element.getFields()[0]!.getType().which).toBe("void");
   });
 });
