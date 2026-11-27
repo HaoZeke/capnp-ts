@@ -216,7 +216,7 @@ describe("SchemaLoader schema reload", () => {
     expect(st.getFields()[0]!.defaultValue).toEqual({ which: "uint32", value: 7 });
   });
 
-  test("an identical NaN float default reloads", () => {
+  test("an identical NaN float default does not reload", () => {
     const loader = new SchemaLoader();
     const nan32 = 0x7fc00000;
     const nan64 = 0x7ff8000000000000n;
@@ -229,15 +229,19 @@ describe("SchemaLoader schema reload", () => {
         fields: [{ name: "x", type: TypeKind.Float32, def: nan32 }],
       }),
     );
-    loadFlat(
-      loader,
-      declNode({
-        id: 0x7771n,
-        name: "F32b",
-        dataWords: 1,
-        fields: [{ name: "x", type: TypeKind.Float32, def: nan32 }],
-      }),
-    );
+    const thrown32 = capture(() => {
+      loadFlat(
+        loader,
+        declNode({
+          id: 0x7771n,
+          name: "F32b",
+          dataWords: 1,
+          fields: [{ name: "x", type: TypeKind.Float32, def: nan32 }],
+        }),
+      );
+    });
+    expect(thrown32).toBeInstanceOf(CapnpError);
+    expect((thrown32 as CapnpError).message).toContain("default value changed");
     expect(loader.get(0x7771n).displayName).toBe("F32");
     expect(loader.get(0x7771n).asStruct().getFields()[0]!.defaultValue).toMatchObject({
       which: "float32",
@@ -252,15 +256,19 @@ describe("SchemaLoader schema reload", () => {
         fields: [{ name: "x", type: TypeKind.Float64, def: nan64 }],
       }),
     );
-    loadFlat(
-      loader,
-      declNode({
-        id: 0x7773n,
-        name: "F64b",
-        dataWords: 1,
-        fields: [{ name: "x", type: TypeKind.Float64, def: nan64 }],
-      }),
-    );
+    const thrown64 = capture(() => {
+      loadFlat(
+        loader,
+        declNode({
+          id: 0x7773n,
+          name: "F64b",
+          dataWords: 1,
+          fields: [{ name: "x", type: TypeKind.Float64, def: nan64 }],
+        }),
+      );
+    });
+    expect(thrown64).toBeInstanceOf(CapnpError);
+    expect((thrown64 as CapnpError).message).toContain("default value changed");
     expect(loader.get(0x7773n).displayName).toBe("F64");
     expect(loader.get(0x7773n).asStruct().getFields()[0]!.defaultValue).toMatchObject({
       which: "float64",
@@ -268,7 +276,7 @@ describe("SchemaLoader schema reload", () => {
     });
   });
 
-  test("negative zero and positive zero float defaults differ", () => {
+  test("negative zero and positive zero float defaults reload", () => {
     const loader = new SchemaLoader();
     const neg32 = 0x80000000;
     const neg64 = 0x8000000000000000n;
@@ -281,19 +289,16 @@ describe("SchemaLoader schema reload", () => {
         fields: [{ name: "x", type: TypeKind.Float32, def: neg32 }],
       }),
     );
-    const thrown32 = capture(() => {
-      loadFlat(
-        loader,
-        declNode({
-          id: 0x7772n,
-          name: "Z32b",
-          dataWords: 1,
-          fields: [{ name: "x", type: TypeKind.Float32, def: 0 }],
-        }),
-      );
-    });
-    expect(thrown32).toBeInstanceOf(CapnpError);
-    expect((thrown32 as CapnpError).message).toContain("default value changed");
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x7772n,
+        name: "Z32b",
+        dataWords: 1,
+        fields: [{ name: "x", type: TypeKind.Float32, def: 0 }],
+      }),
+    );
+    expect(loader.get(0x7772n).displayName).toBe("Z32");
     expect(loader.get(0x7772n).asStruct().getFields()[0]!.defaultValue).toMatchObject({
       which: "float32",
       rawBits: neg32,
@@ -307,19 +312,16 @@ describe("SchemaLoader schema reload", () => {
         fields: [{ name: "x", type: TypeKind.Float64, def: neg64 }],
       }),
     );
-    const thrown64 = capture(() => {
-      loadFlat(
-        loader,
-        declNode({
-          id: 0x7774n,
-          name: "Z64b",
-          dataWords: 1,
-          fields: [{ name: "x", type: TypeKind.Float64, def: 0n }],
-        }),
-      );
-    });
-    expect(thrown64).toBeInstanceOf(CapnpError);
-    expect((thrown64 as CapnpError).message).toContain("default value changed");
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x7774n,
+        name: "Z64b",
+        dataWords: 1,
+        fields: [{ name: "x", type: TypeKind.Float64, def: 0n }],
+      }),
+    );
+    expect(loader.get(0x7774n).displayName).toBe("Z64");
     expect(loader.get(0x7774n).asStruct().getFields()[0]!.defaultValue).toMatchObject({
       which: "float64",
       rawBits: neg64,
@@ -659,7 +661,10 @@ describe("SchemaLoader upgrade bookkeeping", () => {
         ],
       }),
     );
-    expect(loader.get(0x8100n).displayName).toBe("Box2");
+    expect(loader.get(0x8100n).displayName).toBe("Box");
+    expect(
+      loader.get(0x8100n).asStruct().getFields()[0]!.getType().asList().getElementType().which,
+    ).toBe("uint32");
     expect(loader.has(target)).toBe(false);
     expect(loader.allNodes().map((n) => n.id)).not.toContain(target);
     expect(capture(() => loader.get(target))).toBeInstanceOf(CapnpError);
@@ -699,7 +704,10 @@ describe("SchemaLoader upgrade bookkeeping", () => {
       }),
     );
     loadFlat(loader, groupNode(0x8200n, "Parent", groupId, 1));
-    expect(loader.get(0x8200n).asStruct().getFields()[0]!.kind).toBe("group");
+    const parent = loader.get(0x8200n).asStruct();
+    expect(parent.displayName).toBe("Parent");
+    expect(parent.getFields()[0]!.kind).toBe("slot");
+    expect(parent.getFields()[0]!.name).toBe("x");
     expect(loader.has(groupId)).toBe(true);
     expect(loader.allNodes().map((n) => n.id)).toContain(groupId);
     expect(fetched.displayName).toBe("(unknown type used in Parent)");
@@ -756,7 +764,7 @@ describe("SchemaLoader upgrade bookkeeping", () => {
     expect(loader.has(target)).toBe(true);
   });
 
-  test("a slot upgrade mixed with a dropped field throws", () => {
+  test("a slot change mixed with a dropped field keeps the first node", () => {
     const loader = new SchemaLoader();
     loadFlat(
       loader,
@@ -770,13 +778,17 @@ describe("SchemaLoader upgrade bookkeeping", () => {
         ],
       }),
     );
-    const thrown = capture(() => {
-      loadFlat(loader, groupNode(0x8210n, "Parent2", 0x8211n, 2));
-    });
-    expect(thrown).toBeInstanceOf(CapnpError);
-    expect((thrown as CapnpError).message).toContain("upgrades and some");
+    loadFlat(loader, groupNode(0x8210n, "Parent2", 0x8211n, 2));
     expect(loader.get(0x8210n).displayName).toBe("Parent");
     expect(loader.get(0x8210n).asStruct().getFields()).toHaveLength(2);
+    expect(loader.get(0x8210n).asStruct().getFields()[0]!.kind).toBe("slot");
+    expect(loader.has(0x8211n)).toBe(false);
+    const constraint = loader.dependency(0x8211n, null, new Map()).asStruct();
+    expect(constraint.dataWordCount).toBe(2);
+    expect(constraint.getFields()).toHaveLength(1);
+    expect(constraint.getFields()[0]!.name).toBe("member0");
+    expect(constraint.getFields()[0]!.getType().which).toBe("uint64");
+    expect(loader.has(0x8211n)).toBe(true);
   });
 
   test("a group field downgraded to a slot keeps the group", () => {
@@ -1211,7 +1223,7 @@ describe("SchemaLoader upgrade bookkeeping", () => {
     expect(loader.get(group).displayName).toBe("Outer.g");
   });
 
-  test("a list element upgraded to a struct stays out of allNodes", () => {
+  test("a list struct constraint stays out of allNodes", () => {
     const loader = new SchemaLoader();
     const target = 0x8751n;
     loadFlat(
@@ -1240,16 +1252,19 @@ describe("SchemaLoader upgrade bookkeeping", () => {
         ],
       }),
     );
-    expect(fetched.displayName).toBe("Box2");
+    expect(fetched.displayName).toBe("Box");
+    expect(fetched.getFields()[0]!.getType().asList().getElementType().which).toBe("uint32");
     expect(loader.has(target)).toBe(false);
     expect(loader.allNodes().map((n) => n.id)).not.toContain(target);
-    const element = fetched.getFields()[0]!.getType().asList().getElementType();
-    expect(element.which).toBe("struct");
-    expect(element.asStruct().getFields()).toHaveLength(1);
+    const element = loader.dependency(target, null, new Map()).asStruct();
+    expect(element.dataWordCount).toBe(1);
+    expect(element.getFields()).toHaveLength(1);
+    expect(element.getFields()[0]!.name).toBe("member0");
+    expect(element.getFields()[0]!.getType().which).toBe("uint32");
     expect(loader.has(target)).toBe(true);
   });
 
-  test("a list struct upgrade mixed with a dropped field throws", () => {
+  test("a list struct change mixed with a dropped field keeps the first node", () => {
     const loader = new SchemaLoader();
     loadFlat(
       loader,
@@ -1264,28 +1279,33 @@ describe("SchemaLoader upgrade bookkeeping", () => {
         ],
       }),
     );
-    const thrown = capture(() => {
-      loadFlat(
-        loader,
-        declNode({
-          id: 0x8752n,
-          name: "Box2",
-          pointers: 1,
-          fields: [
-            {
-              name: "items",
-              type: TypeKind.List,
-              element: TypeKind.Struct,
-              elementId: 0x8753n,
-            },
-          ],
-        }),
-      );
-    });
-    expect(thrown).toBeInstanceOf(CapnpError);
-    expect((thrown as CapnpError).message).toContain("upgrades and some");
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x8752n,
+        name: "Box2",
+        pointers: 1,
+        fields: [
+          {
+            name: "items",
+            type: TypeKind.List,
+            element: TypeKind.Struct,
+            elementId: 0x8753n,
+          },
+        ],
+      }),
+    );
     expect(loader.get(0x8752n).displayName).toBe("Box");
     expect(loader.get(0x8752n).asStruct().getFields()).toHaveLength(2);
+    expect(
+      loader.get(0x8752n).asStruct().getFields()[0]!.getType().asList().getElementType().which,
+    ).toBe("uint32");
+    expect(loader.has(0x8753n)).toBe(false);
+    const constraint = loader.dependency(0x8753n, null, new Map()).asStruct();
+    expect(constraint.dataWordCount).toBe(1);
+    expect(constraint.getFields()[0]!.name).toBe("member0");
+    expect(constraint.getFields()[0]!.getType().which).toBe("uint32");
+    expect(loader.has(0x8753n)).toBe(true);
   });
 
   test("a list struct downgraded to a scalar keeps the struct list", () => {
@@ -1331,7 +1351,7 @@ describe("SchemaLoader upgrade bookkeeping", () => {
     ).toBe("struct");
   });
 
-  test("an equivalent real node replaces a placeholder that was already read", () => {
+  test("an equivalent real node keeps a placeholder that was already read", () => {
     const cases: ReadonlyArray<{
       id: bigint;
       target: bigint;
@@ -1393,12 +1413,30 @@ describe("SchemaLoader upgrade bookkeeping", () => {
         loader,
         declNode({ id: spec.target, name: "Real", which: spec.targetWhich }),
       );
-      expect(seen.displayName).toBe("Real");
-      expect(loader.get(spec.target).displayName).toBe("Real");
+      expect(seen.displayName).toBe(`(unknown type used by ${spec.name})`);
+      expect(loader.get(spec.target).displayName).toBe(`(unknown type used by ${spec.name})`);
     }
   });
 
-  test("slot and group fields upgrade in both directions", () => {
+  test("an equivalent real node replaces an unread placeholder", () => {
+    const loader = new SchemaLoader();
+    const target = 0x8831n;
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x8830n,
+        name: "Box",
+        pointers: 1,
+        fields: [{ name: "item", type: TypeKind.Struct, typeId: target }],
+      }),
+    );
+    expect(loader.has(target)).toBe(false);
+    loadFlat(loader, declNode({ id: target, name: "Real", which: SchemaNodeKind.Struct }));
+    expect(loader.has(target)).toBe(true);
+    expect(loader.get(target).displayName).toBe("Real");
+  });
+
+  test("slot and group reloads keep the first field", () => {
     const slotFirst = new SchemaLoader();
     const groupId = 0xac01n;
     loadFlat(
@@ -1411,11 +1449,14 @@ describe("SchemaLoader upgrade bookkeeping", () => {
       }),
     );
     loadFlat(slotFirst, groupNode(0xac00n, "V2", groupId, 1));
-    const upgraded = slotFirst.get(0xac00n).asStruct();
-    expect(upgraded.displayName).toBe("V2");
-    expect(upgraded.getFields()[0]!.kind).toBe("group");
-    const placeholder = upgraded.getFields()[0]!.getType().asStruct();
+    const slotNode = slotFirst.get(0xac00n).asStruct();
+    expect(slotNode.displayName).toBe("V1");
+    expect(slotNode.getFields()[0]!.kind).toBe("slot");
+    expect(slotNode.getFields()[0]!.name).toBe("x");
+    expect(slotFirst.has(groupId)).toBe(false);
+    const placeholder = slotFirst.dependency(groupId, null, new Map()).asStruct();
     expect(placeholder.id).toBe(groupId);
+    expect(placeholder.dataWordCount).toBe(1);
     expect(placeholder.getFields()[0]!.name).toBe("member0");
     expect(placeholder.getFields()[0]!.getType().which).toBe("uint64");
 
@@ -1868,7 +1909,7 @@ describe("SchemaLoader upgrade bookkeeping", () => {
     expect(later.get(parent2).asStruct().pointerCount).toBe(5);
   });
 
-  test("a void list element upgrades to a zero size struct", () => {
+  test("a void list reload keeps the void list", () => {
     const loader = new SchemaLoader();
     const target = 0xb101n;
     loadFlat(
@@ -1896,15 +1937,12 @@ describe("SchemaLoader upgrade bookkeeping", () => {
         ],
       }),
     );
-    expect(loader.get(0xb100n).displayName).toBe("V2");
-    const element = loader
-      .get(0xb100n)
-      .asStruct()
-      .getFields()[0]!
-      .getType()
-      .asList()
-      .getElementType()
-      .asStruct();
+    expect(loader.get(0xb100n).displayName).toBe("V1");
+    expect(
+      loader.get(0xb100n).asStruct().getFields()[0]!.getType().asList().getElementType().which,
+    ).toBe("void");
+    expect(loader.has(target)).toBe(false);
+    const element = loader.dependency(target, null, new Map()).asStruct();
     expect(element.dataWordCount).toBe(0);
     expect(element.pointerCount).toBe(0);
     expect(element.getFields()).toHaveLength(1);

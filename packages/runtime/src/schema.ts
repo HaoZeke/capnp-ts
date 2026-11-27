@@ -2238,14 +2238,6 @@ function valueKindTag(which: SchemaValue["which"]): number {
 
 function assertDefaultCompatible(existing: SchemaValue, replacement: SchemaValue): void {
   assertCapnp(existing.which === replacement.which, "SCHEMA", "default value changed");
-  if (existing.which === "float32" && replacement.which === "float32") {
-    assertCapnp(existing.rawBits === replacement.rawBits, "SCHEMA", "default value changed");
-    return;
-  }
-  if (existing.which === "float64" && replacement.which === "float64") {
-    assertCapnp(existing.rawBits === replacement.rawBits, "SCHEMA", "default value changed");
-    return;
-  }
   const layout = slotLayout(valueKindTag(existing.which));
   if (!layout || layout.pointer || layout.bits === 0) return;
   assertCapnp(
@@ -2362,12 +2354,10 @@ class SchemaCompat {
         return;
       }
       this.loadUpgrade(field.typePtr, replacement.groupTypeId, this.existing, field);
-      this.noteNewer();
       return;
     }
     if (replacement.kind === "slot") {
       this.loadUpgrade(replacement.typePtr, field.groupTypeId, this.replacement, replacement);
-      this.noteOlder();
       return;
     }
     assertCapnp(
@@ -2453,7 +2443,6 @@ class SchemaCompat {
       if (allowStruct) {
         if (tag === TypeKind.Struct && typePtr && typePtr.kind === PtrKind.Struct) {
           this.loadUpgrade(replacementPtr, typePtr.getU64(8), null, null);
-          this.noteOlder();
           return;
         }
         if (
@@ -2462,7 +2451,6 @@ class SchemaCompat {
           replacementPtr.kind === PtrKind.Struct
         ) {
           this.loadUpgrade(typePtr, replacementPtr.getU64(8), null, null);
-          this.noteNewer();
           return;
         }
       }
@@ -2602,8 +2590,8 @@ export class SchemaLoader {
   /** Nodes created by a field upgrade before the real declaration is loaded. */
   private readonly placeholders = new Set<bigint>();
   /**
-   * Placeholders a dependency read has published. The placeholder mark stays
-   * until a real node is adopted, so an equivalent reload still replaces it.
+   * Placeholders a dependency read has published. After that read, an
+   * equivalent reload keeps the placeholder body.
    */
   private readonly initialized = new Set<bigint>();
   /** Outermost ingest snapshots the loader and rolls a rejection back. */
@@ -2678,7 +2666,8 @@ export class SchemaLoader {
 
   /**
    * Keep a new node, or a strictly newer reload. An equivalent or older
-   * reload keeps the first node. An incompatible reload throws.
+   * reload keeps the first node, except an unread placeholder, which
+   * accepts an equivalent reload. An incompatible reload throws.
    * The stored record is updated in place. A placeholder mark is written
    * only for a newly inserted id, and cleared when a real node arrives.
    *
@@ -2698,8 +2687,9 @@ export class SchemaLoader {
       this.ingest(ptr, true);
     }).run();
     const wasPlaceholder = this.placeholders.has(existing.id);
-    // C++ prefers the reload when the existing node is still a placeholder.
-    const shouldReplace = wasPlaceholder ? direction !== "older" : direction === "newer";
+    // Prefer the reload while no dependency read has published this placeholder.
+    const preferReplacement = wasPlaceholder && !this.initialized.has(existing.id);
+    const shouldReplace = preferReplacement ? direction !== "older" : direction === "newer";
     if (shouldReplace) overwriteRaw(existing, raw);
     if (wasPlaceholder && !isPlaceholder) {
       this.placeholders.delete(existing.id);
