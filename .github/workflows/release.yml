@@ -1,7 +1,8 @@
 # Tag-triggered release: verify main ancestry and versions, run the full CI
 # suite (including pycapnp, CLI goldens, and live C++ 1.4.0 RPC interop),
 # pack dist-only npm tarballs with SHA-256 checksums, create the GitHub
-# release, and optionally publish to npm when NPM_TOKEN is set.
+# release (or refresh its notes when that release already exists), and
+# optionally publish to npm when NPM_TOKEN is set.
 name: release
 
 on:
@@ -38,6 +39,11 @@ jobs:
             echo "release: tagged commit $(git rev-parse HEAD) is not an ancestor of origin/main" >&2
             exit 1
           fi
+
+      - name: Changelog has a section for this tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python3 scripts/release_notes.py "${TAG#v}" -o "${RUNNER_TEMP}/notes.md"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -310,7 +316,12 @@ jobs:
             release-dist/SHA256SUMS; then
             existing="$(gh release view "$TAG" --json tagName --jq .tagName 2>/dev/null || true)"
             if [[ "$existing" == "$TAG" ]]; then
-              echo "::notice::GitHub release ${TAG} already exists; skipping creation"
+              echo "::notice::GitHub release ${TAG} already exists; updating notes"
+              edit_args=(release edit "$TAG" --notes-file release-notes/RELEASE_NOTES.md)
+              if [[ "${TAG#v}" == *-* ]]; then
+                edit_args+=(--prerelease)
+              fi
+              gh "${edit_args[@]}"
             else
               exit 1
             fi
