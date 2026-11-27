@@ -1,23 +1,25 @@
 # Conventions for capnp-ts
 
-This copies the setup in OmniPotentRPC/rgpot and TheochemUI/eOn, cut down for an adapter library. Both use towncrier for the changelog and cocogitto for the bump. A tag push runs the release workflow. Labels are the GitHub defaults plus a few project ones. Neither repo has issue or PR templates, so the ones under `setup/` are small and optional.
+Towncrier keeps the changelog. Cocogitto bumps the version and makes the tag. A `v*` tag push runs `.github/workflows/release.yml`, which checks that the commit is on `main`, checks that the version sites agree, builds, typechecks, runs the suite against Cap'n Proto C++ 1.4.0, packs the npm tarballs, and publishes the GitHub release. npm publish runs only when `NPM_TOKEN` is set.
 
 ## Changelog
 
-News fragments live in `docs/newsfragments/`. Name them `<issue>.<type>.md`, or `+slug.<type>.md` without an issue. The types are the rgpot set: `breaking`, `security`, `removed`, `deprecated`, `added`, `dev`, `changed` and `fixed`. A release build writes the fragments into `CHANGELOG.md` under the `<!-- towncrier release notes start -->` marker and deletes them. Write one fragment per user-visible change, for users. A `towncrier check` job runs on every pull request. A docs-only or CI-only change carries a `dev` fragment.
+News fragments live in `docs/newsfragments/`. Name them `<issue>.<type>.md`, or `+slug.<type>.md` when there is no issue. The types are `breaking`, `security`, `removed`, `deprecated`, `added`, `dev`, `changed`, and `fixed`. `towncrier build` writes them into `CHANGELOG.md` under the `<!-- towncrier release notes start -->` marker and deletes the fragment files. Write one fragment per user-visible change, for users. The towncrier workflow runs that check on every pull request. A docs-only or CI-only change still carries a `dev` fragment.
 
-The current `CHANGELOG.md` is hand-written Keep a Changelog with an `[Unreleased]` block. The setup PR puts the marker above that block. It turns the bullets into fragments, so nothing is lost. The heading disappears on the next build. Files in `fragments/` match the series in `MAP.md` and use `+slug` names. Rename each to `<issue>.<type>.md` once the issue exists.
+A release heading is `## [<version>] - <date>`, the same shape as `## [0.1.0]`. `scripts/extract-changelog.sh` ends a section at a `[version]:` link line, so that link does not go between the heading and the notes. Fixes that landed after v0.1.0 stay in fragments until the next bump, which is what puts them in the new section.
 
 ## Release
 
-Run `cog bump --auto` on `main`. The pre-bump hooks update the version files and run `towncrier build`. A last hook checks that the new section can be extracted. Cocogitto commits and tags `v<version>`. The tag push runs `release.yml`. That workflow fails when `CHANGELOG.md` has no section for the tag. Otherwise it extracts the section with `scripts/release_notes.py` and creates the GitHub release with it as the notes. A tag with a hyphen is a prerelease. No tags or releases exist yet. The first release is v0.1.0, and the draft bumps every workspace package with `npm version`. That hook is untested against the workspace layout.
+Run `cog bump --auto` on `main`. The pre-bump hooks run `scripts/bump-version.sh`, set the version in `towncrier.toml`, run `towncrier build`, and check the new section with `scripts/release_notes.py` and `scripts/extract-changelog.sh`. Cocogitto commits and tags `v<version>`. A tag that contains a hyphen is a prerelease.
 
-Versions are semver, with the pre-1.0 caveat in the changelog header. A new feature bumps the minor. A fix-only release bumps the patch. A wire or API break goes under Breaking. Current tag: none yet (package.json says 0.1.0-dev). Suggested next: 0.1.0.
+`scripts/bump-version.sh` writes the same version into every file `scripts/check-release-version.sh` reads. It does not call npm. `workspace:*` dependencies stay as they are. If a write does not match, the script puts the files back. Current release: v0.1.0, package version 0.1.0.
+
+Versions are semver, with the pre-1.0 caveat in the changelog header. A new feature bumps the minor. A fix-only release bumps the patch. A wire or API break is a `breaking` fragment.
 
 ## Issues, PRs and labels
 
-Open one issue per gap or bug class against Cap'n Proto C++ 1.4.0. Give each a reproducer or the C++ behaviour to match, and a plain statement of done. Open one PR per series, titled in the conventional-commit style of the repo log. Its body says `Closes #N` for each issue it fixes. The labels are the GitHub defaults plus `parity`, `wire`, `codegen`, `rpc`, `dynamic`, `interop`, `security`, `ci` and `dependencies`. The file `setup/.github/labels.yml` lists them, and `setup/scripts/sync-labels.sh` applies them. A PR merges with green CI and a fragment.
+Open one issue per gap or bug class against Cap'n Proto C++ 1.4.0. Give each a reproducer or the C++ behaviour to match, and a plain statement of done. Open one PR per series, titled in the conventional-commit style of the repo log. Its body says `Closes #N` for each issue it fixes. The labels are the GitHub defaults plus `parity`, `wire`, `codegen`, `rpc`, `dynamic`, `interop`, `security`, `ci`, and `dependencies`. `.github/labels.yml` lists them, and `scripts/sync-labels.sh` applies them. A PR merges with green CI and a fragment.
 
-## Files under setup/
+## Files
 
-The draft has `towncrier.toml`, `cog.toml`, the fragment README and `.gitkeep`, three workflows (`towncrier.yml`, `release.yml`, `release-prepare.yml`), `scripts/release_notes.py`, the label list and sync script, two issue forms and the PR template. The workflows use floating action tags. Pin them to commit hashes when landing, as rgpot and eOn do. None of it has run in the repo. The first PR should show the towncrier and release-prepare jobs green before anyone pushes a tag.
+`towncrier.toml`, `cog.toml`, `docs/newsfragments/`, `scripts/release_notes.py`, `scripts/bump-version.sh`, and `scripts/sync-labels.sh` live at the repo root. The workflows are `.github/workflows/towncrier.yml`, `.github/workflows/release-prepare.yml`, and `.github/workflows/release.yml`. Issue forms and the pull request template are under `.github/`. Actions are pinned to commit SHAs.
