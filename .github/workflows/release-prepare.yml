@@ -5,6 +5,7 @@ on:
     - cog.toml
     - towncrier.toml
     - scripts/release_notes.py
+    - scripts/bump-version.sh
     - docs/newsfragments/**
     - CHANGELOG.md
     - .github/workflows/release*.yml

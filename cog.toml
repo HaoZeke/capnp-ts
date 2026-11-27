@@ -8,10 +8,11 @@ branch_whitelist = ["main", "master"]
 tag_prefix = "v"
 
 pre_bump_hooks = [
-  "npm version {{version}} --workspaces --include-workspace-root --no-git-tag-version",
+  "bash scripts/bump-version.sh {{version}}",
   "sed -i 's/^version = \"[^\"]*\"/version = \"{{version}}\"/' towncrier.toml",
   "towncrier build --version {{version}} --date $(date +%Y-%m-%d) --yes",
   "python3 scripts/release_notes.py {{version}} > /dev/null",
+  "bash scripts/extract-changelog.sh {{version}} > /dev/null",
 ]
 
 [commit_types]
