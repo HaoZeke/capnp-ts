@@ -6,6 +6,7 @@
  * AnnotationSchema, ListSchema, and Type handles with generic brand resolution.
  */
 
+import { MessageBuilder, type StructBuilder } from "./builder.ts";
 import { CapnpError, ElemSize, PtrKind, assertCapnp } from "./kinds.ts";
 import { Message, Ptr } from "./message.ts";
 
@@ -606,6 +607,28 @@ function assertValueMatches(
 
 type LoadedNodes = ReadonlyMap<bigint, RawNodeRecord>;
 
+type GroupSizer = (
+  scopeId: bigint,
+  dataWordCount: number,
+  pointerCount: number,
+) => void;
+
+/** Copy a decoded node onto the record Schema objects already reference. */
+function overwriteRaw(target: RawNodeRecord, source: RawNodeRecord): void {
+  Object.assign(target, source);
+}
+
+/** Raise a struct's stored size. C++ rewrites the node with the max of each count. */
+function growStruct(
+  raw: RawNodeRecord,
+  dataWordCount: number,
+  pointerCount: number,
+): void {
+  const slot = raw as { dataWordCount: number; pointerCount: number };
+  if (slot.dataWordCount < dataWordCount) slot.dataWordCount = dataWordCount;
+  if (slot.pointerCount < pointerCount) slot.pointerCount = pointerCount;
+}
+
 /**
  * Pointer-ness of a Type tag, matching Validator's brand check. A tag the
  * C++ switch does not name stays a pointer, so the binding is allowed.
@@ -631,16 +654,17 @@ function isPointerTypeTag(tag: number): boolean {
   }
 }
 
+type UnknownKind = (id: bigint, expected: SchemaNodeWhich) => void;
+
 /**
- * Kind check from Validator::validateTypeId. An id that is not loaded yet is
- * recorded for this node only; a later use of that id with another kind fails
- * the same way a placeholder of the first kind would.
+ * Kind check from Validator::validateTypeId. A missing id is inserted as an
+ * unresolved placeholder of the expected kind, as C++ loadEmpty does.
  */
 function assertLoadedKind(
   loaded: LoadedNodes,
-  pendingKinds: Map<bigint, SchemaNodeWhich>,
   id: bigint,
   expected: SchemaNodeWhich,
+  onUnknown: UnknownKind,
 ): void {
   const existing = loaded.get(id);
   if (existing) {
@@ -649,23 +673,21 @@ function assertLoadedKind(
       "SCHEMA",
       "expected a different kind of node for this ID",
     );
-  }
-  const prior = pendingKinds.get(id);
-  if (prior !== undefined) {
-    assertCapnp(
-      prior === expected,
-      "SCHEMA",
-      "expected a different kind of node for this ID",
-    );
     return;
   }
-  if (!existing) pendingKinds.set(id, expected);
+  onUnknown(id, expected);
+  const created = loaded.get(id);
+  assertCapnp(
+    created !== undefined && created.which === expected,
+    "SCHEMA",
+    "expected a different kind of node for this ID",
+  );
 }
 
 function assertBrand(
   brandPtr: Ptr | null,
   loaded: LoadedNodes,
-  pendingKinds: Map<bigint, SchemaNodeWhich>,
+  onUnknown: UnknownKind,
 ): void {
   if (!brandPtr || brandPtr.kind !== PtrKind.Struct) return;
   const scopes = brandPtr.getP(0);
@@ -683,7 +705,7 @@ function assertBrand(
       // Brand.Binding: unbound = 0, type = 1.
       if (binding.getU16(0) !== 1) continue;
       const typePtr = binding.getP(0);
-      assertSchemaType(typePtr, loaded, pendingKinds);
+      assertSchemaType(typePtr, loaded, onUnknown);
       assertCapnp(
         isPointerTypeTag(unionTag(typePtr)),
         "SCHEMA",
@@ -696,25 +718,25 @@ function assertBrand(
 function assertSchemaType(
   typePtr: Ptr | null,
   loaded: LoadedNodes,
-  pendingKinds: Map<bigint, SchemaNodeWhich>,
+  onUnknown: UnknownKind,
 ): void {
   if (!typePtr || typePtr.kind !== PtrKind.Struct) return;
   const tag = typePtr.getU16(0);
   switch (tag) {
     case TypeKind.Struct:
-      assertLoadedKind(loaded, pendingKinds, typePtr.getU64(8), "struct");
-      assertBrand(typePtr.getP(0), loaded, pendingKinds);
+      assertLoadedKind(loaded, typePtr.getU64(8), "struct", onUnknown);
+      assertBrand(typePtr.getP(0), loaded, onUnknown);
       break;
     case TypeKind.Enum:
-      assertLoadedKind(loaded, pendingKinds, typePtr.getU64(8), "enum");
-      assertBrand(typePtr.getP(0), loaded, pendingKinds);
+      assertLoadedKind(loaded, typePtr.getU64(8), "enum", onUnknown);
+      assertBrand(typePtr.getP(0), loaded, onUnknown);
       break;
     case TypeKind.Interface:
-      assertLoadedKind(loaded, pendingKinds, typePtr.getU64(8), "interface");
-      assertBrand(typePtr.getP(0), loaded, pendingKinds);
+      assertLoadedKind(loaded, typePtr.getU64(8), "interface", onUnknown);
+      assertBrand(typePtr.getP(0), loaded, onUnknown);
       break;
     case TypeKind.List:
-      assertSchemaType(typePtr.getP(0), loaded, pendingKinds);
+      assertSchemaType(typePtr.getP(0), loaded, onUnknown);
       break;
     default:
       break;
@@ -724,7 +746,8 @@ function assertSchemaType(
 function assertStructNode(
   raw: RawNodeRecord,
   loaded: LoadedNodes,
-  pendingKinds: Map<bigint, SchemaNodeWhich>,
+  onUnknown: UnknownKind,
+  onGroup: GroupSizer,
 ): void {
   const fields = raw.fields;
   const dataSizeInBits = (raw.dataWordCount * 64) >>> 0;
@@ -800,7 +823,7 @@ function assertStructNode(
     // Field union: slot = 0, group = 1. Any other tag has no check.
     const fieldWhich = field.proto.getU16(8);
     if (fieldWhich === 0) {
-      assertSchemaType(field.typePtr, loaded, pendingKinds);
+      assertSchemaType(field.typePtr, loaded, onUnknown);
       const layout = assertValueMatches(field.typePtr, field.proto.getP(3));
       const off1 = (field.offset + 1) >>> 0;
       assertCapnp(
@@ -810,7 +833,7 @@ function assertStructNode(
         "field offset out-of-bounds",
       );
     } else if (fieldWhich === 1) {
-      assertLoadedKind(loaded, pendingKinds, field.groupTypeId, "struct");
+      assertLoadedKind(loaded, field.groupTypeId, "struct", onUnknown);
     }
   }
 
@@ -829,7 +852,9 @@ function assertStructNode(
 
   if (raw.isGroup) {
     assertCapnp(raw.scopeId !== 0n, "SCHEMA", "group node missing scopeId");
-    assertLoadedKind(loaded, pendingKinds, raw.scopeId, "struct");
+    // C++ requireStructSize grows the scope before the parent kind check.
+    onGroup(raw.scopeId, raw.dataWordCount, raw.pointerCount);
+    assertLoadedKind(loaded, raw.scopeId, "struct", onUnknown);
   }
 }
 
@@ -857,11 +882,11 @@ function assertEnumNode(raw: RawNodeRecord): void {
 function assertInterfaceNode(
   raw: RawNodeRecord,
   loaded: LoadedNodes,
-  pendingKinds: Map<bigint, SchemaNodeWhich>,
+  onUnknown: UnknownKind,
 ): void {
   for (const superclass of raw.superclasses) {
-    assertLoadedKind(loaded, pendingKinds, superclass.id, "interface");
-    assertBrand(superclass.brandPtr, loaded, pendingKinds);
+    assertLoadedKind(loaded, superclass.id, "interface", onUnknown);
+    assertBrand(superclass.brandPtr, loaded, onUnknown);
   }
 
   const names = new Set<string>();
@@ -879,10 +904,10 @@ function assertInterfaceNode(
       "invalid codeOrder",
     );
     sawCodeOrder[method.codeOrder] = true;
-    assertLoadedKind(loaded, pendingKinds, method.paramStructType, "struct");
-    assertBrand(method.paramBrandPtr, loaded, pendingKinds);
-    assertLoadedKind(loaded, pendingKinds, method.resultStructType, "struct");
-    assertBrand(method.resultBrandPtr, loaded, pendingKinds);
+    assertLoadedKind(loaded, method.paramStructType, "struct", onUnknown);
+    assertBrand(method.paramBrandPtr, loaded, onUnknown);
+    assertLoadedKind(loaded, method.resultStructType, "struct", onUnknown);
+    assertBrand(method.resultBrandPtr, loaded, onUnknown);
   }
 }
 
@@ -890,7 +915,12 @@ function assertInterfaceNode(
  * C++ 1.4.0 SchemaLoader::Validator checks. A failure throws before the node
  * is stored. Offset products wrap as uint32, matching the C++ uint multiply.
  */
-function validateLoadedNode(raw: RawNodeRecord, loaded: LoadedNodes): void {
+function validateLoadedNode(
+  raw: RawNodeRecord,
+  loaded: LoadedNodes,
+  onGroup: GroupSizer,
+  onUnknown: UnknownKind,
+): void {
   if (raw.parameters.length > 0) {
     assertCapnp(
       raw.isGeneric,
@@ -899,23 +929,22 @@ function validateLoadedNode(raw: RawNodeRecord, loaded: LoadedNodes): void {
     );
   }
 
-  const pendingKinds = new Map<bigint, SchemaNodeWhich>();
   switch (raw.which) {
     case "struct":
-      assertStructNode(raw, loaded, pendingKinds);
+      assertStructNode(raw, loaded, onUnknown, onGroup);
       break;
     case "enum":
       assertEnumNode(raw);
       break;
     case "interface":
-      assertInterfaceNode(raw, loaded, pendingKinds);
+      assertInterfaceNode(raw, loaded, onUnknown);
       break;
     case "const":
-      assertSchemaType(raw.constTypePtr, loaded, pendingKinds);
+      assertSchemaType(raw.constTypePtr, loaded, onUnknown);
       assertValueMatches(raw.constTypePtr, raw.proto.getP(4));
       break;
     case "annotation":
-      assertSchemaType(raw.annotationTypePtr, loaded, pendingKinds);
+      assertSchemaType(raw.annotationTypePtr, loaded, onUnknown);
       break;
     default:
       break;
@@ -1384,6 +1413,7 @@ export class Schema {
   /** @internal */
   readonly brandKey: string;
   private _annotations: readonly AppliedAnnotation[] | null = null;
+  private _annotationSrc: readonly RawAnnotationRecord[] | null = null;
   private _selfType: Type | null = null;
 
   /** @internal */
@@ -1465,7 +1495,8 @@ export class Schema {
   }
 
   getAnnotations(): readonly AppliedAnnotation[] {
-    if (!this._annotations) {
+    if (!this._annotations || this._annotationSrc !== this.raw.annotations) {
+      this._annotationSrc = this.raw.annotations;
       this._annotations = this.raw.annotations.map(
         (a) => new AppliedAnnotation(this.loader, a, this.brandMap),
       );
@@ -1670,10 +1701,22 @@ export class StructSchema extends Schema {
   static readonly Field = StructField;
 
   private _fields: readonly StructField[] | null = null;
+  private _fieldSrc: readonly RawFieldRecord[] | null = null;
   private _unionFields: readonly StructField[] | null = null;
   private _nonUnionFields: readonly StructField[] | null = null;
   private _byName: Map<string, StructField> | null = null;
   private _byDisc: Map<number, StructField> | null = null;
+
+  private syncFields(): readonly StructField[] {
+    if (this._fields && this._fieldSrc === this.raw.fields) return this._fields;
+    this._fieldSrc = this.raw.fields;
+    this._fields = this.raw.fields.map((f) => new StructField(this, f));
+    this._unionFields = null;
+    this._nonUnionFields = null;
+    this._byName = null;
+    this._byDisc = null;
+    return this._fields;
+  }
 
   get dataWordCount(): number {
     return this.raw.dataWordCount;
@@ -1701,10 +1744,7 @@ export class StructSchema extends Schema {
   }
 
   getFields(): readonly StructField[] {
-    if (!this._fields) {
-      this._fields = this.raw.fields.map((f) => new StructField(this, f));
-    }
-    return this._fields;
+    return this.syncFields();
   }
 
   getFieldsByCodeOrder(): readonly StructField[] {
@@ -1712,23 +1752,26 @@ export class StructSchema extends Schema {
   }
 
   getUnionFields(): readonly StructField[] {
+    this.syncFields();
     if (!this._unionFields) {
-      this._unionFields = this.getFields().filter((f) => f.isUnionMember);
+      this._unionFields = this.syncFields().filter((f) => f.isUnionMember);
     }
     return this._unionFields;
   }
 
   getNonUnionFields(): readonly StructField[] {
+    this.syncFields();
     if (!this._nonUnionFields) {
-      this._nonUnionFields = this.getFields().filter((f) => !f.isUnionMember);
+      this._nonUnionFields = this.syncFields().filter((f) => !f.isUnionMember);
     }
     return this._nonUnionFields;
   }
 
   findFieldByName(name: string): StructField | null {
+    this.syncFields();
     if (!this._byName) {
       this._byName = new Map();
-      for (const f of this.getFields()) {
+      for (const f of this.syncFields()) {
         this._byName.set(f.name, f);
       }
     }
@@ -1747,6 +1790,7 @@ export class StructSchema extends Schema {
 
   getFieldByDiscriminant(discriminant: number): StructField | null {
     if (this.discriminantCount === 0) return null;
+    this.syncFields();
     if (!this._byDisc) {
       this._byDisc = new Map();
       for (const f of this.getUnionFields()) {
@@ -1859,16 +1903,20 @@ export class EnumSchema extends Schema {
   static readonly Enumerant = Enumerant;
 
   private _enumerants: readonly Enumerant[] | null = null;
+  private _enumerantSrc: readonly RawEnumerantRecord[] | null = null;
   private _byName: Map<string, Enumerant> | null = null;
 
   getEnumerants(): readonly Enumerant[] {
-    if (!this._enumerants) {
+    if (!this._enumerants || this._enumerantSrc !== this.raw.enumerants) {
+      this._enumerantSrc = this.raw.enumerants;
       this._enumerants = this.raw.enumerants.map((e) => new Enumerant(this, e));
+      this._byName = null;
     }
     return this._enumerants;
   }
 
   findEnumerantByName(name: string): Enumerant | null {
+    this.getEnumerants();
     if (!this._byName) {
       this._byName = new Map();
       for (const e of this.getEnumerants()) {
@@ -1995,17 +2043,21 @@ export class InterfaceSchema extends Schema {
   static readonly Method = InterfaceMethod;
 
   private _methods: readonly InterfaceMethod[] | null = null;
+  private _methodSrc: readonly RawMethodRecord[] | null = null;
   private _superclasses: readonly InterfaceSchema[] | null = null;
+  private _superSrc: readonly RawSuperclassRecord[] | null = null;
 
   getMethods(): readonly InterfaceMethod[] {
-    if (!this._methods) {
+    if (!this._methods || this._methodSrc !== this.raw.methods) {
+      this._methodSrc = this.raw.methods;
       this._methods = this.raw.methods.map((m) => new InterfaceMethod(this, m));
     }
     return this._methods;
   }
 
   getSuperclasses(): readonly InterfaceSchema[] {
-    if (!this._superclasses) {
+    if (!this._superclasses || this._superSrc !== this.raw.superclasses) {
+      this._superSrc = this.raw.superclasses;
       this._superclasses = this.raw.superclasses.map((sc) =>
         this.loader.get(sc.id, sc.brandPtr, this.brandMap).asInterface(),
       );
@@ -2128,6 +2180,365 @@ function formatBrandKey(id: bigint, brandMap: BrandMap): string {
   return `${base}<${parts.join(";")}>`;
 }
 
+type SchemaDirection = "equivalent" | "older" | "newer";
+
+const MIXED_DIRECTION =
+  "Schema node contains some changes that are upgrades and some that are downgrades.  All changes must be in the same direction for compatibility.";
+
+function upgradeStructSize(tag: number): {
+  dataWordCount: number;
+  pointerCount: number;
+} {
+  const layout = slotLayout(tag);
+  if (!layout || layout.bits === 0) {
+    return { dataWordCount: 0, pointerCount: layout?.pointer ? 1 : 0 };
+  }
+  return { dataWordCount: 1, pointerCount: 0 };
+}
+
+function canUpgradeToData(typePtr: Ptr | null): boolean {
+  const tag = unionTag(typePtr);
+  if (tag === TypeKind.Text) return true;
+  if (tag !== TypeKind.List || !typePtr || typePtr.kind !== PtrKind.Struct) return false;
+  const element = unionTag(typePtr.getP(0));
+  return element === TypeKind.Int8 || element === TypeKind.UInt8;
+}
+
+function valueKindTag(which: SchemaValue["which"]): number {
+  return TYPE_WHICH_BY_TAG.indexOf(which);
+}
+
+function assertDefaultCompatible(existing: SchemaValue, replacement: SchemaValue): void {
+  assertCapnp(existing.which === replacement.which, "SCHEMA", "default value changed");
+  const layout = slotLayout(valueKindTag(existing.which));
+  if (!layout || layout.pointer || layout.bits === 0) return;
+  assertCapnp(
+    "value" in existing &&
+      "value" in replacement &&
+      existing.value === replacement.value,
+    "SCHEMA",
+    "default value changed",
+  );
+}
+
+function compareId(a: bigint, b: bigint): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * C++ SchemaLoader::CompatibilityChecker. A newer reload replaces the node.
+ * An equivalent or older reload keeps the first. A conflict throws.
+ */
+class SchemaCompat {
+  private direction: SchemaDirection = "equivalent";
+
+  constructor(
+    private readonly existing: RawNodeRecord,
+    private readonly replacement: RawNodeRecord,
+    private readonly loadPlaceholder: (nodePtr: Ptr) => void,
+  ) {}
+
+  run(): SchemaDirection {
+    assertCapnp(
+      this.existing.whichTag === this.replacement.whichTag,
+      "SCHEMA",
+      "kind of declaration changed",
+    );
+    this.noteCount(this.existing.parameters.length, this.replacement.parameters.length);
+    switch (this.existing.which) {
+      case "struct":
+        this.checkStruct();
+        break;
+      case "enum":
+        this.checkEnum();
+        break;
+      case "interface":
+        this.checkInterface();
+        break;
+      default:
+        break;
+    }
+    return this.direction;
+  }
+
+  private noteNewer(): void {
+    if (this.direction === "equivalent") this.direction = "newer";
+    else if (this.direction === "older") {
+      assertCapnp(false, "SCHEMA", MIXED_DIRECTION);
+    }
+  }
+
+  private noteOlder(): void {
+    if (this.direction === "equivalent") this.direction = "older";
+    else if (this.direction === "newer") {
+      assertCapnp(false, "SCHEMA", MIXED_DIRECTION);
+    }
+  }
+
+  private noteCount(before: number, after: number): void {
+    if (after > before) this.noteNewer();
+    else if (after < before) this.noteOlder();
+  }
+
+  private checkStruct(): void {
+    const existing = this.existing;
+    const replacement = this.replacement;
+    this.noteCount(existing.dataWordCount, replacement.dataWordCount);
+    this.noteCount(existing.pointerCount, replacement.pointerCount);
+    this.noteCount(existing.discriminantCount, replacement.discriminantCount);
+    if (existing.discriminantCount > 0 && replacement.discriminantCount > 0) {
+      assertCapnp(
+        existing.discriminantOffset === replacement.discriminantOffset,
+        "SCHEMA",
+        "union discriminant position changed",
+      );
+    }
+    this.noteCount(existing.fields.length, replacement.fields.length);
+    const count = Math.min(existing.fields.length, replacement.fields.length);
+    for (let i = 0; i < count; i++) {
+      this.checkField(existing.fields[i]!, replacement.fields[i]!);
+    }
+    if (existing.isGroup) {
+      if (replacement.isGroup) {
+        assertCapnp(
+          replacement.scopeId === existing.scopeId,
+          "SCHEMA",
+          "group node's scope changed",
+        );
+      } else {
+        this.noteOlder();
+      }
+    } else if (replacement.isGroup) {
+      this.noteNewer();
+    }
+  }
+
+  private checkField(field: RawFieldRecord, replacement: RawFieldRecord): void {
+    const disc = field.discriminantValue === NO_DISCRIMINANT ? 0 : field.discriminantValue;
+    const replacementDisc =
+      replacement.discriminantValue === NO_DISCRIMINANT ? 0 : replacement.discriminantValue;
+    assertCapnp(disc === replacementDisc, "SCHEMA", "Field discriminant changed.");
+    if (field.kind === "slot") {
+      if (replacement.kind === "slot") {
+        this.checkType(field.typePtr, replacement.typePtr, false);
+        assertDefaultCompatible(field.defaultValue, replacement.defaultValue);
+        assertCapnp(field.offset === replacement.offset, "SCHEMA", "field position changed");
+        return;
+      }
+      this.loadUpgrade(field.typePtr, replacement.groupTypeId, this.existing, field);
+      return;
+    }
+    if (replacement.kind === "slot") {
+      this.loadUpgrade(replacement.typePtr, field.groupTypeId, this.replacement, replacement);
+      return;
+    }
+    assertCapnp(
+      field.groupTypeId === replacement.groupTypeId,
+      "SCHEMA",
+      "group id changed",
+    );
+  }
+
+  private checkEnum(): void {
+    this.noteCount(this.existing.enumerants.length, this.replacement.enumerants.length);
+  }
+
+  private checkInterface(): void {
+    const left = this.existing.superclasses.map((sc) => sc.id).sort(compareId);
+    const right = this.replacement.superclasses.map((sc) => sc.id).sort(compareId);
+    let i = 0;
+    let j = 0;
+    while (i < left.length || j < right.length) {
+      if (i === left.length) {
+        this.noteNewer();
+        break;
+      }
+      if (j === right.length) {
+        this.noteOlder();
+        break;
+      }
+      const a = left[i]!;
+      const b = right[j]!;
+      if (a < b) {
+        this.noteOlder();
+        i += 1;
+      } else if (a > b) {
+        this.noteNewer();
+        j += 1;
+      } else {
+        i += 1;
+        j += 1;
+      }
+    }
+    this.noteCount(this.existing.methods.length, this.replacement.methods.length);
+    const count = Math.min(this.existing.methods.length, this.replacement.methods.length);
+    for (let n = 0; n < count; n++) {
+      const method = this.existing.methods[n]!;
+      const replacement = this.replacement.methods[n]!;
+      assertCapnp(
+        method.paramStructType === replacement.paramStructType,
+        "SCHEMA",
+        "Updated method has different parameters.",
+      );
+      assertCapnp(
+        method.resultStructType === replacement.resultStructType,
+        "SCHEMA",
+        "Updated method has different results.",
+      );
+    }
+  }
+
+  private checkType(
+    typePtr: Ptr | null,
+    replacementPtr: Ptr | null,
+    allowStruct: boolean,
+  ): void {
+    const tag = unionTag(typePtr);
+    const replacementTag = unionTag(replacementPtr);
+    if (tag !== replacementTag) {
+      if (replacementTag === TypeKind.Data && canUpgradeToData(typePtr)) {
+        this.noteNewer();
+        return;
+      }
+      if (tag === TypeKind.Data && canUpgradeToData(replacementPtr)) {
+        this.noteOlder();
+        return;
+      }
+      if (replacementTag === TypeKind.AnyPointer && isPointerTypeTag(tag)) {
+        this.noteNewer();
+        return;
+      }
+      if (tag === TypeKind.AnyPointer && isPointerTypeTag(replacementTag)) {
+        this.noteOlder();
+        return;
+      }
+      if (allowStruct) {
+        if (tag === TypeKind.Struct && typePtr && typePtr.kind === PtrKind.Struct) {
+          this.loadUpgrade(replacementPtr, typePtr.getU64(8), null, null);
+          return;
+        }
+        if (
+          replacementTag === TypeKind.Struct &&
+          replacementPtr &&
+          replacementPtr.kind === PtrKind.Struct
+        ) {
+          this.loadUpgrade(typePtr, replacementPtr.getU64(8), null, null);
+          return;
+        }
+      }
+      assertCapnp(false, "SCHEMA", "a type was changed");
+    }
+    switch (tag) {
+      case TypeKind.List: {
+        const element = typePtr && typePtr.kind === PtrKind.Struct ? typePtr.getP(0) : null;
+        const replacementElement =
+          replacementPtr && replacementPtr.kind === PtrKind.Struct
+            ? replacementPtr.getP(0)
+            : null;
+        this.checkType(element, replacementElement, true);
+        return;
+      }
+      case TypeKind.Enum:
+        assertCapnp(
+          !!typePtr &&
+            !!replacementPtr &&
+            typePtr.getU64(8) === replacementPtr.getU64(8),
+          "SCHEMA",
+          "type changed enum type",
+        );
+        return;
+      case TypeKind.Struct:
+        assertCapnp(
+          !!typePtr &&
+            !!replacementPtr &&
+            typePtr.getU64(8) === replacementPtr.getU64(8),
+          "SCHEMA",
+          "type changed to incompatible struct type",
+        );
+        return;
+      case TypeKind.Interface:
+        assertCapnp(
+          !!typePtr &&
+            !!replacementPtr &&
+            typePtr.getU64(8) === replacementPtr.getU64(8),
+          "SCHEMA",
+          "type changed to incompatible interface type",
+        );
+        return;
+      default:
+        return;
+    }
+  }
+
+  private loadUpgrade(
+    typePtr: Ptr | null,
+    structTypeId: bigint,
+    matchNode: RawNodeRecord | null,
+    matchField: RawFieldRecord | null,
+  ): void {
+    const tag = unionTag(typePtr);
+    let size = upgradeStructSize(tag);
+    if (matchNode) {
+      assertCapnp(matchNode.which === "struct", "SCHEMA", "a type was changed");
+      size = {
+        dataWordCount: matchNode.dataWordCount,
+        pointerCount: matchNode.pointerCount,
+      };
+    }
+    this.loadPlaceholder(
+      placeholderNode(
+        structTypeId,
+        `(unknown type used in ${this.existing.displayName})`,
+        "struct",
+        (node) => {
+          node.setU16(14, size.dataWordCount);
+          node.setU16(24, size.pointerCount);
+          const field = node.initList(3, 1, 3, 4);
+          field.setText(0, "member0");
+          field.setU16(0, 0);
+          field.setU16(8, 0);
+          if (typePtr && typePtr.kind === PtrKind.Struct) field.setP(2, typePtr);
+          if (matchField) {
+            assertCapnp(matchField.kind === "slot", "SCHEMA", "a type was changed");
+            if (matchField.explicitOrdinal !== null) {
+              field.setU16(10, 1);
+              field.setU16(12, matchField.explicitOrdinal);
+            }
+            field.setU32(4, matchField.offset >>> 0);
+            const valuePtr = matchField.proto.getP(3);
+            if (valuePtr.kind !== PtrKind.Null) field.setP(3, valuePtr);
+            else initZeroValue(field, tag);
+          } else {
+            field.setU16(10, 1);
+            field.setU16(12, 0);
+            field.setU32(4, 0);
+            initZeroValue(field, tag);
+          }
+        },
+      ),
+    );
+  }
+}
+
+function placeholderNode(
+  id: bigint,
+  name: string,
+  which: SchemaNodeWhich,
+  fill?: (node: StructBuilder) => void,
+): Ptr {
+  const builder = new MessageBuilder();
+  const node = builder.initRoot(6, 6);
+  node.setU64(0, id);
+  node.setText(0, name);
+  node.setU16(12, NODE_WHICH_BY_TAG.indexOf(which));
+  fill?.(node);
+  return Message.fromFlat(builder.toFlat()).root();
+}
+
+function initZeroValue(field: StructBuilder, tag: number): void {
+  field.initStruct(3, 2, 1).setU16(0, tag);
+}
+
 /**
  * Runtime registry of Cap'n Proto schema nodes (models capnp::SchemaLoader).
  */
@@ -2135,6 +2546,13 @@ export class SchemaLoader {
   private readonly rawNodes = new Map<bigint, RawNodeRecord>();
   private readonly instances = new Map<string, Schema>();
   private readonly reqFiles: RequestedFileSchema[] = [];
+  /** Largest group size that must fit in each struct, keyed by type id. */
+  private readonly structSizeRequirements = new Map<
+    bigint,
+    { dataWordCount: number; pointerCount: number }
+  >();
+  /** Nodes created by a field upgrade before the real declaration is loaded. */
+  private readonly placeholders = new Set<bigint>();
 
   static fromCgr(input: Uint8Array | Message): SchemaLoader {
     const loader = new SchemaLoader();
@@ -2143,10 +2561,85 @@ export class SchemaLoader {
   }
 
   loadNode(nodePtr: Ptr): Schema {
+    return this.get(this.ingest(nodePtr, false));
+  }
+
+  private ingest(nodePtr: Ptr, isPlaceholder: boolean): bigint {
     const raw = decodeRawNode(nodePtr);
-    validateLoadedNode(raw, this.rawNodes);
-    this.rawNodes.set(raw.id, raw);
-    return this.get(raw.id);
+    this.prepareNode(raw);
+    this.adoptNode(raw, isPlaceholder);
+    return raw.id;
+  }
+
+  /**
+   * Keep a new node, or a strictly newer reload. An equivalent or older
+   * reload keeps the first node. An incompatible reload throws.
+   * The stored record is updated in place. A placeholder mark is written
+   * only for a newly inserted id, and cleared when a real node arrives.
+   */
+  private adoptNode(raw: RawNodeRecord, isPlaceholder: boolean): void {
+    const existing = this.rawNodes.get(raw.id);
+    if (!existing) {
+      this.rawNodes.set(raw.id, raw);
+      if (isPlaceholder) this.placeholders.add(raw.id);
+      return;
+    }
+    const direction = new SchemaCompat(existing, raw, (ptr) => {
+      this.ingest(ptr, true);
+    }).run();
+    const wasPlaceholder = this.placeholders.has(existing.id);
+    // C++ prefers the reload when the existing node is still a placeholder.
+    const shouldReplace = wasPlaceholder ? direction !== "older" : direction === "newer";
+    if (shouldReplace) overwriteRaw(existing, raw);
+    if (wasPlaceholder && !isPlaceholder) this.placeholders.delete(existing.id);
+  }
+
+  /**
+   * C++ SchemaLoader::Impl::requireStructSize. A group may be wider than the
+   * struct declared as its scope; that struct grows so the group can be used.
+   */
+  private requireStructSize(
+    id: bigint,
+    dataWordCount: number,
+    pointerCount: number,
+  ): void {
+    const dw = dataWordCount & 0xffff;
+    const pw = pointerCount & 0xffff;
+    const prev = this.structSizeRequirements.get(id);
+    if (prev) {
+      if (dw > prev.dataWordCount) prev.dataWordCount = dw;
+      if (pw > prev.pointerCount) prev.pointerCount = pw;
+    } else {
+      this.structSizeRequirements.set(id, { dataWordCount: dw, pointerCount: pw });
+    }
+    const loaded = this.rawNodes.get(id);
+    if (loaded && loaded.which === "struct") growStruct(loaded, dw, pw);
+  }
+
+  /** Apply a recorded group size before the struct's own bounds checks. */
+  private applyPendingStructSize(raw: RawNodeRecord): void {
+    if (raw.which !== "struct") return;
+    const req = this.structSizeRequirements.get(raw.id);
+    if (!req) return;
+    growStruct(raw, req.dataWordCount, req.pointerCount);
+  }
+
+  private prepareNode(raw: RawNodeRecord): void {
+    this.applyPendingStructSize(raw);
+    validateLoadedNode(
+      raw,
+      this.rawNodes,
+      (scopeId, dataWordCount, pointerCount) => {
+        this.requireStructSize(scopeId, dataWordCount, pointerCount);
+      },
+      (id, which) => {
+        if (this.rawNodes.has(id)) return;
+        this.ingest(
+          placeholderNode(id, `(unknown type used by ${raw.displayName})`, which),
+          true,
+        );
+      },
+    );
   }
 
   loadCgr(input: Uint8Array | Message): void {
@@ -2167,9 +2660,7 @@ export class SchemaLoader {
     const nodesList = root.getP(0);
     if (nodesList.kind === PtrKind.List) {
       for (let i = 0; i < nodesList.listLen(); i++) {
-        const raw = decodeRawNode(nodesList.listGetP(i));
-        validateLoadedNode(raw, this.rawNodes);
-        this.rawNodes.set(raw.id, raw);
+        this.ingest(nodesList.listGetP(i), false);
       }
     }
 
@@ -2202,6 +2693,7 @@ export class SchemaLoader {
   allNodes(): Schema[] {
     const out: Schema[] = [];
     for (const id of this.rawNodes.keys()) {
+      if (this.placeholders.has(id)) continue;
       out.push(this.get(id));
     }
     return out;
@@ -2212,7 +2704,7 @@ export class SchemaLoader {
   }
 
   has(id: bigint): boolean {
-    return this.rawNodes.has(id);
+    return this.rawNodes.has(id) && !this.placeholders.has(id);
   }
 
   /** @internal */
@@ -2258,7 +2750,7 @@ export class SchemaLoader {
   getWithBrandMap(id: bigint, brandMap: BrandMap): Schema {
     const raw = this.rawNodes.get(id);
     assertCapnp(
-      raw !== undefined,
+      raw !== undefined && !this.placeholders.has(id),
       "ARG",
       `schema node 0x${id.toString(16)} is not loaded`,
     );
@@ -2295,7 +2787,7 @@ export class SchemaLoader {
     brandPtr?: Ptr | null,
     parentBrand: BrandMap = EMPTY_BRAND,
   ): Schema | null {
-    if (!this.rawNodes.has(id)) return null;
+    if (!this.has(id)) return null;
     const brandMap = this.resolveBrandPtr(brandPtr, parentBrand);
     return this.getWithBrandMap(id, brandMap);
   }
@@ -2307,6 +2799,12 @@ export class SchemaLoader {
   ): Schema {
     const brandMap = this.resolveBrandPtr(brandPtr, parentBrand);
     return this.getWithBrandMap(id, brandMap);
+  }
+
+  /** @internal C++ Schema::getDependency: reading a type initializes its placeholder. */
+  private dependency(id: bigint, brandPtr: Ptr | null | undefined, brandMap: BrandMap): Schema {
+    this.placeholders.delete(id);
+    return this.getWithBrandMap(id, this.resolveBrandPtr(brandPtr, brandMap));
   }
 
   getStruct(id: bigint): StructSchema {
@@ -2346,19 +2844,19 @@ export class SchemaLoader {
       case TypeKind.Enum: {
         const targetId = typePtr.getU64(8);
         return Type.fromEnum(
-          this.get(targetId, typePtr.getP(0), brandMap).asEnum(),
+          this.dependency(targetId, typePtr.getP(0), brandMap).asEnum(),
         );
       }
       case TypeKind.Struct: {
         const targetId = typePtr.getU64(8);
         return Type.fromStruct(
-          this.get(targetId, typePtr.getP(0), brandMap).asStruct(),
+          this.dependency(targetId, typePtr.getP(0), brandMap).asStruct(),
         );
       }
       case TypeKind.Interface: {
         const targetId = typePtr.getU64(8);
         return Type.fromInterface(
-          this.get(targetId, typePtr.getP(0), brandMap).asInterface(),
+          this.dependency(targetId, typePtr.getP(0), brandMap).asInterface(),
         );
       }
       case TypeKind.AnyPointer: {
@@ -2528,6 +3026,7 @@ export class SchemaLoader {
       }
     }
     for (const [id, raw] of this.rawNodes) {
+      if (this.placeholders.has(id)) continue;
       if (raw.displayName.slice(raw.displayNamePrefixLength) === clean) {
         return id;
       }
