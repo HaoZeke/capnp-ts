@@ -111,6 +111,29 @@ function loadFlat(loader: SchemaLoader, bytes: Uint8Array): void {
 }
 
 describe("SchemaLoader group parent size", () => {
+  test("a truncated struct node grows to fit a wider group", () => {
+    const loader = new SchemaLoader();
+    const parent = 0xc200n;
+    loadFlat(loader, shortStruct(parent, "Outer"));
+    expect(loader.get(parent).getProto().dwords).toBe(2);
+    loadFlat(
+      loader,
+      declNode({
+        id: 0xc201n,
+        name: "G",
+        scopeId: parent,
+        isGroup: true,
+        dataWords: 3,
+        pointers: 2,
+      }),
+    );
+    const grown = loader.get(parent).asStruct();
+    expect(grown.dataWordCount).toBe(3);
+    expect(grown.pointerCount).toBe(2);
+    expect(grown.getProto().getU16(14)).toBe(3);
+    expect(grown.getProto().getU16(24)).toBe(2);
+  });
+
   test("a group larger than its parent grows the parent", () => {
     const loader = loadBoth(true);
     const parent = loader.get(0x2222n).asStruct();
@@ -303,6 +326,68 @@ describe("SchemaLoader schema reload", () => {
     });
   });
 
+  test("NaN defaults with different payloads do not reload", () => {
+    const loader = new SchemaLoader();
+    const nan32 = 0x7fc00000;
+    const other32 = 0x7fc00001;
+    const nan64 = 0x7ff8000000000000n;
+    const other64 = 0x7ff8000000000001n;
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x7775n,
+        name: "F32",
+        dataWords: 1,
+        fields: [{ name: "x", type: TypeKind.Float32, def: nan32 }],
+      }),
+    );
+    const thrown32 = capture(() => {
+      loadFlat(
+        loader,
+        declNode({
+          id: 0x7775n,
+          name: "F32b",
+          dataWords: 1,
+          fields: [{ name: "x", type: TypeKind.Float32, def: other32 }],
+        }),
+      );
+    });
+    expect(thrown32).toBeInstanceOf(CapnpError);
+    expect((thrown32 as CapnpError).message).toContain("default value changed");
+    expect(loader.get(0x7775n).displayName).toBe("F32");
+    expect(loader.get(0x7775n).asStruct().getFields()[0]!.defaultValue).toMatchObject({
+      which: "float32",
+      rawBits: nan32,
+    });
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x7776n,
+        name: "F64",
+        dataWords: 1,
+        fields: [{ name: "x", type: TypeKind.Float64, def: nan64 }],
+      }),
+    );
+    const thrown64 = capture(() => {
+      loadFlat(
+        loader,
+        declNode({
+          id: 0x7776n,
+          name: "F64b",
+          dataWords: 1,
+          fields: [{ name: "x", type: TypeKind.Float64, def: other64 }],
+        }),
+      );
+    });
+    expect(thrown64).toBeInstanceOf(CapnpError);
+    expect((thrown64 as CapnpError).message).toContain("default value changed");
+    expect(loader.get(0x7776n).displayName).toBe("F64");
+    expect(loader.get(0x7776n).asStruct().getFields()[0]!.defaultValue).toMatchObject({
+      which: "float64",
+      rawBits: nan64,
+    });
+  });
+
   test("a const type cache follows a newer reload", () => {
     const loader = new SchemaLoader();
     loadFlat(
@@ -328,6 +413,24 @@ describe("SchemaLoader schema reload", () => {
       }),
     );
     expect(fetched.getType().which).toBe("text");
+  });
+
+  test("two brands of a generic const and annotation keep their own types", () => {
+    const loader = new SchemaLoader();
+    const constId = 0xc100n;
+    const annId = 0xc101n;
+    loadFlat(loader, genericParamDecl(constId, "Box", SchemaNodeKind.Const));
+    loadFlat(loader, genericParamDecl(annId, "Tag", SchemaNodeKind.Annotation));
+    const textConst = loader.get(constId, brandFor(constId, TypeKind.Text)).asConst();
+    const dataConst = loader.get(constId, brandFor(constId, TypeKind.Data)).asConst();
+    expect(textConst.getType().which).toBe("text");
+    expect(dataConst.getType().which).toBe("data");
+    expect(textConst.getType().which).toBe("text");
+    const textAnn = loader.get(annId, brandFor(annId, TypeKind.Text)).asAnnotation();
+    const dataAnn = loader.get(annId, brandFor(annId, TypeKind.Data)).asAnnotation();
+    expect(textAnn.getType().which).toBe("text");
+    expect(dataAnn.getType().which).toBe("data");
+    expect(textAnn.getType().which).toBe("text");
   });
 
   test("a fetched schema sees a newer field list", () => {
@@ -489,6 +592,44 @@ function capture(fn: () => void): unknown {
   return undefined;
 }
 
+function genericParamDecl(id: bigint, name: string, which: number): Uint8Array {
+  const node = flatNode(id, name);
+  node.setU16(12, which);
+  node.setBool(288, true);
+  node.initList(5, 1, 0, 1).setText(0, "T");
+  const type = node.initStruct(3, TYPE_DW, TYPE_PW);
+  type.setU16(0, TypeKind.AnyPointer);
+  type.setU16(8, 1);
+  type.setU16(10, 0);
+  type.setU64(16, id);
+  if (which === SchemaNodeKind.Const) {
+    node.initStruct(4, VALUE_DW, VALUE_PW).setU16(0, TypeKind.AnyPointer);
+  }
+  return finish(node);
+}
+
+function brandFor(scopeId: bigint, typeTag: number, typeId?: bigint) {
+  const builder = new MessageBuilder();
+  const brand = builder.initRoot(0, 1);
+  const scope = brand.initList(0, 1, 2, 1);
+  scope.setU64(0, scopeId);
+  const binding = scope.initList(0, 1, 1, 1);
+  binding.setU16(0, 1);
+  const type = binding.initStruct(0, TYPE_DW, TYPE_PW);
+  type.setU16(0, typeTag);
+  if (typeId !== undefined) type.setU64(8, typeId);
+  return Message.fromFlat(builder.toFlat()).root();
+}
+
+function shortStruct(id: bigint, name: string): Uint8Array {
+  const builder = new MessageBuilder();
+  const node = builder.initRoot(2, 1);
+  node.setU64(0, id);
+  node.setText(0, name);
+  node.setU16(12, SchemaNodeKind.Struct);
+  return finish(node);
+}
+
 describe("SchemaLoader upgrade bookkeeping", () => {
   test("a generated placeholder stays hidden until a real node is loaded", () => {
     const loader = new SchemaLoader();
@@ -577,6 +718,44 @@ describe("SchemaLoader upgrade bookkeeping", () => {
     expect(fetched.getFields()).toHaveLength(1);
   });
 
+  test("a placeholder stays hidden when brand resolution throws", () => {
+    const loader = new SchemaLoader();
+    const target = 0xc321n;
+    loadFlat(
+      loader,
+      declNode({
+        id: 0xc320n,
+        name: "Box",
+        pointers: 1,
+        fields: [{ name: "items", type: TypeKind.List, element: TypeKind.UInt32 }],
+      }),
+    );
+    loadFlat(
+      loader,
+      declNode({
+        id: 0xc320n,
+        name: "Box2",
+        pointers: 1,
+        fields: [
+          {
+            name: "items",
+            type: TypeKind.List,
+            element: TypeKind.Struct,
+            elementId: target,
+          },
+        ],
+      }),
+    );
+    expect(loader.has(target)).toBe(false);
+    const thrown = capture(() => {
+      loader.dependency(target, brandFor(target, TypeKind.Struct, 0xc322n), new Map());
+    });
+    expect(thrown).toBeInstanceOf(CapnpError);
+    expect(loader.has(target)).toBe(false);
+    loader.dependency(target, null, new Map());
+    expect(loader.has(target)).toBe(true);
+  });
+
   test("a slot upgrade mixed with a dropped field throws", () => {
     const loader = new SchemaLoader();
     loadFlat(
@@ -650,6 +829,37 @@ describe("SchemaLoader upgrade bookkeeping", () => {
     expect((thrown as CapnpError).message).toContain("upgrades and some");
     expect(loader.get(0x8300n).displayName).toBe("V1");
     expect(loader.get(0x8300n).asStruct().getFields()).toHaveLength(2);
+  });
+
+  test("a data word upgrade mixed with a pointer downgrade throws", () => {
+    const loader = new SchemaLoader();
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x8310n,
+        name: "V1",
+        dataWords: 1,
+        pointers: 2,
+        fields: [{ name: "x", type: TypeKind.UInt32, def: 1 }],
+      }),
+    );
+    const thrown = capture(() => {
+      loadFlat(
+        loader,
+        declNode({
+          id: 0x8310n,
+          name: "V2",
+          dataWords: 2,
+          pointers: 1,
+          fields: [{ name: "x", type: TypeKind.UInt32, def: 1 }],
+        }),
+      );
+    });
+    expect(thrown).toBeInstanceOf(CapnpError);
+    expect((thrown as CapnpError).message).toContain("upgrades and some");
+    expect(loader.get(0x8310n).displayName).toBe("V1");
+    expect(loader.get(0x8310n).asStruct().dataWordCount).toBe(1);
+    expect(loader.get(0x8310n).asStruct().pointerCount).toBe(2);
   });
 
   test("a fetched interface sees added methods and superclasses", () => {

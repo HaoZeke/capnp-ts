@@ -256,8 +256,6 @@ interface RawNodeRecord {
   readonly constValue: SchemaValue;
   readonly annotationTypePtr: Ptr | null;
   readonly annotationTargets: AnnotationTargets;
-  /** Const and annotation type cache. Cleared by overwriteRaw. */
-  cachedType?: Type | null;
 }
 
 const EMPTY_TARGETS: AnnotationTargets = {
@@ -618,7 +616,6 @@ type GroupSizer = (
 /** Copy a decoded node onto the record Schema objects already reference. */
 function overwriteRaw(target: RawNodeRecord, source: RawNodeRecord): void {
   Object.assign(target, source);
-  target.cachedType = null;
 }
 
 /** Raise a struct's stored size. C++ rewrites the node with the max of each count. */
@@ -635,7 +632,7 @@ function growStruct(
   const slot = raw as { dataWordCount: number; pointerCount: number; proto: Ptr };
   slot.dataWordCount = dw;
   slot.pointerCount = pw;
-  if (slot.proto.kind === PtrKind.Struct && slot.proto.dwords >= 4) {
+  if (slot.proto.kind === PtrKind.Struct) {
     slot.proto = rewriteStructCounts(slot.proto, dw, pw);
   }
 }
@@ -645,8 +642,10 @@ function rewriteStructCounts(
   dataWordCount: number,
   pointerCount: number,
 ): Ptr {
+  // pointerCount sits at byte 24, so a body shorter than 4 words has to grow.
+  const dwords = proto.dwords < 4 ? 4 : proto.dwords;
   const builder = new MessageBuilder();
-  const node = builder.initRoot(proto.dwords, proto.pwords);
+  const node = builder.initRoot(dwords, proto.pwords);
   for (let i = 0; i < proto.dwords; i++) node.setU64(i * 8, proto.getU64(i * 8));
   for (let k = 0; k < proto.pwords; k++) {
     const child = proto.getP(k);
@@ -2162,32 +2161,37 @@ export class InterfaceSchema extends Schema {
 
 /** Constant schema declaration (models capnp::ConstSchema). */
 export class ConstSchema extends Schema {
+  private _type: Type | null = null;
+  private _typeSrc: Ptr | null = null;
+
   get rawValue(): SchemaValue {
     return this.raw.constValue;
   }
 
   getType(): Type {
-    if (!this.raw.cachedType) {
-      this.raw.cachedType = this.loader.interpretType(this.raw.constTypePtr, this.brandMap);
+    if (!this._type || this._typeSrc !== this.raw.constTypePtr) {
+      this._typeSrc = this.raw.constTypePtr;
+      this._type = this.loader.interpretType(this.raw.constTypePtr, this.brandMap);
     }
-    return this.raw.cachedType;
+    return this._type;
   }
 }
 
 /** Annotation declaration schema (models schema.capnp Node.annotation). */
 export class AnnotationSchema extends Schema {
+  private _type: Type | null = null;
+  private _typeSrc: Ptr | null = null;
+
   get targets(): AnnotationTargets {
     return this.raw.annotationTargets;
   }
 
   getType(): Type {
-    if (!this.raw.cachedType) {
-      this.raw.cachedType = this.loader.interpretType(
-        this.raw.annotationTypePtr,
-        this.brandMap,
-      );
+    if (!this._type || this._typeSrc !== this.raw.annotationTypePtr) {
+      this._typeSrc = this.raw.annotationTypePtr;
+      this._type = this.loader.interpretType(this.raw.annotationTypePtr, this.brandMap);
     }
-    return this.raw.cachedType;
+    return this._type;
   }
 }
 
@@ -2918,6 +2922,7 @@ export class SchemaLoader {
   /**
    * @internal C++ Schema::getDependency. `brandReady` keeps an already resolved
    * brand, which group fields need because they share the parent brand.
+   * A placeholder is published only after that brand resolves.
    */
   dependency(
     id: bigint,
@@ -2925,8 +2930,8 @@ export class SchemaLoader {
     brandMap: BrandMap,
     brandReady = false,
   ): Schema {
-    if (this.placeholders.has(id)) this.initialized.add(id);
     const resolved = brandReady ? brandMap : this.resolveBrandPtr(brandPtr, brandMap);
+    if (this.placeholders.has(id)) this.initialized.add(id);
     return this.getWithBrandMap(id, resolved);
   }
 
