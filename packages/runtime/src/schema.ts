@@ -2551,6 +2551,14 @@ function initZeroValue(field: StructBuilder, tag: number): void {
   field.initStruct(3, 2, 1).setU16(0, tag);
 }
 
+interface LoaderSnap {
+  records: Map<bigint, RawNodeRecord>;
+  placeholders: Set<bigint>;
+  initialized: Set<bigint>;
+  sizes: Map<bigint, { dataWordCount: number; pointerCount: number }>;
+  instanceKeys: Set<string>;
+}
+
 /**
  * Runtime registry of Cap'n Proto schema nodes (models capnp::SchemaLoader).
  */
@@ -2570,6 +2578,8 @@ export class SchemaLoader {
    * until a real node is adopted, so an equivalent reload still replaces it.
    */
   private readonly initialized = new Set<bigint>();
+  /** Outermost ingest snapshots the loader and rolls a rejection back. */
+  private txDepth = 0;
 
   static fromCgr(input: Uint8Array | Message): SchemaLoader {
     const loader = new SchemaLoader();
@@ -2582,10 +2592,60 @@ export class SchemaLoader {
   }
 
   private ingest(nodePtr: Ptr, isPlaceholder: boolean): bigint {
-    const raw = decodeRawNode(nodePtr);
-    this.prepareNode(raw);
-    this.adoptNode(raw, isPlaceholder);
-    return raw.id;
+    const snap = this.txDepth === 0 ? this.captureLoader() : null;
+    this.txDepth += 1;
+    try {
+      const raw = decodeRawNode(nodePtr);
+      this.prepareNode(raw);
+      this.adoptNode(raw, isPlaceholder);
+      return raw.id;
+    } catch (err) {
+      if (snap) this.restoreLoader(snap);
+      throw err;
+    } finally {
+      this.txDepth -= 1;
+    }
+  }
+
+  private captureLoader(): LoaderSnap {
+    const records = new Map<bigint, RawNodeRecord>();
+    for (const [id, raw] of this.rawNodes) records.set(id, { ...raw });
+    const sizes = new Map<bigint, { dataWordCount: number; pointerCount: number }>();
+    for (const [id, size] of this.structSizeRequirements) {
+      sizes.set(id, { dataWordCount: size.dataWordCount, pointerCount: size.pointerCount });
+    }
+    return {
+      records,
+      placeholders: new Set(this.placeholders),
+      initialized: new Set(this.initialized),
+      sizes,
+      instanceKeys: new Set(this.instances.keys()),
+    };
+  }
+
+  private restoreLoader(snap: LoaderSnap): void {
+    for (const id of this.rawNodes.keys()) {
+      if (!snap.records.has(id)) this.rawNodes.delete(id);
+    }
+    for (const [id, saved] of snap.records) {
+      const live = this.rawNodes.get(id);
+      if (live) Object.assign(live, saved);
+      else this.rawNodes.set(id, saved);
+    }
+    this.placeholders.clear();
+    for (const id of snap.placeholders) this.placeholders.add(id);
+    this.initialized.clear();
+    for (const id of snap.initialized) this.initialized.add(id);
+    this.structSizeRequirements.clear();
+    for (const [id, size] of snap.sizes) {
+      this.structSizeRequirements.set(id, {
+        dataWordCount: size.dataWordCount,
+        pointerCount: size.pointerCount,
+      });
+    }
+    for (const key of this.instances.keys()) {
+      if (!snap.instanceKeys.has(key)) this.instances.delete(key);
+    }
   }
 
   /**

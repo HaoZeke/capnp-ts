@@ -341,9 +341,13 @@ function declNode(opts: {
   enumerants?: readonly string[];
   methods?: readonly { name: string; param: bigint; result: bigint }[];
   supers?: readonly bigint[];
+  scopeId?: bigint;
+  isGroup?: boolean;
 }): Uint8Array {
   const node = flatNode(opts.id, opts.name);
   node.setU16(12, opts.which ?? SchemaNodeKind.Struct);
+  if (opts.scopeId !== undefined) node.setU64(16, opts.scopeId);
+  if (opts.isGroup) node.setBool(224, true);
   node.setU16(14, opts.dataWords ?? 0);
   node.setU16(24, opts.pointers ?? 0);
   node.setU16(30, opts.discCount ?? 0);
@@ -896,6 +900,52 @@ describe("SchemaLoader upgrade bookkeeping", () => {
     expect((thrown as CapnpError).message).toContain("a type was changed");
     expect(loader.get(0x8740n).asStruct().getFields()[0]!.getType().which).toBe("uint32");
     expect(loader.has(0x8741n)).toBe(false);
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x8741n,
+        name: "Color",
+        which: SchemaNodeKind.Enum,
+        enumerants: ["red"],
+      }),
+    );
+    expect(loader.get(0x8741n).asEnum().getEnumerants().map((e) => e.name)).toEqual(["red"]);
+  });
+
+  test("a rejected group reload does not grow the parent", () => {
+    const loader = new SchemaLoader();
+    const parent = 0x8760n;
+    const group = 0x8761n;
+    loadFlat(loader, declNode({ id: parent, name: "Outer" }));
+    loadFlat(
+      loader,
+      declNode({
+        id: group,
+        name: "Outer.g",
+        scopeId: parent,
+        isGroup: true,
+        dataWords: 1,
+        fields: [{ name: "x", type: TypeKind.UInt32, def: 1 }],
+      }),
+    );
+    expect(loader.get(parent).asStruct().dataWordCount).toBe(1);
+    const thrown = capture(() => {
+      loadFlat(
+        loader,
+        declNode({
+          id: group,
+          name: "Outer.g2",
+          scopeId: parent,
+          isGroup: true,
+          dataWords: 4,
+          fields: [{ name: "x", type: TypeKind.UInt32, def: 2 }],
+        }),
+      );
+    });
+    expect(thrown).toBeInstanceOf(CapnpError);
+    expect((thrown as CapnpError).message).toContain("default value changed");
+    expect(loader.get(parent).asStruct().dataWordCount).toBe(1);
+    expect(loader.get(group).displayName).toBe("Outer.g");
   });
 
   test("a list element upgraded to a struct stays out of allNodes", () => {
