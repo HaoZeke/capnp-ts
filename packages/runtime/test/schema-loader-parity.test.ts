@@ -1017,4 +1017,71 @@ describe("SchemaLoader upgrade bookkeeping", () => {
       loader.get(0x8754n).asStruct().getFields()[0]!.getType().asList().getElementType().which,
     ).toBe("struct");
   });
+
+  test("an equivalent real node replaces a placeholder that was already read", () => {
+    const cases: ReadonlyArray<{
+      id: bigint;
+      target: bigint;
+      name: string;
+      type: number;
+      targetWhich: number;
+      dataWords: number;
+      pointers: number;
+      read: (loader: SchemaLoader, id: bigint) => { displayName: string };
+    }> = [
+      {
+        id: 0x8800n,
+        target: 0x8801n,
+        name: "Box",
+        type: TypeKind.Struct,
+        targetWhich: SchemaNodeKind.Struct,
+        dataWords: 0,
+        pointers: 1,
+        read: (loader, id) => loader.get(id).asStruct().getFields()[0]!.getType().asStruct(),
+      },
+      {
+        id: 0x8810n,
+        target: 0x8811n,
+        name: "Hue",
+        type: TypeKind.Enum,
+        targetWhich: SchemaNodeKind.Enum,
+        dataWords: 1,
+        pointers: 0,
+        read: (loader, id) => loader.get(id).asStruct().getFields()[0]!.getType().asEnum(),
+      },
+      {
+        id: 0x8820n,
+        target: 0x8821n,
+        name: "Api",
+        type: TypeKind.Interface,
+        targetWhich: SchemaNodeKind.Interface,
+        dataWords: 0,
+        pointers: 1,
+        read: (loader, id) => loader.get(id).asStruct().getFields()[0]!.getType().asInterface(),
+      },
+    ];
+    for (const spec of cases) {
+      const loader = new SchemaLoader();
+      loadFlat(
+        loader,
+        declNode({
+          id: spec.id,
+          name: spec.name,
+          dataWords: spec.dataWords,
+          pointers: spec.pointers,
+          fields: [{ name: "item", type: spec.type, typeId: spec.target }],
+        }),
+      );
+      expect(loader.has(spec.target)).toBe(false);
+      const seen = spec.read(loader, spec.id);
+      expect(loader.has(spec.target)).toBe(true);
+      expect(seen.displayName).toBe(`(unknown type used by ${spec.name})`);
+      loadFlat(
+        loader,
+        declNode({ id: spec.target, name: "Real", which: spec.targetWhich }),
+      );
+      expect(seen.displayName).toBe("Real");
+      expect(loader.get(spec.target).displayName).toBe("Real");
+    }
+  });
 });

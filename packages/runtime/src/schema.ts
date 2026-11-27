@@ -2565,6 +2565,11 @@ export class SchemaLoader {
   >();
   /** Nodes created by a field upgrade before the real declaration is loaded. */
   private readonly placeholders = new Set<bigint>();
+  /**
+   * Placeholders a dependency read has published. The placeholder mark stays
+   * until a real node is adopted, so an equivalent reload still replaces it.
+   */
+  private readonly initialized = new Set<bigint>();
 
   static fromCgr(input: Uint8Array | Message): SchemaLoader {
     const loader = new SchemaLoader();
@@ -2603,7 +2608,15 @@ export class SchemaLoader {
     // C++ prefers the reload when the existing node is still a placeholder.
     const shouldReplace = wasPlaceholder ? direction !== "older" : direction === "newer";
     if (shouldReplace) overwriteRaw(existing, raw);
-    if (wasPlaceholder && !isPlaceholder) this.placeholders.delete(existing.id);
+    if (wasPlaceholder && !isPlaceholder) {
+      this.placeholders.delete(existing.id);
+      this.initialized.delete(existing.id);
+    }
+  }
+
+  /** Hidden until a dependency read or a real node clears the placeholder. */
+  private placeholderHidden(id: bigint): boolean {
+    return this.placeholders.has(id) && !this.initialized.has(id);
   }
 
   /**
@@ -2705,7 +2718,7 @@ export class SchemaLoader {
   allNodes(): Schema[] {
     const out: Schema[] = [];
     for (const id of this.rawNodes.keys()) {
-      if (this.placeholders.has(id)) continue;
+      if (this.placeholderHidden(id)) continue;
       out.push(this.get(id));
     }
     return out;
@@ -2716,7 +2729,7 @@ export class SchemaLoader {
   }
 
   has(id: bigint): boolean {
-    return this.rawNodes.has(id) && !this.placeholders.has(id);
+    return this.rawNodes.has(id) && !this.placeholderHidden(id);
   }
 
   /** @internal */
@@ -2762,7 +2775,7 @@ export class SchemaLoader {
   getWithBrandMap(id: bigint, brandMap: BrandMap): Schema {
     const raw = this.rawNodes.get(id);
     assertCapnp(
-      raw !== undefined && !this.placeholders.has(id),
+      raw !== undefined && !this.placeholderHidden(id),
       "ARG",
       `schema node 0x${id.toString(16)} is not loaded`,
     );
@@ -2815,7 +2828,7 @@ export class SchemaLoader {
 
   /** @internal C++ Schema::getDependency: reading a type initializes its placeholder. */
   private dependency(id: bigint, brandPtr: Ptr | null | undefined, brandMap: BrandMap): Schema {
-    this.placeholders.delete(id);
+    if (this.placeholders.has(id)) this.initialized.add(id);
     return this.getWithBrandMap(id, this.resolveBrandPtr(brandPtr, brandMap));
   }
 
@@ -3038,7 +3051,7 @@ export class SchemaLoader {
       }
     }
     for (const [id, raw] of this.rawNodes) {
-      if (this.placeholders.has(id)) continue;
+      if (this.placeholderHidden(id)) continue;
       if (raw.displayName.slice(raw.displayNamePrefixLength) === clean) {
         return id;
       }
