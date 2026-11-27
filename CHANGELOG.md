@@ -8,13 +8,6 @@ Pre-1.0 minor releases may include breaking API changes.
 
 <!-- towncrier release notes start -->
 
-## [Unreleased]
-
-### Fixed
-
-- Schema reloads keep upgrade direction, float-default bits, and placeholder nodes, and a rejected load leaves the loader unchanged.
-- An unknown method on the generated dispatch raises an 'unimplemented' RPC error, as Cap'n Proto C++ does.
-
 ## [0.1.0] - 2026-11-22
 
 First release of the pure TypeScript ESM Cap'n Proto family for Node >= 18
@@ -96,5 +89,4 @@ and Bun: `@haozeke/capnp`, `@haozeke/capnpc-ts`, and `@haozeke/capnp-rpc`.
 - Live `c-capnproto` twin interop (`interop/emit_c_twin.c` is an offline sketch;
   live RPC interop runs against Cap'n Proto C++ 1.4.0).
 
-[Unreleased]: https://github.com/HaoZeke/capnp-ts/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/HaoZeke/capnp-ts/releases/tag/v0.1.0
