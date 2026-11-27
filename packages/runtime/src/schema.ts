@@ -256,6 +256,8 @@ interface RawNodeRecord {
   readonly constValue: SchemaValue;
   readonly annotationTypePtr: Ptr | null;
   readonly annotationTargets: AnnotationTargets;
+  /** Const and annotation type cache. Cleared by overwriteRaw. */
+  cachedType?: Type | null;
 }
 
 const EMPTY_TARGETS: AnnotationTargets = {
@@ -616,6 +618,7 @@ type GroupSizer = (
 /** Copy a decoded node onto the record Schema objects already reference. */
 function overwriteRaw(target: RawNodeRecord, source: RawNodeRecord): void {
   Object.assign(target, source);
+  target.cachedType = null;
 }
 
 /** Raise a struct's stored size. C++ rewrites the node with the max of each count. */
@@ -624,9 +627,34 @@ function growStruct(
   dataWordCount: number,
   pointerCount: number,
 ): void {
-  const slot = raw as { dataWordCount: number; pointerCount: number };
-  if (slot.dataWordCount < dataWordCount) slot.dataWordCount = dataWordCount;
-  if (slot.pointerCount < pointerCount) slot.pointerCount = pointerCount;
+  let dw = raw.dataWordCount;
+  let pw = raw.pointerCount;
+  if (dw < dataWordCount) dw = dataWordCount;
+  if (pw < pointerCount) pw = pointerCount;
+  if (dw === raw.dataWordCount && pw === raw.pointerCount) return;
+  const slot = raw as { dataWordCount: number; pointerCount: number; proto: Ptr };
+  slot.dataWordCount = dw;
+  slot.pointerCount = pw;
+  if (slot.proto.kind === PtrKind.Struct && slot.proto.dwords >= 4) {
+    slot.proto = rewriteStructCounts(slot.proto, dw, pw);
+  }
+}
+
+function rewriteStructCounts(
+  proto: Ptr,
+  dataWordCount: number,
+  pointerCount: number,
+): Ptr {
+  const builder = new MessageBuilder();
+  const node = builder.initRoot(proto.dwords, proto.pwords);
+  for (let i = 0; i < proto.dwords; i++) node.setU64(i * 8, proto.getU64(i * 8));
+  for (let k = 0; k < proto.pwords; k++) {
+    const child = proto.getP(k);
+    if (child.kind !== PtrKind.Null) node.setP(k, child);
+  }
+  node.setU16(14, dataWordCount);
+  node.setU16(24, pointerCount);
+  return Message.fromFlat(builder.toFlat()).root();
 }
 
 /**
@@ -1651,7 +1679,7 @@ export class StructField {
       if (this.raw.kind === "group") {
         // Group nodes share the enclosing struct's generic brand bindings.
         const groupSchema = this.parent.loader
-          .getWithBrandMap(this.raw.groupTypeId, this.parent.brandMap)
+          .dependency(this.raw.groupTypeId, null, this.parent.brandMap, true)
           .asStruct();
         this._type = Type.fromStruct(groupSchema);
       } else {
@@ -1991,7 +2019,7 @@ export class InterfaceMethod {
   getParamType(): StructSchema {
     if (!this._paramType) {
       this._paramType = this.parent.loader
-        .get(this.raw.paramStructType, this.raw.paramBrandPtr, this.parent.brandMap)
+        .dependency(this.raw.paramStructType, this.raw.paramBrandPtr, this.parent.brandMap)
         .asStruct();
     }
     return this._paramType;
@@ -2000,7 +2028,7 @@ export class InterfaceMethod {
   getResultType(): StructSchema {
     if (!this._resultType) {
       this._resultType = this.parent.loader
-        .get(this.raw.resultStructType, this.raw.resultBrandPtr, this.parent.brandMap)
+        .dependency(this.raw.resultStructType, this.raw.resultBrandPtr, this.parent.brandMap)
         .asStruct();
     }
     return this._resultType;
@@ -2059,7 +2087,7 @@ export class InterfaceSchema extends Schema {
     if (!this._superclasses || this._superSrc !== this.raw.superclasses) {
       this._superSrc = this.raw.superclasses;
       this._superclasses = this.raw.superclasses.map((sc) =>
-        this.loader.get(sc.id, sc.brandPtr, this.brandMap).asInterface(),
+        this.loader.dependency(sc.id, sc.brandPtr, this.brandMap).asInterface(),
       );
     }
     return this._superclasses;
@@ -2134,36 +2162,32 @@ export class InterfaceSchema extends Schema {
 
 /** Constant schema declaration (models capnp::ConstSchema). */
 export class ConstSchema extends Schema {
-  private _type: Type | null = null;
-
   get rawValue(): SchemaValue {
     return this.raw.constValue;
   }
 
   getType(): Type {
-    if (!this._type) {
-      this._type = this.loader.interpretType(this.raw.constTypePtr, this.brandMap);
+    if (!this.raw.cachedType) {
+      this.raw.cachedType = this.loader.interpretType(this.raw.constTypePtr, this.brandMap);
     }
-    return this._type;
+    return this.raw.cachedType;
   }
 }
 
 /** Annotation declaration schema (models schema.capnp Node.annotation). */
 export class AnnotationSchema extends Schema {
-  private _type: Type | null = null;
-
   get targets(): AnnotationTargets {
     return this.raw.annotationTargets;
   }
 
   getType(): Type {
-    if (!this._type) {
-      this._type = this.loader.interpretType(
+    if (!this.raw.cachedType) {
+      this.raw.cachedType = this.loader.interpretType(
         this.raw.annotationTypePtr,
         this.brandMap,
       );
     }
-    return this._type;
+    return this.raw.cachedType;
   }
 }
 
@@ -2886,10 +2910,19 @@ export class SchemaLoader {
     return this.getWithBrandMap(id, brandMap);
   }
 
-  /** @internal C++ Schema::getDependency: reading a type initializes its placeholder. */
-  private dependency(id: bigint, brandPtr: Ptr | null | undefined, brandMap: BrandMap): Schema {
+  /**
+   * @internal C++ Schema::getDependency. `brandReady` keeps an already resolved
+   * brand, which group fields need because they share the parent brand.
+   */
+  dependency(
+    id: bigint,
+    brandPtr: Ptr | null | undefined,
+    brandMap: BrandMap,
+    brandReady = false,
+  ): Schema {
     if (this.placeholders.has(id)) this.initialized.add(id);
-    return this.getWithBrandMap(id, this.resolveBrandPtr(brandPtr, brandMap));
+    const resolved = brandReady ? brandMap : this.resolveBrandPtr(brandPtr, brandMap);
+    return this.getWithBrandMap(id, resolved);
   }
 
   getStruct(id: bigint): StructSchema {

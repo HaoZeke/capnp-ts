@@ -116,6 +116,8 @@ describe("SchemaLoader group parent size", () => {
     const parent = loader.get(0x2222n).asStruct();
     expect(parent.dataWordCount).toBe(1);
     expect(parent.pointerCount).toBe(0);
+    expect(parent.getProto().getU16(14)).toBe(1);
+    expect(parent.getProto().getU16(24)).toBe(0);
     const builder = new MessageBuilder();
     const root = initDynamicRoot(builder, parent);
     root.init("g").asStruct().set("x", 0x1122334455667788n);
@@ -128,6 +130,8 @@ describe("SchemaLoader group parent size", () => {
     const parent = loader.get(0x2222n).asStruct();
     expect(parent.dataWordCount).toBe(1);
     expect(parent.pointerCount).toBe(0);
+    expect(parent.getProto().getU16(14)).toBe(1);
+    expect(parent.getProto().getU16(24)).toBe(0);
   });
 });
 
@@ -299,6 +303,33 @@ describe("SchemaLoader schema reload", () => {
     });
   });
 
+  test("a const type cache follows a newer reload", () => {
+    const loader = new SchemaLoader();
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x8890n,
+        name: "Pi",
+        which: SchemaNodeKind.Const,
+        constType: TypeKind.UInt32,
+      }),
+    );
+    const fetched = loader.get(0x8890n).asConst();
+    expect(fetched.getType().which).toBe("uint32");
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x8890n,
+        name: "Pi",
+        which: SchemaNodeKind.Const,
+        constType: TypeKind.Text,
+        generic: true,
+        params: ["T"],
+      }),
+    );
+    expect(fetched.getType().which).toBe("text");
+  });
+
   test("a fetched schema sees a newer field list", () => {
     const loader = new SchemaLoader();
     loadFlat(loader, u32Struct(0x7777n, "V1", [{ name: "x", offset: 0, def: 7 }]));
@@ -343,11 +374,15 @@ function declNode(opts: {
   supers?: readonly bigint[];
   scopeId?: bigint;
   isGroup?: boolean;
+  constType?: number;
+  generic?: boolean;
+  params?: readonly string[];
 }): Uint8Array {
   const node = flatNode(opts.id, opts.name);
   node.setU16(12, opts.which ?? SchemaNodeKind.Struct);
   if (opts.scopeId !== undefined) node.setU64(16, opts.scopeId);
   if (opts.isGroup) node.setBool(224, true);
+  if (opts.generic) node.setBool(288, true);
   node.setU16(14, opts.dataWords ?? 0);
   node.setU16(24, opts.pointers ?? 0);
   node.setU16(30, opts.discCount ?? 0);
@@ -379,6 +414,18 @@ function declNode(opts: {
       method.setU16(0, i);
       method.setU64(8, spec.param);
       method.setU64(16, spec.result);
+    }
+  }
+  if (opts.constType !== undefined) {
+    node.initStruct(3, TYPE_DW, TYPE_PW).setU16(0, opts.constType);
+    node.initStruct(4, VALUE_DW, VALUE_PW).setU16(0, opts.constType);
+  }
+  const params = opts.params ?? [];
+  if (params.length > 0) {
+    let param = node.initList(5, params.length, 0, 1);
+    for (let i = 0; i < params.length; i++) {
+      if (i > 0) param = param.nextElement();
+      param.setText(0, params[i]!);
     }
   }
   const supers = opts.supers ?? [];
@@ -945,6 +992,7 @@ describe("SchemaLoader upgrade bookkeeping", () => {
     expect(thrown).toBeInstanceOf(CapnpError);
     expect((thrown as CapnpError).message).toContain("default value changed");
     expect(loader.get(parent).asStruct().dataWordCount).toBe(1);
+    expect(loader.get(parent).getProto().getU16(14)).toBe(1);
     expect(loader.get(group).displayName).toBe("Outer.g");
   });
 

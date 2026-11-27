@@ -10,6 +10,7 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- Schema reloads keep upgrade direction, float-default bits, and placeholder nodes, and a rejected load leaves the loader unchanged.
 - An unknown method on the generated dispatch raises an 'unimplemented' RPC error, as Cap'n Proto C++ does.
 
 ## [0.1.0] - 2026-11-22
