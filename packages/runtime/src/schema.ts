@@ -2677,6 +2677,11 @@ export class SchemaLoader {
    * reload keeps the first node. An incompatible reload throws.
    * The stored record is updated in place. A placeholder mark is written
    * only for a newly inserted id, and cleared when a real node arrives.
+   *
+   * A compatibility check can insert upgrade placeholders and grow structs
+   * before it throws, and prepareNode can grow a parent before that throw.
+   * The outermost ingest rolls those mutations back: node records,
+   * placeholder marks, size requirements, and instances added for the load.
    */
   private adoptNode(raw: RawNodeRecord, isPlaceholder: boolean): void {
     const existing = this.rawNodes.get(raw.id);
