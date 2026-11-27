@@ -624,9 +624,36 @@ function growStruct(
   dataWordCount: number,
   pointerCount: number,
 ): void {
-  const slot = raw as { dataWordCount: number; pointerCount: number };
-  if (slot.dataWordCount < dataWordCount) slot.dataWordCount = dataWordCount;
-  if (slot.pointerCount < pointerCount) slot.pointerCount = pointerCount;
+  let dw = raw.dataWordCount;
+  let pw = raw.pointerCount;
+  if (dw < dataWordCount) dw = dataWordCount;
+  if (pw < pointerCount) pw = pointerCount;
+  if (dw === raw.dataWordCount && pw === raw.pointerCount) return;
+  const slot = raw as { dataWordCount: number; pointerCount: number; proto: Ptr };
+  slot.dataWordCount = dw;
+  slot.pointerCount = pw;
+  if (slot.proto.kind === PtrKind.Struct) {
+    slot.proto = rewriteStructCounts(slot.proto, dw, pw);
+  }
+}
+
+function rewriteStructCounts(
+  proto: Ptr,
+  dataWordCount: number,
+  pointerCount: number,
+): Ptr {
+  // pointerCount sits at byte 24, so a body shorter than 4 words has to grow.
+  const dwords = proto.dwords < 4 ? 4 : proto.dwords;
+  const builder = new MessageBuilder();
+  const node = builder.initRoot(dwords, proto.pwords);
+  for (let i = 0; i < proto.dwords; i++) node.setU64(i * 8, proto.getU64(i * 8));
+  for (let k = 0; k < proto.pwords; k++) {
+    const child = proto.getP(k);
+    if (child.kind !== PtrKind.Null) node.setP(k, child);
+  }
+  node.setU16(14, dataWordCount);
+  node.setU16(24, pointerCount);
+  return Message.fromFlat(builder.toFlat()).root();
 }
 
 /**
@@ -1651,7 +1678,7 @@ export class StructField {
       if (this.raw.kind === "group") {
         // Group nodes share the enclosing struct's generic brand bindings.
         const groupSchema = this.parent.loader
-          .getWithBrandMap(this.raw.groupTypeId, this.parent.brandMap)
+          .dependency(this.raw.groupTypeId, null, this.parent.brandMap, true)
           .asStruct();
         this._type = Type.fromStruct(groupSchema);
       } else {
@@ -1991,7 +2018,7 @@ export class InterfaceMethod {
   getParamType(): StructSchema {
     if (!this._paramType) {
       this._paramType = this.parent.loader
-        .get(this.raw.paramStructType, this.raw.paramBrandPtr, this.parent.brandMap)
+        .dependency(this.raw.paramStructType, this.raw.paramBrandPtr, this.parent.brandMap)
         .asStruct();
     }
     return this._paramType;
@@ -2000,7 +2027,7 @@ export class InterfaceMethod {
   getResultType(): StructSchema {
     if (!this._resultType) {
       this._resultType = this.parent.loader
-        .get(this.raw.resultStructType, this.raw.resultBrandPtr, this.parent.brandMap)
+        .dependency(this.raw.resultStructType, this.raw.resultBrandPtr, this.parent.brandMap)
         .asStruct();
     }
     return this._resultType;
@@ -2059,7 +2086,7 @@ export class InterfaceSchema extends Schema {
     if (!this._superclasses || this._superSrc !== this.raw.superclasses) {
       this._superSrc = this.raw.superclasses;
       this._superclasses = this.raw.superclasses.map((sc) =>
-        this.loader.get(sc.id, sc.brandPtr, this.brandMap).asInterface(),
+        this.loader.dependency(sc.id, sc.brandPtr, this.brandMap).asInterface(),
       );
     }
     return this._superclasses;
@@ -2135,13 +2162,15 @@ export class InterfaceSchema extends Schema {
 /** Constant schema declaration (models capnp::ConstSchema). */
 export class ConstSchema extends Schema {
   private _type: Type | null = null;
+  private _typeSrc: Ptr | null = null;
 
   get rawValue(): SchemaValue {
     return this.raw.constValue;
   }
 
   getType(): Type {
-    if (!this._type) {
+    if (!this._type || this._typeSrc !== this.raw.constTypePtr) {
+      this._typeSrc = this.raw.constTypePtr;
       this._type = this.loader.interpretType(this.raw.constTypePtr, this.brandMap);
     }
     return this._type;
@@ -2151,17 +2180,16 @@ export class ConstSchema extends Schema {
 /** Annotation declaration schema (models schema.capnp Node.annotation). */
 export class AnnotationSchema extends Schema {
   private _type: Type | null = null;
+  private _typeSrc: Ptr | null = null;
 
   get targets(): AnnotationTargets {
     return this.raw.annotationTargets;
   }
 
   getType(): Type {
-    if (!this._type) {
-      this._type = this.loader.interpretType(
-        this.raw.annotationTypePtr,
-        this.brandMap,
-      );
+    if (!this._type || this._typeSrc !== this.raw.annotationTypePtr) {
+      this._typeSrc = this.raw.annotationTypePtr;
+      this._type = this.loader.interpretType(this.raw.annotationTypePtr, this.brandMap);
     }
     return this._type;
   }
@@ -2539,6 +2567,14 @@ function initZeroValue(field: StructBuilder, tag: number): void {
   field.initStruct(3, 2, 1).setU16(0, tag);
 }
 
+interface LoaderSnap {
+  records: Map<bigint, RawNodeRecord>;
+  placeholders: Set<bigint>;
+  initialized: Set<bigint>;
+  sizes: Map<bigint, { dataWordCount: number; pointerCount: number }>;
+  instanceKeys: Set<string>;
+}
+
 /**
  * Runtime registry of Cap'n Proto schema nodes (models capnp::SchemaLoader).
  */
@@ -2553,6 +2589,13 @@ export class SchemaLoader {
   >();
   /** Nodes created by a field upgrade before the real declaration is loaded. */
   private readonly placeholders = new Set<bigint>();
+  /**
+   * Placeholders a dependency read has published. After that read, an
+   * equivalent reload keeps the placeholder body.
+   */
+  private readonly initialized = new Set<bigint>();
+  /** Outermost ingest snapshots the loader and rolls a rejection back. */
+  private txDepth = 0;
 
   static fromCgr(input: Uint8Array | Message): SchemaLoader {
     const loader = new SchemaLoader();
@@ -2565,17 +2608,73 @@ export class SchemaLoader {
   }
 
   private ingest(nodePtr: Ptr, isPlaceholder: boolean): bigint {
-    const raw = decodeRawNode(nodePtr);
-    this.prepareNode(raw);
-    this.adoptNode(raw, isPlaceholder);
-    return raw.id;
+    const snap = this.txDepth === 0 ? this.captureLoader() : null;
+    this.txDepth += 1;
+    try {
+      const raw = decodeRawNode(nodePtr);
+      this.prepareNode(raw);
+      this.adoptNode(raw, isPlaceholder);
+      return raw.id;
+    } catch (err) {
+      if (snap) this.restoreLoader(snap);
+      throw err;
+    } finally {
+      this.txDepth -= 1;
+    }
+  }
+
+  private captureLoader(): LoaderSnap {
+    const records = new Map<bigint, RawNodeRecord>();
+    for (const [id, raw] of this.rawNodes) records.set(id, { ...raw });
+    const sizes = new Map<bigint, { dataWordCount: number; pointerCount: number }>();
+    for (const [id, size] of this.structSizeRequirements) {
+      sizes.set(id, { dataWordCount: size.dataWordCount, pointerCount: size.pointerCount });
+    }
+    return {
+      records,
+      placeholders: new Set(this.placeholders),
+      initialized: new Set(this.initialized),
+      sizes,
+      instanceKeys: new Set(this.instances.keys()),
+    };
+  }
+
+  private restoreLoader(snap: LoaderSnap): void {
+    for (const id of this.rawNodes.keys()) {
+      if (!snap.records.has(id)) this.rawNodes.delete(id);
+    }
+    for (const [id, saved] of snap.records) {
+      const live = this.rawNodes.get(id);
+      if (live) Object.assign(live, saved);
+      else this.rawNodes.set(id, saved);
+    }
+    this.placeholders.clear();
+    for (const id of snap.placeholders) this.placeholders.add(id);
+    this.initialized.clear();
+    for (const id of snap.initialized) this.initialized.add(id);
+    this.structSizeRequirements.clear();
+    for (const [id, size] of snap.sizes) {
+      this.structSizeRequirements.set(id, {
+        dataWordCount: size.dataWordCount,
+        pointerCount: size.pointerCount,
+      });
+    }
+    for (const key of this.instances.keys()) {
+      if (!snap.instanceKeys.has(key)) this.instances.delete(key);
+    }
   }
 
   /**
    * Keep a new node, or a strictly newer reload. An equivalent or older
-   * reload keeps the first node. An incompatible reload throws.
+   * reload keeps the first node, except an unread placeholder, which
+   * accepts an equivalent reload. An incompatible reload throws.
    * The stored record is updated in place. A placeholder mark is written
    * only for a newly inserted id, and cleared when a real node arrives.
+   *
+   * A compatibility check can insert upgrade placeholders and grow structs
+   * before it throws, and prepareNode can grow a parent before that throw.
+   * The outermost ingest rolls those mutations back: node records,
+   * placeholder marks, size requirements, and instances added for the load.
    */
   private adoptNode(raw: RawNodeRecord, isPlaceholder: boolean): void {
     const existing = this.rawNodes.get(raw.id);
@@ -2588,10 +2687,19 @@ export class SchemaLoader {
       this.ingest(ptr, true);
     }).run();
     const wasPlaceholder = this.placeholders.has(existing.id);
-    // C++ prefers the reload when the existing node is still a placeholder.
-    const shouldReplace = wasPlaceholder ? direction !== "older" : direction === "newer";
+    // Prefer the reload while no dependency read has published this placeholder.
+    const preferReplacement = wasPlaceholder && !this.initialized.has(existing.id);
+    const shouldReplace = preferReplacement ? direction !== "older" : direction === "newer";
     if (shouldReplace) overwriteRaw(existing, raw);
-    if (wasPlaceholder && !isPlaceholder) this.placeholders.delete(existing.id);
+    if (wasPlaceholder && !isPlaceholder) {
+      this.placeholders.delete(existing.id);
+      this.initialized.delete(existing.id);
+    }
+  }
+
+  /** Hidden until a dependency read or a real node clears the placeholder. */
+  private placeholderHidden(id: bigint): boolean {
+    return this.placeholders.has(id) && !this.initialized.has(id);
   }
 
   /**
@@ -2693,7 +2801,7 @@ export class SchemaLoader {
   allNodes(): Schema[] {
     const out: Schema[] = [];
     for (const id of this.rawNodes.keys()) {
-      if (this.placeholders.has(id)) continue;
+      if (this.placeholderHidden(id)) continue;
       out.push(this.get(id));
     }
     return out;
@@ -2704,7 +2812,7 @@ export class SchemaLoader {
   }
 
   has(id: bigint): boolean {
-    return this.rawNodes.has(id) && !this.placeholders.has(id);
+    return this.rawNodes.has(id) && !this.placeholderHidden(id);
   }
 
   /** @internal */
@@ -2750,7 +2858,7 @@ export class SchemaLoader {
   getWithBrandMap(id: bigint, brandMap: BrandMap): Schema {
     const raw = this.rawNodes.get(id);
     assertCapnp(
-      raw !== undefined && !this.placeholders.has(id),
+      raw !== undefined && !this.placeholderHidden(id),
       "ARG",
       `schema node 0x${id.toString(16)} is not loaded`,
     );
@@ -2801,10 +2909,20 @@ export class SchemaLoader {
     return this.getWithBrandMap(id, brandMap);
   }
 
-  /** @internal C++ Schema::getDependency: reading a type initializes its placeholder. */
-  private dependency(id: bigint, brandPtr: Ptr | null | undefined, brandMap: BrandMap): Schema {
-    this.placeholders.delete(id);
-    return this.getWithBrandMap(id, this.resolveBrandPtr(brandPtr, brandMap));
+  /**
+   * @internal C++ Schema::getDependency. `brandReady` keeps an already resolved
+   * brand, which group fields need because they share the parent brand.
+   * A placeholder is published only after that brand resolves.
+   */
+  dependency(
+    id: bigint,
+    brandPtr: Ptr | null | undefined,
+    brandMap: BrandMap,
+    brandReady = false,
+  ): Schema {
+    const resolved = brandReady ? brandMap : this.resolveBrandPtr(brandPtr, brandMap);
+    if (this.placeholders.has(id)) this.initialized.add(id);
+    return this.getWithBrandMap(id, resolved);
   }
 
   getStruct(id: bigint): StructSchema {
@@ -3026,7 +3144,7 @@ export class SchemaLoader {
       }
     }
     for (const [id, raw] of this.rawNodes) {
-      if (this.placeholders.has(id)) continue;
+      if (this.placeholderHidden(id)) continue;
       if (raw.displayName.slice(raw.displayNamePrefixLength) === clean) {
         return id;
       }
