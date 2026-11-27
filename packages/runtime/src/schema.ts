@@ -2326,10 +2326,12 @@ class SchemaCompat {
         return;
       }
       this.loadUpgrade(field.typePtr, replacement.groupTypeId, this.existing, field);
+      this.noteNewer();
       return;
     }
     if (replacement.kind === "slot") {
       this.loadUpgrade(replacement.typePtr, field.groupTypeId, this.replacement, replacement);
+      this.noteOlder();
       return;
     }
     assertCapnp(
@@ -2415,6 +2417,7 @@ class SchemaCompat {
       if (allowStruct) {
         if (tag === TypeKind.Struct && typePtr && typePtr.kind === PtrKind.Struct) {
           this.loadUpgrade(replacementPtr, typePtr.getU64(8), null, null);
+          this.noteOlder();
           return;
         }
         if (
@@ -2423,6 +2426,7 @@ class SchemaCompat {
           replacementPtr.kind === PtrKind.Struct
         ) {
           this.loadUpgrade(typePtr, replacementPtr.getU64(8), null, null);
+          this.noteNewer();
           return;
         }
       }

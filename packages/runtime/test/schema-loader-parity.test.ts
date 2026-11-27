@@ -340,8 +340,7 @@ describe("SchemaLoader upgrade bookkeeping", () => {
       loader,
       declNode({
         id: 0x8100n,
-        name: "Box",
-        dataWords: 1,
+        name: "Box2",
         pointers: 1,
         fields: [
           {
@@ -350,10 +349,10 @@ describe("SchemaLoader upgrade bookkeeping", () => {
             element: TypeKind.Struct,
             elementId: target,
           },
-          { name: "n", type: TypeKind.UInt32, def: 0 },
         ],
       }),
     );
+    expect(loader.get(0x8100n).displayName).toBe("Box2");
     expect(loader.has(target)).toBe(false);
     expect(loader.allNodes().map((n) => n.id)).not.toContain(target);
     expect(capture(() => loader.get(target))).toBeInstanceOf(CapnpError);
@@ -393,6 +392,7 @@ describe("SchemaLoader upgrade bookkeeping", () => {
       }),
     );
     loadFlat(loader, groupNode(0x8200n, "Parent", groupId, 1));
+    expect(loader.get(0x8200n).asStruct().getFields()[0]!.kind).toBe("group");
     expect(loader.has(groupId)).toBe(true);
     expect(loader.allNodes().map((n) => n.id)).toContain(groupId);
     expect(fetched.displayName).toBe("(unknown type used in Parent)");
@@ -409,6 +409,55 @@ describe("SchemaLoader upgrade bookkeeping", () => {
     );
     expect(loader.get(groupId).displayName).toBe("(unknown type used in Parent)");
     expect(fetched.getFields()).toHaveLength(1);
+  });
+
+  test("a slot upgrade mixed with a dropped field throws", () => {
+    const loader = new SchemaLoader();
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x8210n,
+        name: "Parent",
+        dataWords: 2,
+        fields: [
+          { name: "x", type: TypeKind.UInt64, def: 0n },
+          { name: "y", type: TypeKind.UInt64, offset: 1, def: 0n },
+        ],
+      }),
+    );
+    const thrown = capture(() => {
+      loadFlat(loader, groupNode(0x8210n, "Parent2", 0x8211n, 2));
+    });
+    expect(thrown).toBeInstanceOf(CapnpError);
+    expect((thrown as CapnpError).message).toContain("upgrades and some");
+    expect(loader.get(0x8210n).displayName).toBe("Parent");
+    expect(loader.get(0x8210n).asStruct().getFields()).toHaveLength(2);
+  });
+
+  test("a group field downgraded to a slot keeps the group", () => {
+    const loader = new SchemaLoader();
+    const groupId = 0x8231n;
+    loadFlat(
+      loader,
+      declNode({
+        id: groupId,
+        name: "G",
+        dataWords: 1,
+        fields: [{ name: "x", type: TypeKind.UInt64, def: 1n }],
+      }),
+    );
+    loadFlat(loader, groupNode(0x8230n, "V1", groupId, 1));
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x8230n,
+        name: "V2",
+        dataWords: 1,
+        fields: [{ name: "x", type: TypeKind.UInt64, def: 1n }],
+      }),
+    );
+    expect(loader.get(0x8230n).displayName).toBe("V1");
+    expect(loader.get(0x8230n).asStruct().getFields()[0]!.kind).toBe("group");
   });
 
   test("mixed upgrade and downgrade throws and keeps the first node", () => {
@@ -747,12 +796,8 @@ describe("SchemaLoader upgrade bookkeeping", () => {
       declNode({
         id: 0x8750n,
         name: "Box",
-        dataWords: 1,
         pointers: 1,
-        fields: [
-          { name: "items", type: TypeKind.List, element: TypeKind.UInt32 },
-          { name: "n", type: TypeKind.UInt32, def: 1 },
-        ],
+        fields: [{ name: "items", type: TypeKind.List, element: TypeKind.UInt32 }],
       }),
     );
     const fetched = loader.get(0x8750n).asStruct();
@@ -761,7 +806,6 @@ describe("SchemaLoader upgrade bookkeeping", () => {
       declNode({
         id: 0x8750n,
         name: "Box2",
-        dataWords: 1,
         pointers: 1,
         fields: [
           {
@@ -770,8 +814,6 @@ describe("SchemaLoader upgrade bookkeeping", () => {
             element: TypeKind.Struct,
             elementId: target,
           },
-          { name: "n", type: TypeKind.UInt32, def: 1 },
-          { name: "m", type: TypeKind.UInt32, offset: 1, def: 0 },
         ],
       }),
     );
@@ -782,5 +824,87 @@ describe("SchemaLoader upgrade bookkeeping", () => {
     expect(element.which).toBe("struct");
     expect(element.asStruct().getFields()).toHaveLength(1);
     expect(loader.has(target)).toBe(true);
+  });
+
+  test("a list struct upgrade mixed with a dropped field throws", () => {
+    const loader = new SchemaLoader();
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x8752n,
+        name: "Box",
+        dataWords: 1,
+        pointers: 1,
+        fields: [
+          { name: "items", type: TypeKind.List, element: TypeKind.UInt32 },
+          { name: "n", type: TypeKind.UInt32, def: 1 },
+        ],
+      }),
+    );
+    const thrown = capture(() => {
+      loadFlat(
+        loader,
+        declNode({
+          id: 0x8752n,
+          name: "Box2",
+          pointers: 1,
+          fields: [
+            {
+              name: "items",
+              type: TypeKind.List,
+              element: TypeKind.Struct,
+              elementId: 0x8753n,
+            },
+          ],
+        }),
+      );
+    });
+    expect(thrown).toBeInstanceOf(CapnpError);
+    expect((thrown as CapnpError).message).toContain("upgrades and some");
+    expect(loader.get(0x8752n).displayName).toBe("Box");
+    expect(loader.get(0x8752n).asStruct().getFields()).toHaveLength(2);
+  });
+
+  test("a list struct downgraded to a scalar keeps the struct list", () => {
+    const loader = new SchemaLoader();
+    const target = 0x8755n;
+    loadFlat(
+      loader,
+      declNode({
+        id: target,
+        name: "Item",
+        dataWords: 1,
+        fields: [{ name: "member0", type: TypeKind.UInt32, def: 0 }],
+      }),
+    );
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x8754n,
+        name: "Box",
+        pointers: 1,
+        fields: [
+          {
+            name: "items",
+            type: TypeKind.List,
+            element: TypeKind.Struct,
+            elementId: target,
+          },
+        ],
+      }),
+    );
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x8754n,
+        name: "BoxOld",
+        pointers: 1,
+        fields: [{ name: "items", type: TypeKind.List, element: TypeKind.UInt32 }],
+      }),
+    );
+    expect(loader.get(0x8754n).displayName).toBe("Box");
+    expect(
+      loader.get(0x8754n).asStruct().getFields()[0]!.getType().asList().getElementType().which,
+    ).toBe("struct");
   });
 });
