@@ -2210,6 +2210,14 @@ function valueKindTag(which: SchemaValue["which"]): number {
 
 function assertDefaultCompatible(existing: SchemaValue, replacement: SchemaValue): void {
   assertCapnp(existing.which === replacement.which, "SCHEMA", "default value changed");
+  if (existing.which === "float32" && replacement.which === "float32") {
+    assertCapnp(existing.rawBits === replacement.rawBits, "SCHEMA", "default value changed");
+    return;
+  }
+  if (existing.which === "float64" && replacement.which === "float64") {
+    assertCapnp(existing.rawBits === replacement.rawBits, "SCHEMA", "default value changed");
+    return;
+  }
   const layout = slotLayout(valueKindTag(existing.which));
   if (!layout || layout.pointer || layout.bits === 0) return;
   assertCapnp(

@@ -189,6 +189,116 @@ describe("SchemaLoader schema reload", () => {
     expect(st.getFields()[0]!.defaultValue).toEqual({ which: "uint32", value: 7 });
   });
 
+  test("an identical NaN float default reloads", () => {
+    const loader = new SchemaLoader();
+    const nan32 = 0x7fc00000;
+    const nan64 = 0x7ff8000000000000n;
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x7771n,
+        name: "F32",
+        dataWords: 1,
+        fields: [{ name: "x", type: TypeKind.Float32, def: nan32 }],
+      }),
+    );
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x7771n,
+        name: "F32b",
+        dataWords: 1,
+        fields: [{ name: "x", type: TypeKind.Float32, def: nan32 }],
+      }),
+    );
+    expect(loader.get(0x7771n).displayName).toBe("F32");
+    expect(loader.get(0x7771n).asStruct().getFields()[0]!.defaultValue).toMatchObject({
+      which: "float32",
+      rawBits: nan32,
+    });
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x7773n,
+        name: "F64",
+        dataWords: 1,
+        fields: [{ name: "x", type: TypeKind.Float64, def: nan64 }],
+      }),
+    );
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x7773n,
+        name: "F64b",
+        dataWords: 1,
+        fields: [{ name: "x", type: TypeKind.Float64, def: nan64 }],
+      }),
+    );
+    expect(loader.get(0x7773n).displayName).toBe("F64");
+    expect(loader.get(0x7773n).asStruct().getFields()[0]!.defaultValue).toMatchObject({
+      which: "float64",
+      rawBits: nan64,
+    });
+  });
+
+  test("negative zero and positive zero float defaults differ", () => {
+    const loader = new SchemaLoader();
+    const neg32 = 0x80000000;
+    const neg64 = 0x8000000000000000n;
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x7772n,
+        name: "Z32",
+        dataWords: 1,
+        fields: [{ name: "x", type: TypeKind.Float32, def: neg32 }],
+      }),
+    );
+    const thrown32 = capture(() => {
+      loadFlat(
+        loader,
+        declNode({
+          id: 0x7772n,
+          name: "Z32b",
+          dataWords: 1,
+          fields: [{ name: "x", type: TypeKind.Float32, def: 0 }],
+        }),
+      );
+    });
+    expect(thrown32).toBeInstanceOf(CapnpError);
+    expect((thrown32 as CapnpError).message).toContain("default value changed");
+    expect(loader.get(0x7772n).asStruct().getFields()[0]!.defaultValue).toMatchObject({
+      which: "float32",
+      rawBits: neg32,
+    });
+    loadFlat(
+      loader,
+      declNode({
+        id: 0x7774n,
+        name: "Z64",
+        dataWords: 1,
+        fields: [{ name: "x", type: TypeKind.Float64, def: neg64 }],
+      }),
+    );
+    const thrown64 = capture(() => {
+      loadFlat(
+        loader,
+        declNode({
+          id: 0x7774n,
+          name: "Z64b",
+          dataWords: 1,
+          fields: [{ name: "x", type: TypeKind.Float64, def: 0n }],
+        }),
+      );
+    });
+    expect(thrown64).toBeInstanceOf(CapnpError);
+    expect((thrown64 as CapnpError).message).toContain("default value changed");
+    expect(loader.get(0x7774n).asStruct().getFields()[0]!.defaultValue).toMatchObject({
+      which: "float64",
+      rawBits: neg64,
+    });
+  });
+
   test("a fetched schema sees a newer field list", () => {
     const loader = new SchemaLoader();
     loadFlat(loader, u32Struct(0x7777n, "V1", [{ name: "x", offset: 0, def: 7 }]));
